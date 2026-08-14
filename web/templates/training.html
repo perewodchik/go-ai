@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+{% block title %}Go AI — Training{% endblock %}
+
+{% block content %}
+{% if not active_model %}
+<div class="training-container">
+    <div class="no-model-state glass" style="text-align: center; padding: 4rem 2rem; margin-top: 2rem;">
+        <div class="no-model-icon" style="font-size: 3rem; margin-bottom: 1rem;">🧠</div>
+        <h2>No Model Selected</h2>
+        <p style="color: var(--text-muted); margin-bottom: 2rem;">You must create or select a model from the Dashboard before you can train.</p>
+        <a href="/" class="btn-primary" style="text-decoration: none;">Go to Dashboard</a>
+    </div>
+</div>
+{% else %}
+<div class="training-container">
+    <h1 class="page-title">Training: {{ active_model.name }}</h1>
+
+    <!-- Hero Elo + tiles -->
+    <div class="hero-row">
+        <div class="hero-elo glass">
+            <div class="hero-elo-label">Elo Rating</div>
+            <div class="hero-elo-value" id="t-elo">{{ "%.0f"|format(status.elo or 500) }}</div>
+            <div class="hero-elo-meta">
+                <span class="stat-rank" id="t-rank">{{ status.kyu_rank or '30k' }}</span>
+                <span class="hero-elo-trend" id="t-elo-trend"></span>
+            </div>
+        </div>
+        <div class="hero-tiles">
+            <div class="hero-tile glass">
+                <div class="hero-tile-label">Iteration</div>
+                <div class="hero-tile-value" id="t-iter">{{ status.iteration or 0 }}</div>
+            </div>
+            <div class="hero-tile glass">
+                <div class="hero-tile-label">Games</div>
+                <div class="hero-tile-value" id="t-games">{{ status.total_games or 0 }}</div>
+            </div>
+            <div class="hero-tile glass">
+                <div class="hero-tile-label">WR vs Random</div>
+                <div class="hero-tile-value" id="t-wr-random">—</div>
+            </div>
+            <div class="hero-tile glass">
+                <div class="hero-tile-label">Best Elo</div>
+                <div class="hero-tile-value" id="t-best-elo">—</div>
+            </div>
+            <div class="hero-tile glass hero-tile-wide">
+                <div class="hero-tile-label">Device / Status</div>
+                <div class="hero-tile-value hero-device">
+                    <span id="t-device">—</span>
+                    <span class="hero-status">
+                        <span class="status-dot" id="t-status-dot"></span>
+                        <span id="t-status-label">Idle</span>
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Learning Stats -->
+    <div class="learning-stats glass">
+        <h3>📊 Learning Stats <small>(self-play only)</small></h3>
+        <div class="lstats-grid">
+            <div class="lstat-item">
+                <span class="lstat-label">Avg Time / Game</span>
+                <span class="lstat-value" id="ls-avg-time-total">—</span>
+            </div>
+            <div class="lstat-item">
+                <span class="lstat-label">Avg Time / Iteration</span>
+                <span class="lstat-value" id="ls-iter-time-avg">—</span>
+            </div>
+            <div class="lstat-item">
+                <span class="lstat-label">Avg Game Length</span>
+                <span class="lstat-value" id="ls-game-length">—</span>
+            </div>
+            <div class="lstat-item">
+                <span class="lstat-label">Replay Buffer</span>
+                <span class="lstat-value" id="ls-buffer">—</span>
+            </div>
+            <div class="lstat-item">
+                <span class="lstat-label">Learning Rate</span>
+                <span class="lstat-value" id="ls-lr">—</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Self-Play Balance -->
+    <div class="selfplay-balance glass">
+        <div class="section-header-row">
+            <h3>⚖️ Self-Play Balance <small>(black vs white)</small></h3>
+            <div class="graph-filter-buttons" id="selfplay-filter-btns">
+                <button class="filter-btn active" data-limit="all" title="Show all stats & games">All</button>
+                <button class="filter-btn" data-limit="10" title="Show last 10 games">10</button>
+                <button class="filter-btn" data-limit="20" title="Show last 20 games">20</button>
+                <button class="filter-btn" data-limit="50" title="Show last 50 games">50</button>
+                <button class="filter-btn" data-limit="100" title="Show last 100 games">100</button>
+            </div>
+        </div>
+        <div class="balance-bar">
+            <div class="balance-fill-black" id="balance-black-fill" style="width:0%"></div>
+            <div class="balance-fill-white" id="balance-white-fill" style="width:0%"></div>
+        </div>
+        <div class="balance-labels">
+            <span>⚫ Black <strong id="ls-wr-black">—</strong></span>
+            <span>⚪ White <strong id="ls-wr-white">—</strong></span>
+        </div>
+
+        <div class="margin-wins" id="selfplay-wins">
+            <span class="win-pill win-pill-black">⚫ <strong id="sp-black-wins">0</strong> wins</span>
+            <span class="win-pill win-pill-white">⚪ <strong id="sp-white-wins">0</strong> wins</span>
+        </div>
+        <div class="margin-chart-wrap">
+            <div class="margin-axis-label margin-axis-top">⚫ Black winning →</div>
+            <canvas id="selfplay-margin-chart"></canvas>
+            <div class="margin-axis-label margin-axis-bottom">⚪ White winning →</div>
+        </div>
+        <p class="margin-caption">Each bar is one self-play game (oldest → newest). Height = winning margin in points.</p>
+    </div>
+
+    <!-- vs Random Bot -->
+    <div class="selfplay-balance glass">
+        <div class="section-header-row">
+            <h3>🤖 vs Random Bot <small>(evaluation games)</small></h3>
+            <div class="graph-filter-buttons" id="random-filter-btns">
+                <button class="filter-btn active" data-limit="all" title="Show all stats & games">All</button>
+                <button class="filter-btn" data-limit="10" title="Show last 10 games">10</button>
+                <button class="filter-btn" data-limit="20" title="Show last 20 games">20</button>
+                <button class="filter-btn" data-limit="50" title="Show last 50 games">50</button>
+                <button class="filter-btn" data-limit="100" title="Show last 100 games">100</button>
+            </div>
+        </div>
+        <div class="balance-bar">
+            <div class="balance-fill-win" id="rand-win-fill" style="width:0%"></div>
+            <div class="balance-fill-loss" id="rand-loss-fill" style="width:0%"></div>
+        </div>
+        <div class="balance-labels">
+            <span>✅ AI wins <strong id="rand-wr">—</strong></span>
+            <span>❌ AI losses <strong id="rand-lr">—</strong></span>
+        </div>
+
+        <div class="margin-wins" id="random-wins">
+            <span class="win-pill win-pill-win">✅ <strong id="rand-wins">0</strong> wins</span>
+            <span class="win-pill win-pill-loss">❌ <strong id="rand-losses">0</strong> losses</span>
+        </div>
+        <div class="margin-chart-wrap">
+            <div class="margin-axis-label margin-axis-top">✅ AI winning →</div>
+            <canvas id="random-margin-chart"></canvas>
+            <div class="margin-axis-label margin-axis-bottom">❌ AI losing →</div>
+        </div>
+        <p class="margin-caption">Each bar is one game vs the random bot (oldest → newest). Height = margin in points.</p>
+    </div>
+
+    <!-- Charts / Table -->
+    <div class="section-header-row">
+        <h3 class="metrics-title">📈 Training Metrics</h3>
+        <div class="graph-filter-buttons" id="metrics-view-toggle">
+            <button class="filter-btn active" data-view="chart" title="Show charts">Chart</button>
+            <button class="filter-btn" data-view="table" title="Show raw values in a scrollable table">Table</button>
+        </div>
+    </div>
+
+    <!-- Chart mode -->
+    <div class="charts-grid" id="metrics-charts">
+        <div class="chart-card glass">
+            <h3>Elo Rating Over Time</h3>
+            <canvas id="elo-chart"></canvas>
+        </div>
+        <div class="chart-card glass">
+            <h3>Policy Loss</h3>
+            <canvas id="policy-loss-chart"></canvas>
+        </div>
+        <div class="chart-card glass">
+            <h3>Value Loss</h3>
+            <canvas id="value-loss-chart"></canvas>
+        </div>
+    </div>
+
+    <!-- Table mode (hidden by default) -->
+    <div class="metrics-table-card glass" id="metrics-table-card" hidden>
+        <div class="metrics-table-scroll">
+            <table class="metrics-table">
+                <thead>
+                    <tr>
+                        <th>Iter</th>
+                        <th>Elo</th>
+                        <th>Rank</th>
+                        <th>Policy Loss</th>
+                        <th>Value Loss</th>
+                        <th>Total Loss</th>
+                        <th>WR vs Random</th>
+                    </tr>
+                </thead>
+                <tbody id="metrics-table-body"></tbody>
+            </table>
+        </div>
+        <p class="metrics-table-empty" id="metrics-table-empty">No iterations recorded yet.</p>
+    </div>
+
+    <!-- Log + Game browser -->
+    <div class="bottom-panels">
+        <div class="log-panel glass">
+            <h3>Training Log</h3>
+            <div id="training-log" class="log-content"></div>
+        </div>
+        <div class="games-panel glass">
+            <h3>Self-Play Games</h3>
+            <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem;">Click a game to open it in the full review page.</p>
+            <div id="games-list" class="games-list"></div>
+        </div>
+    </div>
+
+    <!-- Milestone notifications -->
+    <div id="milestone-toast" class="toast" style="display:none;">
+        <span id="milestone-text"></span>
+    </div>
+</div>
+
+<!-- Sticky command bar — always visible at bottom -->
+<div class="command-bar" id="command-bar">
+    <!-- Slide-up tuning panel (hidden by default) -->
+    <div class="tune-panel" id="tune-panel" hidden>
+        <div class="tune-panel-inner">
+            <div class="tune-panel-head">
+                <span class="tune-title">⚙ Tune Parameters</span>
+                <span class="tune-hint">Applies from the next iteration — no restart needed.</span>
+            </div>
+            <div class="tune-grid">
+                <div class="tune-field">
+                    <label for="tune-sp" title="Games the bot plays against itself per iteration">Self-Play Games</label>
+                    <input type="number" id="tune-sp" min="1" max="100" step="1">
+                </div>
+                <div class="tune-field">
+                    <label for="tune-eval" title="Games vs the random bot per iteration to estimate Elo">Eval Games</label>
+                    <input type="number" id="tune-eval" min="1" max="100" step="1">
+                </div>
+                <div class="tune-field">
+                    <label for="tune-mcts" title="Look-ahead simulations per move — the main quality/speed lever">MCTS Sims</label>
+                    <input type="number" id="tune-mcts" min="10" max="1000" step="10">
+                </div>
+                <div class="tune-field">
+                    <label for="tune-cpuct" title="Exploration vs exploitation in the search">c_puct</label>
+                    <input type="number" id="tune-cpuct" min="0.1" max="5" step="0.1">
+                </div>
+                <div class="tune-field">
+                    <label for="tune-lr" title="Gradient step size — lower if training is unstable">Learning Rate</label>
+                    <input type="number" id="tune-lr" min="0.0001" max="0.05" step="0.0001">
+                </div>
+                <div class="tune-field">
+                    <label for="tune-temp-thresh" title="Moves over which temperature smoothly decays">Temp Decay Moves</label>
+                    <input type="number" id="tune-temp-thresh" min="0" max="200" step="1">
+                </div>
+                <div class="tune-field">
+                    <label for="tune-temp-init" title="Early-game move randomness temperature">Temp Init (Early)</label>
+                    <input type="number" id="tune-temp-init" min="0.0" max="2.0" step="0.1">
+                </div>
+                <div class="tune-field">
+                    <label for="tune-temp-final" title="Late-game move randomness temperature">Temp Final (Late)</label>
+                    <input type="number" id="tune-temp-final" min="0.0" max="1.0" step="0.05">
+                </div>
+            </div>
+            <div class="tune-panel-actions">
+                <button id="btn-tune-cancel" class="cmd-btn cmd-btn-save">Cancel</button>
+                <button id="btn-tune-apply" class="cmd-btn cmd-btn-apply">✓ Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="command-bar-inner">
+        <div class="cmd-actions">
+            <button id="btn-tune-toggle" class="cmd-btn cmd-btn-tune">⚙ <span class="cmd-btn-label">Tune</span></button>
+            <button id="btn-start-training" class="cmd-btn cmd-btn-start">▶ <span class="cmd-btn-label">Start Training</span></button>
+            <button id="btn-stop-training" class="cmd-btn cmd-btn-stop" style="display:none;" title="Graceful stop after current iteration finishes">⏹ <span class="cmd-btn-label">Stop Training</span></button>
+            <button id="btn-force-stop" class="cmd-btn cmd-btn-force-stop" style="display:none;" title="Immediately abort training & restore last clean checkpoint">⚡ <span class="cmd-btn-label">Force Stop</span></button>
+        </div>
+    </div>
+</div>
+
+<!-- Lightweight action toast -->
+<div id="action-toast" class="toast" style="display:none;"></div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/board.js') }}"></script>
+<script src="{{ url_for('static', filename='js/charts.js') }}"></script>
+<script src="{{ url_for('static', filename='js/training.js') }}"></script>
+{% endblock %}

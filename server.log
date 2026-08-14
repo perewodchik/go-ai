@@ -1,0 +1,66 @@
+Werkzeug appears to be used in a production deployment. Consider switching to a production web server instead.
+
+🎯 Go AI server starting on http://localhost:5001
+   → Dashboard: http://localhost:5001/
+   → Play:      http://localhost:5001/play
+   → Training:  http://localhost:5001/training/
+
+ * Serving Flask app 'web.app'
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5001
+ * Running on http://172.18.73.5:5001
+[33mPress CTRL+C to quit[0m
+127.0.0.1 - - [12/Aug/2026 19:52:18] "GET /play HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:18] "[36mGET /static/js/game.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:18] "[36mGET /static/js/board.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:18] "[36mGET /static/css/style.css HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:18] "GET /socket.io/?EIO=4&transport=polling&t=P_s1zwP HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:18] "POST /socket.io/?EIO=4&transport=polling&t=P_s1zxD&sid=LdLqMd6spo-pcWkSAAAA HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:18] "GET /socket.io/?EIO=4&transport=polling&t=P_s1zxD.0&sid=LdLqMd6spo-pcWkSAAAA HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:18] "GET /socket.io/?EIO=4&transport=polling&t=P_s1zxt&sid=LdLqMd6spo-pcWkSAAAA HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:18] "POST /socket.io/?EIO=4&transport=polling&t=P_s1zxt.0&sid=LdLqMd6spo-pcWkSAAAA HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:21] "GET /training/ HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:21] "[36mGET /static/css/style.css HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:21] "[36mGET /static/js/charts.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:21] "[36mGET /static/js/board.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:21] "[36mGET /static/js/training.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:21] "GET /socket.io/?EIO=4&transport=polling&t=P_s1-WR HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:21] "POST /socket.io/?EIO=4&transport=polling&t=P_s1-YJ&sid=0h7_l3Aci8GDwrYwAAAC HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:21] "GET /socket.io/?EIO=4&transport=polling&t=P_s1-YJ.0&sid=0h7_l3Aci8GDwrYwAAAC HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:58] "GET /play HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:58] "[36mGET /static/js/game.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:58] "[36mGET /static/css/style.css HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:58] "[36mGET /static/js/board.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:52:58] "GET /socket.io/?EIO=4&transport=polling&t=P_s27gC HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:58] "POST /socket.io/?EIO=4&transport=polling&t=P_s27gV&sid=8l3a31eeXnTez0vIAAAE HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:58] "GET /socket.io/?EIO=4&transport=polling&t=P_s27gW&sid=8l3a31eeXnTez0vIAAAE HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:58] "GET /socket.io/?EIO=4&transport=polling&t=P_s27hK&sid=8l3a31eeXnTez0vIAAAE HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:52:58] "POST /socket.io/?EIO=4&transport=polling&t=P_s27hK.0&sid=8l3a31eeXnTez0vIAAAE HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "GET /training/ HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "[36mGET /static/css/style.css HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "[36mGET /static/js/board.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "[36mGET /static/js/charts.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "GET /static/js/training.js HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "GET /socket.io/?EIO=4&transport=polling&t=P_s28tx HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "POST /socket.io/?EIO=4&transport=polling&t=P_s28uT&sid=rodVLsARRRC45b9vAAAG HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "GET /socket.io/?EIO=4&transport=polling&t=P_s28uU&sid=rodVLsARRRC45b9vAAAG HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "GET /training/api/games HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "GET /training/api/metrics HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "GET /training/api/checkpoints HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "GET /socket.io/?EIO=4&transport=polling&t=P_s28us&sid=rodVLsARRRC45b9vAAAG HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:53:03] "POST /socket.io/?EIO=4&transport=polling&t=P_s28us.0&sid=rodVLsARRRC45b9vAAAG HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "GET /training/ HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "[36mGET /static/css/style.css HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "[36mGET /static/js/board.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "[36mGET /static/js/training.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "[36mGET /static/js/charts.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "GET /socket.io/?EIO=4&transport=polling&t=P_s2bDL HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "POST /socket.io/?EIO=4&transport=polling&t=P_s2bDt&sid=C98hyGQGQGzKjwlXAAAI HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "GET /socket.io/?EIO=4&transport=polling&t=P_s2bDu&sid=C98hyGQGQGzKjwlXAAAI HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "GET /training/api/metrics HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "GET /training/api/games HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "GET /training/api/checkpoints HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "GET /socket.io/?EIO=4&transport=polling&t=P_s2bEF&sid=C98hyGQGQGzKjwlXAAAI HTTP/1.1" 200 -
+127.0.0.1 - - [12/Aug/2026 19:54:59] "POST /socket.io/?EIO=4&transport=polling&t=P_s2bEF.0&sid=C98hyGQGQGzKjwlXAAAI HTTP/1.1" 200 -

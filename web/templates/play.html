@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Go AI — Play{% endblock %}
+
+{% block content %}
+{% if not active_model %}
+<div class="play-container">
+    <div class="no-model-state glass" style="text-align: center; padding: 4rem 2rem; margin-top: 2rem;">
+        <div class="no-model-icon" style="font-size: 3rem; margin-bottom: 1rem;">🎮</div>
+        <h2>No Model Selected</h2>
+        <p style="color: var(--text-muted); margin-bottom: 2rem;">You must create or select a model from the Dashboard before you can play against it.</p>
+        <a href="/" class="btn-primary" style="text-decoration: none;">Go to Dashboard</a>
+    </div>
+</div>
+{% else %}
+<div class="play-container">
+    <!-- Setup panel (shown before game starts) -->
+    <div id="setup-panel" class="setup-panel glass">
+        <h2>Play vs {{ active_model.name }}</h2>
+        
+        <!-- Display locked model config -->
+        <div class="locked-config" style="display: flex; gap: 1rem; margin-bottom: 1.5rem; padding: 1rem; background: rgba(0,0,0,0.2); border-radius: 8px;">
+            <div style="flex: 1;">
+                <div style="font-size: 0.8rem; color: var(--text-muted);">Board Size</div>
+                <div style="font-weight: 500;">{{ active_model.board_size }}×{{ active_model.board_size }}</div>
+            </div>
+            <div style="flex: 1;">
+                <div style="font-size: 0.8rem; color: var(--text-muted);">Komi</div>
+                <div style="font-weight: 500;">{{ active_model.komi }}</div>
+            </div>
+            <div style="flex: 1;">
+                <div style="font-size: 0.8rem; color: var(--text-muted);">Ruleset</div>
+                <div style="font-weight: 500;">{{ active_model.ruleset | capitalize }}</div>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>Your Color</label>
+            <div class="color-picker">
+                <button class="color-btn active" data-color="black">⚫ Black</button>
+                <button class="color-btn" data-color="white">⚪ White</button>
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Mode</label>
+            <div class="mode-picker">
+                <button class="mode-btn" data-mode="easy">🎓 Easy<small>Undo, suggestions, analysis</small></button>
+                <button class="mode-btn active" data-mode="hard">⚔️ Hard<small>No assistance</small></button>
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Bot Strength (MCTS Simulations)</label>
+            <input type="range" id="simulations" min="10" max="400" value="200" step="10">
+            <span id="sim-label">200</span>
+        </div>
+        <button id="start-game" class="btn-primary">Start Game</button>
+    </div>
+
+    <!-- Game board (shown during game) -->
+    <div id="game-area" class="game-area" style="display:none;">
+        <div class="board-section">
+            <canvas id="go-board"></canvas>
+        </div>
+        <div class="info-panel glass">
+            <div class="game-info">
+                <h3 id="game-status">Your turn</h3>
+                <div class="score-display">
+                    <div class="score-item">
+                        <span class="stone black-stone">⚫</span>
+                        <span>Black: <strong id="black-score">0</strong></span>
+                        <span class="captures" id="black-captures">Cap: 0</span>
+                    </div>
+                    <div class="score-item">
+                        <span class="stone white-stone">⚪</span>
+                        <span>White: <strong id="white-score">0</strong></span>
+                        <span class="captures" id="white-captures">Cap: 0</span>
+                    </div>
+                </div>
+                <div id="move-counter" class="move-counter">Move: 0</div>
+            </div>
+            <div class="game-controls">
+                <button id="btn-pass" class="btn-secondary">Pass</button>
+                <button id="btn-resign" class="btn-danger">Resign</button>
+                <button id="btn-undo" class="btn-secondary easy-only" style="display:none;">Undo</button>
+                <button id="btn-suggest" class="btn-secondary easy-only" style="display:none;">Suggest</button>
+            </div>
+            <div class="toggle-group">
+                <label class="toggle">
+                    <input type="checkbox" id="toggle-estimate">
+                    <span class="toggle-slider"></span>
+                    Territory Estimation
+                </label>
+            </div>
+            <button id="btn-new-game" class="btn-primary" style="display:none;">New Game</button>
+        </div>
+    </div>
+
+    <!-- Game over modal -->
+    <div id="game-over-modal" class="modal" style="display:none;">
+        <div class="modal-content glass">
+            <h2 id="result-title">Game Over</h2>
+            <p id="result-details"></p>
+            <div class="result-scores">
+                <div><strong>Black:</strong> <span id="final-black">0</span></div>
+                <div><strong>White:</strong> <span id="final-white">0</span></div>
+            </div>
+            <button onclick="document.getElementById('game-over-modal').style.display='none'" class="btn-primary">Close</button>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/board.js') }}"></script>
+<script src="{{ url_for('static', filename='js/game.js') }}"></script>
+{% endblock %}

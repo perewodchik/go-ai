@@ -1,0 +1,27 @@
+Traceback (most recent call last):
+  File "/Users/perewodchik/.gemini/antigravity/scratch/go-ai/venv/lib/python3.14/site-packages/socketio/client.py", line 149, in connect
+    self.eio.connect(real_url, headers=real_headers,
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                     transports=transports,
+                     ^^^^^^^^^^^^^^^^^^^^^^
+                     engineio_path=socketio_path)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/perewodchik/.gemini/antigravity/scratch/go-ai/venv/lib/python3.14/site-packages/engineio/client.py", line 96, in connect
+    return getattr(self, '_connect_' + self.transports[0])(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        url, headers or {}, engineio_path)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/perewodchik/.gemini/antigravity/scratch/go-ai/venv/lib/python3.14/site-packages/engineio/client.py", line 201, in _connect_polling
+    raise exceptions.ConnectionError(
+        r or 'Connection refused by the server')
+engineio.exceptions.ConnectionError: HTTPConnectionPool(host='localhost', port=5001): Max retries exceeded with url: /socket.io/?transport=polling&EIO=4&t=1786539129.11779 (Caused by NewConnectionError("HTTPConnection(host='localhost', port=5001): Failed to establish a new connection: [Errno 61] Connection refused"))
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/perewodchik/.gemini/antigravity/scratch/go-ai/test_socket.py", line 16, in <module>
+    sio.connect('http://localhost:5001')
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/perewodchik/.gemini/antigravity/scratch/go-ai/venv/lib/python3.14/site-packages/socketio/client.py", line 161, in connect
+    raise exceptions.ConnectionError(exc.args[0]) from exc
+socketio.exceptions.ConnectionError: HTTPConnectionPool(host='localhost', port=5001): Max retries exceeded with url: /socket.io/?transport=polling&EIO=4&t=1786539129.11779 (Caused by NewConnectionError("HTTPConnection(host='localhost', port=5001): Failed to establish a new connection: [Errno 61] Connection refused"))

@@ -1,0 +1,32 @@
+{
+  "id": "hot-boi",
+  "name": "hot boi",
+  "board_size": 9,
+  "komi": 6.5,
+  "ruleset": "chinese",
+  "training": {
+    "num_self_play_games": 10,
+    "eval_games": 4,
+    "num_simulations": 800,
+    "c_puct": 2.0,
+    "learning_rate": 0.002,
+    "batch_size": 32,
+    "num_epochs_per_iteration": 3,
+    "replay_buffer_size": 50000,
+    "reflection_interval_games": 50,
+    "temperature_threshold": 110,
+    "temperature_init": 0.8,
+    "temperature_final": 0.2
+  },
+  "network": {
+    "size_preset": "small",
+    "num_res_blocks": 4,
+    "num_filters": 64,
+    "value_head_hidden": 64
+  },
+  "created_at": "2026-08-13T20:53:38.198486",
+  "elo": 778.3022980182222,
+  "kyu_rank": "27k",
+  "iteration": 48,
+  "total_games": 680
+}

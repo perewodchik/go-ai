@@ -1,0 +1,103 @@
+{
+  "board_size": 9,
+  "komi": 6.5,
+  "moves": [
+    {
+      "color": 1,
+      "move": [
+        3,
+        3
+      ],
+      "move_num": 0
+    },
+    {
+      "color": 2,
+      "move": [
+        3,
+        0
+      ],
+      "move_num": 1
+    },
+    {
+      "color": 1,
+      "move": [
+        2,
+        7
+      ],
+      "move_num": 2
+    },
+    {
+      "color": 2,
+      "move": [
+        5,
+        0
+      ],
+      "move_num": 3
+    },
+    {
+      "color": 1,
+      "move": [
+        8,
+        2
+      ],
+      "move_num": 4
+    },
+    {
+      "color": 2,
+      "move": [
+        8,
+        8
+      ],
+      "move_num": 5
+    },
+    {
+      "color": 1,
+      "move": [
+        8,
+        3
+      ],
+      "move_num": 6
+    },
+    {
+      "color": 2,
+      "move": [
+        8,
+        6
+      ],
+      "move_num": 7
+    },
+    {
+      "color": 1,
+      "move": [
+        3,
+        5
+      ],
+      "move_num": 8
+    },
+    {
+      "color": 2,
+      "move": [
+        -1,
+        -1
+      ],
+      "move_num": 9
+    },
+    {
+      "color": 1,
+      "move": [
+        -1,
+        -1
+      ],
+      "move_num": 10
+    }
+  ],
+  "num_moves": 11,
+  "winner": 2,
+  "black_score": 5.0,
+  "white_score": 10.5,
+  "margin": 5.5,
+  "timestamp": "2026-08-13T01:59:07.631496",
+  "elapsed_seconds": 17.6,
+  "iteration": 1,
+  "game_index": 21
+}

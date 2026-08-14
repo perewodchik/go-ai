@@ -1,0 +1,1 @@
+# Scoring strategies for Go

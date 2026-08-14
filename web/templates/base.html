@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Go AI{% endblock %}</title>
+    <meta name="description" content="AlphaZero-style Go AI with self-play training and interactive web interface">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=14">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>
+        // Global SocketIO connection — shared by page scripts (e.g. training.js).
+        const socket = io();
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Mobile menu toggle
+            const menuBtn = document.getElementById('menu-btn');
+            if (menuBtn) {
+                menuBtn.addEventListener('click', () => {
+                    const links = document.querySelector('.nav-links');
+                    links.classList.toggle('open');
+                });
+            }
+        });
+    </script>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <a href="/" class="nav-brand-link"><span class="nav-icon">⚫</span><span class="nav-brand-text">Go AI</span></a>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-link {% if request.path == '/' %}active{% endif %}">Dashboard</a>
+            <a href="/play" class="nav-link {% if request.path == '/play' %}active{% endif %}">Play</a>
+            <a href="/training/" class="nav-link {% if request.path == '/training/' %}active{% endif %}">Training</a>
+            <a href="/training/review" class="nav-link {% if request.path == '/training/review' %}active{% endif %}">Review Games</a>
+            <a href="/info" class="nav-link {% if request.path == '/info' %}active{% endif %}">Info</a>
+        </div>
+        <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+    </nav>
+
+    <main class="main-content">
+        {% block content %}{% endblock %}
+    </main>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>

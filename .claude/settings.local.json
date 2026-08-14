@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /Users/perewodchik/Documents/projects/go-ai/.claude)",
+      "Bash(cat)",
+      "Bash(venv/bin/python /tmp/repro_estimate.py)",
+      "Bash(venv/bin/python -m pytest tests/ -q)",
+      "Bash(venv/bin/python -c \"import game; print\\(game.__file__\\)\")",
+      "Bash(venv/bin/python -m pytest tests/test_scoring.py -v)",
+      "Bash(rm -f /tmp/repro_estimate.py)",
+      "Bash(xargs cat)",
+      "Bash(venv/bin/python -c ' *)",
+      "Bash(venv/bin/python -m pytest tests/test_network_size.py -q)",
+      "Bash(venv/bin/python -m pytest tests/test_game.py::TestTensorEncoding::test_encoding_shape -q)",
+      "Bash(curl -s \"http://localhost:5050/models/api/network_presets?board_size=9\")",
+      "Bash(venv/bin/python -m json.tool)",
+      "Bash(curl -s \"http://localhost:5050/models/api/network_presets?board_size=13\")",
+      "Bash(venv/bin/python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\({p['key']:p['params'] for p in d['presets']}\\)\")",
+      "Bash(curl -s -X POST \"http://localhost:5050/models/verify-medium-net/delete\" -o /dev/null -w \"delete status: %{http_code}\\\\n\")",
+      "Bash(curl -s -X DELETE \"http://localhost:5050/models/api/verify-medium-net/delete\" -w \"\\\\nstatus: %{http_code}\\\\n\")",
+      "Bash(venv/bin/python -m pytest tests/test_game.py::TestTensorEncoding -q)",
+      "Bash(venv/bin/python -m pytest tests/test_training_diagnostics.py -q)",
+      "Bash(venv/bin/python -m pytest tests/test_mcts_targets.py -q)",
+      "Bash(curl -s \"http://localhost:5050/api/health\" -w \"\\\\nhttp:%{http_code}\\\\n\")",
+      "Bash(venv/bin/python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in ['ai/mcts.py','ai/self_play.py','web/routes/training_routes.py']]; print\\('syntax OK'\\)\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5062/training/review)",
+      "Bash(venv/bin/python -)",
+      "Bash(lsof -nP -iTCP -sTCP:LISTEN)",
+      "Bash(awk '{print $1, $9}')",
+      "Bash(curl -s http://localhost:5063/training/api/metrics)",
+      "Bash(curl -s http://localhost:5063/training/api/learning_stats)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:5063/training/)"
+    ]
+  }
+}

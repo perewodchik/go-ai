@@ -1,0 +1,1 @@
+{"iteration": 24, "total_games": 345, "elo": 500.29246555530517, "kyu_rank": "30k", "win_rate_vs_random": 0.6, "buffer_size": 17884, "elapsed_seconds": 611.9, "timestamp": "2026-08-13T20:26:57.484128", "policy_loss": 1.7609, "value_loss": 0.1321, "total_loss": 1.893, "learning_rate": 0.0018294794806672375}
