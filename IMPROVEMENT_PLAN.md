@@ -1,0 +1,559 @@
+# Training pipeline — audit and implementation plan
+
+Written after reading `ai/`, `game/`, `config.py`, `model_manager.py`,
+`param_bounds.py` and the model `config.json` files, plus a profiling run of a
+single 96-simulation MCTS search on a 40-stone 9×9 position.
+
+Everything below is either **measured** or **traced through the code**. Where a
+claim is a judgement call it says so.
+
+---
+
+## Summary of what is wrong
+
+| # | Finding | Kind | Severity | Status |
+|---|---|---|---|---|
+| B1 | `temperature_init` / `temperature_final` are never plumbed into self-play | legacy / dead setting | **High** | ✅ fixed |
+| B2 | Policy target overflows to `inf` → `NaN` at low temperature | latent bug | **High** (armed by fixing B1) | ✅ fixed |
+| B3 | `save_weights_now()` drops the champion from the checkpoint | bug | **High** | ✅ fixed |
+| B4 | Replay buffer is never persisted — every restart discards it | design gap | **High** | ✅ fixed |
+| B5 | Elo inflates ~5 points/iteration forever once win-rate saturates | bug | Medium | ✅ fixed |
+| B6 | Gate and random-eval searches ignore configured `c_puct` / `fpu_reduction` | plumbing | Medium | ✅ fixed |
+| B7 | `allow_pass=False` is applied at every tree depth, not just the root | bug | Low-Medium | ✅ fixed |
+| B8 | `total_games` counts games that a force-stop cancelled | cosmetic | Low | ✅ fixed |
+| P1 | `Board.neighbors()` — 152k calls/search, ~33% of search time | perf | **High** | Phase 3 |
+| P2 | MCTS builds a `GameState` for every legal move; ≤3% are ever visited | perf | **High** | Phase 3 |
+| P3 | Move legality is computed twice for every child | perf | Medium | Phase 3 |
+| P4 | Terminal nodes are fully re-scored on every visit | perf | Low | Phase 3 |
+
+Phases 1 and 2 are **implemented and tested** (345 tests pass, up from 297).
+See "What shipped" at the end of this document.
+
+Plus the two things you asked about: **17-plane history input** (§6) and
+**prevent self-atari** (§7).
+
+---
+
+## 1. Where the time actually goes
+
+Profile of one `MCTS.search(..., num_simulations=96)` on a mid-game 9×9 board,
+`torch.set_num_threads(1)` (i.e. what a self-play worker actually does):
+
+```
+MCTS search @96 sims          0.878 s wall
+  _expand                     97 %   of search time
+    rules.is_legal_move       58 %   (11,090 calls)
+    Board.neighbors           33 %   (152,067 calls; 0.40s + 0.17s is_on_board)
+    play_move → apply_move    41 %   (3,233 calls — building child states)
+  network.predict             16 %   (97 calls @ 1.85 ms)
+```
+
+**The neural network is 16% of self-play. The rules engine is ~84%.**
+
+That inverts the usual assumption in this project — the comments in `config.py`
+and `network.py` are all written as if the net were the constraint (MPS, filter
+counts, presets). It is not, and it will not be until the engine is roughly 5×
+faster. Every hour spent making the net smaller to go faster is buying ~16% of
+a speedup.
+
+The concrete causes:
+
+- **P1 — `neighbors()`** allocates a fresh list and runs four bounds checks per
+  call, 152,067 times per search. The board geometry is fixed at construction.
+- **P2 — eager child construction.** `_expand` copies the state and plays the
+  move for *every* legal move (3,233 child states per search) so it can hand
+  each child a `GameState`. With 96 simulations at most 96 of those are ever
+  visited. ~97% of that work is discarded.
+- **P3 — double legality.** `get_legal_moves()` proves a move legal by
+  simulating it; `play_move()` → `apply_move()` → `is_legal_move()` then
+  simulates it again from scratch.
+- **P4** — `_terminal_value` runs a full Chinese scoring pass every time a
+  terminal node is visited, instead of once per node.
+
+---
+
+## 2. Correctness bugs
+
+### B1 — `temperature_init` and `temperature_final` do nothing
+
+The full path exists and is a dead end:
+
+- `param_bounds.py` exposes both sliders,
+- `model_manager.TrainingParams` stores them,
+- `Config.from_model` reads them into `config.mcts`,
+- `training_routes.apply_params` live-tunes them onto `trainer.config.mcts`
+  and persists them to `config.json`,
+- `Trainer.train()` passes **only `temperature_threshold`** to
+  `run_self_play_batch()`, which does not accept the other two at all,
+- so `play_self_play_game` falls back to its own signature defaults:
+  `temperature_init=1.0, temperature_final=0.1`.
+
+Every model has been training on a 1.0 → 0.1 schedule regardless of the UI.
+`hot-boi` is configured 0.8 → 0.2 and is running 1.0 → 0.1: a hotter opening
+than intended, which means noisier move selection *and* noisier policy targets
+in exactly the phase that produces training data.
+
+### B2 — the policy target overflows to NaN, and fixing B1 arms it
+
+`ai/mcts.py:229`:
+
+```python
+policy[_action_index(action)] = float(child.visit_count) ** (1.0 / temperature)
+```
+
+`policy` is `np.float32`. Overflow happens when `(1/T)·log₁₀(N) > 38.5`.
+Verified:
+
+```
+temperature_threshold=30, temp schedule 0.5→0.001
+  move 28  temp=0.0343  exponent=29.2  visits=50  →  float32 inf
+  move 29  temp=0.0176  exponent=56.7  visits=5   →  float32 inf
+```
+
+After `policy /= policy.sum()` that entry becomes `inf/inf = NaN`, the training
+target is `[NaN, 0, 0, …]`, the policy cross-entropy is `NaN`, and one optimizer
+step turns the whole network into `NaN`.
+
+It has never fired, for one reason only: B1 pins `temperature_final` at 0.1 for
+every model. But `param_bounds` lets the slider go to **0.001**, and
+`MCTSConfig`'s own default (the `run_training.py` CLI path) *is* 0.001.
+
+**So B1 and B2 must be fixed in the same commit.** Fixing the plumbing alone
+hands the user a slider that destroys the network at the low end.
+
+Fix: normalise before exponentiating, in float64 —
+`exp((1/T)·(log N − log N_max))` — which is scale-invariant and cannot
+overflow. Same treatment in `_select_action`.
+
+### B3 — a manual weights save silently un-gates the champion
+
+`Trainer.save_weights_now()` (the `/training/api/save_weights` route) calls
+`save_weights(...)` **without** `champion_state_dict`. The written file then has
+no champion entry. On the next restart, `_try_load_weights` finds none and does:
+
+```python
+self.eval_network.load_state_dict(self.network.state_dict())
+```
+
+— i.e. it promotes whatever un-gated candidate happened to be in the training
+network to champion, and that network then generates all self-play data. One
+click of "save weights" defeats the promotion gate across a restart. Fix is one
+argument.
+
+### B4 — the replay buffer dies on every restart
+
+`Trainer.__init__` always constructs an empty `ReplayBuffer`. `_try_load_weights`
+restores iteration, Elo, total games, optimizer state and champion — but not the
+samples. And `web/app.py:switch_model()` builds a **new Trainer**, so switching
+models and switching back also empties it.
+
+Consequences, in the order they bite:
+
+1. Up to 50,000 samples — many hours of self-play — are thrown away per restart.
+2. The first iteration after a restart trains on one batch of games (5–20 games,
+   ~400–1,600 samples) with a *restored* Adam state and a full-size step count.
+3. That candidate then faces a 20-game promotion gate against a champion trained
+   on the full buffer. It loses. The rejection streak counter climbs, and after
+   5 rejections the stall breaker resets the training net — which looks like
+   "training has stalled" when the real cause was a restart.
+
+For someone driving this from the web UI, this is the single largest loss of
+learning progress in the system.
+
+Fix: persist the buffer next to `weights.pt` (`replay_buffer.pt`), save it in
+`_save_weights()`, load it in `__init__`. Guard it with the same arch/board
+signature as the checkpoint so a 9×9 buffer is never loaded into a 13×13 model,
+and cap what is written so the file stays bounded.
+
+### B5 — Elo is a function of iteration count, not strength
+
+```python
+self.elo = compute_elo_update(self.elo, 500, win_rate)   # K=32, fixed anchor
+```
+
+Once `win_rate` saturates at 1.0 against the random bot — which
+`HEURISTICS.md` already documents as happening early — the update is
+`32 × (1 − expected)`, which is **strictly positive forever**:
+
+| current Elo | Elo gained per iteration at 100% win rate |
+|---|---|
+| 778 | +5.4 |
+| 1,000 | +3.3 |
+| 1,500 | +1.1 |
+
+It never reaches zero. `hot-boi` at "778 Elo / 22k" has been accumulating a
+participation trophy, not a rating. The displayed kyu rank is not measuring
+anything past the point where the random bot stops being a test.
+
+Fix: two things, both cheap.
+- Freeze the anchor-based update when `win_rate >= 1.0` (no information in a
+  saturated test) and say so in the metrics.
+- Track a second, meaningful series: **gate Elo**, using the
+  `compute_pairwise_elo` that already exists in `evaluator.py` (currently only
+  used by the arena). The promotion gate already plays 20 rated games between
+  candidate and champion every iteration — that measurement is being thrown
+  away after a single boolean promote/reject decision.
+
+### B6 — the gate does not search the way you configured
+
+`evaluator._eval_worker` and `_play_gate_game` build `MCTS(...)` without
+`c_puct` or `fpu_reduction`, so both always use 1.5 / 0.35. Tune `c_puct` and
+self-play uses your value while the gate judges the result under a different
+search. Both sides of the gate get the same wrong value so the *comparison* is
+not biased — but you stop measuring the configuration you are actually
+training. Fix: thread them through, same as `restrict_eye_fill` already is.
+
+### B7 — pass is banned at every depth, not just at the root
+
+Self-play disables pass before move ~29 (`min_pass_move`). But `_expand` takes
+`allow_pass` as a per-*search* constant and applies it to every node, so during
+an opening search the tree cannot end a game **at any depth** — a line 30 plies
+deep still cannot pass. Terminal values are therefore unreachable during the
+first ~29 moves of every game, and the value head's only grounding in that phase
+is its own estimate.
+
+Fix: decide per node from `node.state.move_number` rather than from the root's.
+
+### B8 — `total_games` over-counts on force-stop
+
+`self.total_games += num_self_play_games` runs unconditionally, before the
+force-stop check that can have cancelled part of the batch. Cosmetic, one line.
+
+---
+
+## 3. Phased implementation
+
+Each phase is independently shippable and independently testable. Phases 1–3
+change no defaults and no model behaviour except where a bug is being removed.
+
+### Phase 0 — safety net
+
+Write failing tests first, so each fix is demonstrably a fix:
+
+- `tests/test_policy_target_numerics.py` — assert `np.isfinite(policy).all()`
+  and `policy.sum() ≈ 1` across `T ∈ {0.5 … 0.001}` and visit counts up to 800.
+- `tests/test_temperature_plumbing.py` — a configured `temperature_init` /
+  `temperature_final` reaches `play_self_play_game` (monkeypatch and capture the
+  kwargs).
+- `tests/test_checkpoint_champion.py` — `save_weights_now()` preserves the
+  champion across a save/load round trip.
+- `tests/test_replay_persistence.py` — buffer survives a Trainer rebuild; a
+  buffer from a different board size is rejected.
+
+### Phase 1 — correctness (B1, B2, B3, B7, B8, B6)
+
+1. `mcts.py`: log-space policy construction (B2) — **before** the plumbing fix.
+2. `self_play.py` + `trainer.py`: accept and forward `temperature_init` /
+   `temperature_final` through `run_self_play_batch` into the worker task dicts
+   (B1). Workers are separate processes and only see the dict.
+3. `trainer.py` / `checkpoint.py`: pass `champion_state_dict` in
+   `save_weights_now` (B3).
+4. `mcts.py`: per-node pass legality (B7).
+5. `trainer.py`: credit `total_games` from games actually completed (B8).
+6. `evaluator.py`: thread `c_puct` / `fpu_reduction` into both worker paths (B6).
+
+Expect a visible change in self-play behaviour from (2): the opening
+temperature drops from 1.0 to whatever each model is configured for. This is
+the correct behaviour but it *is* a change — worth one iteration of eyeballing
+`policy` entropy before and after.
+
+### Phase 2 — durability (B4, B5)
+
+7. `ai/replay_store.py` (new): `save_buffer` / `load_buffer`, signature-guarded
+   on `(board_size, num_input_planes)`, atomic temp-file write like
+   `checkpoint.py`. Wire into `Trainer._save_weights` and `Trainer.__init__`.
+8. `trainer.py` + `evaluator.py`: freeze anchor Elo at saturation, and record a
+   gate-derived pairwise Elo series in `training_log.jsonl`. Add the series to
+   the metrics chart.
+
+### Phase 3 — throughput (P1–P4)
+
+9. `game/board.py`: module-level neighbour table per board size, built once,
+   `neighbors()` becomes a lookup. Pure win, no behaviour change (P1).
+10. `game/rules.py`: extract
+    `_simulate(board, color, r, c) -> (test_board, captured_any, own_group, own_libs)`
+    shared by `is_legal_move`, `apply_move` and (later) the self-atari filter
+    (P3).
+11. `ai/mcts.py`: **lazy child expansion.** A child holds `(action, prior)` and
+    materialises its `GameState` on first selection. This is the largest single
+    win and the one change in this phase that needs care — `best_child`,
+    `_backup` and the terminal check all currently assume `child.state` exists
+    (P2).
+12. `ai/mcts.py`: cache terminal values on the node (P4).
+
+Target: **~2× self-play throughput**, i.e. double the games per hour at
+identical quality. Verify with a fixed-seed benchmark script committed under
+`tests/` (not in the pytest suite) so the number is reproducible before/after.
+
+### Phase 4 — self-atari filter (§7)
+
+Sequenced after Phase 3 deliberately: it needs the shared `_simulate` helper
+from step 10, or it doubles the cost of the hottest function in the engine.
+
+### Phase 5 — input feature versioning (§6)
+
+Independent of everything above; can be done at any point after Phase 1.
+
+---
+
+## 6. Your question: AlphaZero's 17 planes / 8-step history
+
+### What it actually is
+
+AlphaGo Zero's input is 17 planes: the last **8** board positions for each
+colour (8 + 8) plus one constant colour-to-play plane. There are no liberty
+planes and no ko plane — the history *is* how the network sees ko.
+
+Your encoder is different and, feature-for-feature, richer already: 2 stone
+planes, 6 liberty planes, an explicit ko plane, and colour-to-play (10 total).
+
+### Would it help you?
+
+Partly — but not for the reason it helped AlphaGo Zero.
+
+History planes buy two things in Go:
+
+1. **Ko / repetition awareness.** This is most of why AGZ needed them. You
+   already have an explicit ko plane *and* full positional superko in the rules
+   engine. This benefit is largely already banked.
+2. **Locality — where the opponent just played.** Go is intensely local; most
+   good replies are within a few points of the last stone. This is real, it is
+   not banked, and for a small network on 9×9 it is probably the single
+   cheapest policy-head improvement available.
+
+The locality benefit comes almost entirely from the **last one or two moves**.
+Planes 3 through 8 of AGZ's history are doing very little that the current
+position does not already say.
+
+### Costs, specific to this codebase
+
+- **Network cost: negligible.** Input conv 10→18 channels adds ~2% to the
+  forward pass. This is not the constraint (see §1 — the net is 16% of runtime).
+- **`GameState.copy()` cost: the real risk.** `copy()` runs ~3,200× per search.
+  If history is stored as "8 grids copied per state" it will cost more than the
+  network does. It must be an **append-only list of immutable grids**, so
+  `copy()` copies references, not boards. Non-negotiable if this is built.
+- **Two hardcodes must go**: `game_state.encode_for_nn` allocates
+  `np.zeros((10, size, size))` literally, and `trainer._collapse_diagnostics`
+  reads **plane index 9** as the turn-colour plane. Both need to come from a
+  layout descriptor.
+- **It cannot be a toggle on an existing model.** Changing plane count changes
+  `input_conv.in_channels`, so `weights.pt` becomes shape-incompatible —
+  `checkpoint.py` will (correctly) refuse to load it. This is a
+  **create-model-time choice, frozen per model**, exactly like `NetworkParams`.
+- **One new risk to watch.** History gives the value head more shortcut features
+  (move count, phase) on top of the turn-colour plane it can already collapse
+  onto. Watch `value_std_black` / `value_std_white` after enabling; the collapse
+  guard is the right instrument and it already exists.
+
+### Recommendation
+
+Yes — add it, as a **versioned per-model feature set, defaulting to today's
+encoding**, and start with the cheap variant rather than the full 17:
+
+| id | planes | contents |
+|---|---|---|
+| `v1_10` (default) | 10 | current encoding — every existing model |
+| `v2_12` | 12 | v1 + last move one-hot + opponent's previous move one-hot |
+| `v3_18` | 18 | v1 + 4-step stone history (4 own + 4 opponent) |
+
+`v2_12` is where I would put the effort: it captures the locality signal, adds
+two planes, and keeps `GameState.copy()` cheap. `v3_18` exists for when you want
+to A/B whether deeper history buys anything on 9×9 — my expectation is that it
+buys very little over `v2_12`, and this framing lets you find out instead of
+guessing. (Full AGZ-equivalent 8-step history would be 26 planes here, since you
+keep the liberty and ko planes. I would not start there.)
+
+Implementation shape:
+- `game/features.py` — a `FeatureSet` descriptor: plane count, plane names,
+  turn-colour plane index, and the encode function. One place that knows the
+  layout.
+- `NetworkParams.input_features: str = "v1_10"` + `num_input_planes` derived
+  from it, stored per model, in the checkpoint arch signature (which already
+  guards mismatches).
+- Validate with the `HEURISTICS.md` protocol: `copy_model` a twin, train both,
+  play them head-to-head.
+
+---
+
+## 7. Your question: prevent self-atari
+
+`HEURISTICS.md` calls this the best sample-efficiency lever available and I
+agree, for the reason it gives: unlike eye-filling, pointless self-atari is
+*frequent* in exactly the weak-network regime you are in. Every one of those
+moves costs a search slot and puts probability mass on a move that hands over
+stones. Removing them sharpens the policy target and concentrates the search
+budget in one change.
+
+### Definition (as specced, unchanged)
+
+A move by `C` at `p` is a pointless self-atari iff, after placing and resolving
+captures:
+
+1. it captured **nothing**, and
+2. the group containing `p` has exactly **1 liberty**, and
+3. that group is **larger than `k` stones** (`k` = `self_atari_max_stones`,
+   default 1).
+
+Condition 1 exempts ko captures and most snapbacks; condition 3 exempts
+throw-ins, the main small-group tesuji.
+
+### What can go wrong — read this part before enabling it
+
+1. **It is a heuristic, not a theorem.** This is the important difference from
+   `restrict_eye_fill`, which rests on a proof. There is no proof here, and the
+   `k` threshold has nothing behind it but judgement. Real moves it can remove:
+   nakade placement larger than `k`, eye-space reduction, seki manipulation,
+   squeeze and sacrifice tesuji, and ko-threat creation.
+2. **The promotion gate cannot detect the damage.** `HEURISTICS.md` is right
+   about this and it bears repeating: both sides play under the same filter, so
+   the gate measures relative strength *under the handicap* and is blind to the
+   handicap's own cost. The gate-Elo ladder will keep climbing while the model
+   gets quietly worse. Only the twin-model A/B — head-to-head with the filter
+   **off for both sides** — can tell you.
+3. **It can empty the move list.** In a filled endgame position every legal move
+   can be a self-atari. The filter would then leave only pass, silently, at
+   every node in the subtree. The spec in `HEURISTICS.md` does not cover this.
+   **Guard: if the filter removes every move, return the unfiltered list.**
+   Same guard is worth adding for `restrict_eye_fill` while we are there.
+4. **Cost, if implemented naively.** Per §1, `is_legal_move` is already 58% of
+   search time. A self-atari check that re-simulates each move would roughly
+   double the cost of the hottest function in the engine and could easily eat
+   more throughput than the sharper targets buy back. Riding it on the shared
+   `_simulate` helper (Phase 3, step 10) makes it nearly free, because the
+   simulation has *already* computed the resulting group and its liberties —
+   conditions 1–3 are then three comparisons on values in hand. **This is why
+   Phase 4 comes after Phase 3.**
+5. **Superko corner case.** As with every filter in `HEURISTICS.md`: under
+   positional superko a self-atari can occasionally be the only legal non-pass
+   move. Pass is always available so there is no deadlock, but pass is not
+   equivalent when a ko is live. Rare; accepted.
+
+### How it will be built
+
+Following the `HEURISTICS.md` plumbing recipe exactly, so it behaves like every
+other optional restriction:
+
+- `game/self_atari.py` — mirrors `game/eyes.py`: rationale in the docstring, one
+  scan function, one point function.
+- Filtered in `rules.get_legal_moves` alongside `restrict_eye_fill`, propagated
+  through `GameState.copy()` so it holds at every depth of the tree — never in
+  `is_legal()` / `play_move()`, so humans, replays and stored games are
+  untouched.
+- Two settings, **both defaulting to off/1**:
+  `restrict_self_atari: bool = False`, `self_atari_max_stones: int = 1` (1–4).
+- Applied to: self-play ✅, both sides of the gate ✅ (otherwise you measure the
+  filter), the random bot ❌ (it is the Elo anchor).
+- Off must reproduce current behaviour byte-for-byte — asserted by a test that
+  compares filtered and unfiltered move lists.
+
+### Tests (`tests/test_self_atari.py`)
+
+The over-restriction cases matter more than the detection cases:
+
+- throw-in into opponent eye space stays playable
+- snapback setup stays playable
+- ko capture stays playable (exempt via "captured something")
+- a move that captures is never blocked, even at 1 resulting liberty
+- ladder/atari positions where self-atari is the only defence
+- large self-atari is blocked
+- exact behaviour at the `k` boundary (`k` and `k+1` stones)
+- the other colour's moves are unaffected
+- **the filter never returns an empty move list**
+- off-by-default: filtered and unfiltered lists are identical
+
+### Expectation to set
+
+Do not expect the gate ladder or `win_rate_vs_random` to validate this. Expect
+a **discontinuous step** in `win_rate_vs_random` at the iteration you switch it
+on (only the network is filtered there), and expect the gate ladder not to step
+at all, because it is self-referential. The A/B rig is the answer, and it costs
+two training runs.
+
+---
+
+## Order I would actually do this in
+
+1. **Phase 0 + 1** — the bugs. B1/B2 together, B3 and B4 next; these are losing
+   you real work right now.
+2. **Phase 2** — buffer persistence is the highest-value single change for how
+   you operate this thing day to day.
+3. **Phase 3** — 2× throughput, and it is the prerequisite that makes the
+   self-atari filter affordable.
+4. **Phase 4** — self-atari, with the A/B rig, since it is the best remaining
+   sample-efficiency lever.
+5. **Phase 5** — `v2_12` features on a *new* model, A/B'd against a `v1_10`
+   twin.
+
+---
+
+## What shipped (Phases 1 and 2)
+
+345 tests pass, up from 297. All 8 existing models load unchanged.
+
+**`ai/mcts.py`**
+- New `visit_distribution()` builds the move distribution in log space, so the
+  policy target cannot overflow at any temperature the sliders allow (B2).
+- `search()` now samples the played move from the *same* distribution it returns
+  as the training target, so a stored move always has support in its own label.
+- `search(min_pass_move=...)` — the opening pass ban is evaluated per node
+  instead of once per search (B7). `allow_pass` is unchanged for other callers.
+- A root with no children returns a valid one-hot pass target instead of an
+  all-zero vector.
+
+**`ai/self_play.py`**
+- `run_self_play_batch` accepts and forwards `temperature_init` /
+  `temperature_final` (B1).
+- New `build_self_play_task()` — one named place that constructs the dict
+  crossing the process boundary, so it can be tested against the worker's
+  signature without starting a pool. This is the drift that made B1 possible.
+- Failed workers tag their stub record so a game that never happened is not
+  counted (B8).
+
+**`ai/trainer.py`**
+- Forwards the temperature schedule, and `c_puct` / `fpu_reduction` to both the
+  gate and the random-bot eval (B6).
+- `save_weights_now()` writes the champion (B3).
+- Replay buffer saved every iteration and restored on construction (B4).
+- Tracks `gate_elo`, a rating that only moves when a candidate actually beats
+  the champion (B5). Recorded in `training_log.jsonl` and `get_status()`.
+- `total_games` credits completed games only (B8).
+
+**`ai/replay_store.py`** (new) — signature-guarded, atomic buffer persistence.
+Indicator planes are stored as uint8, which is lossless for the current encoding
+and takes a full 50k buffer from ~179 MB to ~57 MB per save; a future encoding
+with continuous planes falls back to float32 automatically.
+
+**`ai/evaluator.py`** — `clamp_score()` and `performance_elo_gap()`;
+`compute_elo_update(..., num_games=)` applies the half-game correction so the
+anchor rating converges instead of drifting (B5).
+
+**`ai/checkpoint.py`** — carries `gate_elo`; older checkpoints simply lack it.
+
+**Tests added**: `test_policy_target_numerics.py`, `test_temperature_plumbing.py`,
+`test_checkpoint_champion.py`, `test_replay_persistence.py`,
+`test_elo_saturation.py`.
+
+**One existing test repaired**: `test_game_move_counts_from_disk` globbed the
+flat `iter_000001_game_0000.json` layout that `migrate_legacy_layout` moves games
+out of, and sliced the *first* 20 games — always iteration 1, played by an
+untrained network and the longest a model ever produces. It now reads through
+`ai/game_store` and measures the most recent 50.
+
+### A finding that fell out of repairing that test
+
+Moves past `board_size²` cost a full MCTS search and produce **zero** training
+data. Measured across the stored self-play games:
+
+| model | games | avg moves | >81 moves | search spent on moves that teach nothing |
+|---|---|---|---|---|
+| hero-of-time | 1033 | 113 | 92% | **29%** |
+| hero-of-time-result-after-night | 380 | 117 | 95% | **32%** |
+| night-model | 250 | 114 | 76% | **33%** |
+| hot-boi-at-710 | 390 | 73 | 26% | 10% |
+| hot-boi | 690 | 64 | 14% | 6% |
+
+Roughly a third of self-play compute on the `hero-of-time` line is buying
+nothing. This is exactly what the mercy rule was built for, and it is off by
+default on every one of these models. Worth turning on (`resign_enabled`) and
+watching `false_resign_rate` — independent of Phase 3.

@@ -306,24 +306,44 @@ class TestTrainingDataDistribution:
         """
         Load actual game files and check if move counts are excessive.
         Games on 9x9 should ideally end in 60-120 moves.
+
+        Two things about how this reads its data:
+
+        1. It goes through ai/game_store instead of globbing filenames. The old
+           version looked for flat `iter_000001_game_0000.json` names in the
+           games root, which is exactly the layout `migrate_legacy_layout` moves
+           games OUT of — so the first time a model was opened after the
+           per-iteration layout landed, this test measured zero games and then
+           died on max() of an empty list.
+        2. It measures the most RECENT games, not the first 20. Games are
+           yielded in iteration order, so the old slice always sampled
+           iteration 1 — games played by an untrained network, which are the
+           longest a model will ever produce. On night-model the first 20
+           average 158 moves (80% over 150) while the latest 50 average 118
+           (18%), so the test was asserting a healthy-training property against
+           the least healthy sample available, and got permanently worse-looking
+           as the model improved.
         """
+        import pytest
+        from ai.game_store import PHASE_SELF_PLAY, load_game_files
+
         games_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "models", "night-model", "games"
         )
-        
+
         if not os.path.exists(games_dir):
-            import pytest
             pytest.skip("No game data available")
-        
-        files = [f for f in os.listdir(games_dir) if f.endswith('.json') and '_game_' in f][:20]
-        
-        move_counts = []
-        for fn in files:
-            with open(os.path.join(games_dir, fn)) as f:
-                game = json.load(f)
-            move_counts.append(game['num_moves'])
-        
+
+        move_counts = [
+            record['num_moves']
+            for game_file, record in load_game_files(games_dir)
+            if game_file.phase == PHASE_SELF_PLAY and 'num_moves' in record
+        ][-50:]
+
+        if not move_counts:
+            pytest.skip("No self-play games recorded for this model")
+
         avg_moves = np.mean(move_counts)
         max_moves_game = max(move_counts)
         games_over_150 = sum(1 for m in move_counts if m > 150)

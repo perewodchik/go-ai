@@ -172,6 +172,10 @@ def play_self_play_game(
     resign_move_num = None
     would_resign_color = None    # First trigger in a playout game (game continued)
     would_resign_move = None
+    # The numbers behind the verdict, captured at the moment it fired. Without
+    # them a resigned game in the review UI is an unexplained early stop — the
+    # reader cannot tell a confident resignation from a marginal one.
+    resign_evidence = None
 
     for move_num in range(max_moves):
         if state.is_over:
@@ -184,15 +188,15 @@ def play_self_play_game(
         else:
             temp = temperature_final
         
-        # Disallow pass during opening to force stone development
-        allow_pass = (move_num >= min_pass_move)
-        
-        # Run MCTS to get action and policy
+        # Run MCTS to get action and policy. The opening pass ban is handed to
+        # the search as a move NUMBER rather than a yes/no for this move, so it
+        # is re-evaluated at every node: a line that reaches move min_pass_move
+        # deep inside the tree can still end the game there.
         action, policy = mcts.search(
             state,
             temperature=temp,
             add_noise=True,  # Always add noise during training
-            allow_pass=allow_pass,
+            min_pass_move=min_pass_move,
         )
 
         # --- Mercy rule check (before the move is recorded or applied) ---
@@ -224,15 +228,27 @@ def play_self_play_game(
             )
 
             if triggered:
+                evidence = {
+                    'root_value': round(float(root_value), 4),
+                    'opponent_value': (round(float(opponent_value), 4)
+                                       if opponent_value is not None else None),
+                    'streak': resign_streak[mover],
+                    'threshold': resign_threshold,
+                    'required_streak': resign_consecutive,
+                    'both_sides': resign_both_sides,
+                    'min_move': min_resign_move,
+                }
                 if resign_playout:
                     # Measurement game: note the verdict, then play on so we
                     # can find out whether it was right.
                     if would_resign_color is None:
                         would_resign_color = mover
                         would_resign_move = move_num
+                        resign_evidence = evidence
                 else:
                     resigned_color = mover
                     resign_move_num = move_num
+                    resign_evidence = evidence
                     break
 
         # Store training data (before applying the move)
@@ -341,6 +357,10 @@ def play_self_play_game(
         'resigned': resigned_color is not None,
         'resign_color': int(resigned_color) if resigned_color is not None else None,
         'resign_move': resign_move_num,
+        # The evaluation that triggered the rule, so the review UI can say WHY
+        # the game stopped instead of just that it did. Also set on playout
+        # games, where it explains a trigger the game went on to overrule.
+        'resign_evidence': resign_evidence,
         'resign_playout': resign_playout,
         'would_resign_color': (int(would_resign_color)
                                if would_resign_color is not None else None),
@@ -350,6 +370,62 @@ def play_self_play_game(
     }
 
     return samples, game_record
+
+
+def build_self_play_task(
+    network: GoNetwork,
+    board_size: int,
+    komi: float,
+    num_simulations: int,
+    c_puct: float,
+    temperature_threshold: int,
+    temperature_init: float,
+    temperature_final: float,
+    device: str,
+    fpu_reduction: float,
+    value_target_outcome_weight: float,
+    restrict_eye_fill: bool,
+    resign_enabled: bool,
+    resign_threshold: float,
+    resign_consecutive: int,
+    resign_min_move_factor: float,
+    resign_both_sides: bool,
+    resign_playout_fraction: float,
+) -> dict:
+    """
+    Build the kwargs dict for one self-play worker.
+
+    Workers are separate processes, so this dict is the ONLY thing a game sees —
+    anything missing from it silently falls back to `play_self_play_game`'s
+    signature defaults instead of the model's configuration. That is exactly how
+    `temperature_init` / `temperature_final` came to be dead settings: fully
+    plumbed through param_bounds, TrainingParams, Config.from_model and the
+    live-tuning API, and then dropped here, so every model ever trained ran the
+    hardcoded 1.0 -> 0.1 schedule regardless of what the UI showed.
+
+    Keeping the construction in one named function means the task dict can be
+    tested against the worker's signature without starting a process pool.
+    """
+    return {
+        'network': network,
+        'board_size': board_size,
+        'komi': komi,
+        'num_simulations': num_simulations,
+        'c_puct': c_puct,
+        'temperature_threshold': temperature_threshold,
+        'temperature_init': temperature_init,
+        'temperature_final': temperature_final,
+        'device': device,
+        'fpu_reduction': fpu_reduction,
+        'value_target_outcome_weight': value_target_outcome_weight,
+        'restrict_eye_fill': restrict_eye_fill,
+        'resign_enabled': resign_enabled,
+        'resign_threshold': resign_threshold,
+        'resign_consecutive': resign_consecutive,
+        'resign_min_move_factor': resign_min_move_factor,
+        'resign_both_sides': resign_both_sides,
+        'resign_playout_fraction': resign_playout_fraction,
+    }
 
 
 def _play_worker(kwargs: dict) -> Tuple[List[TrainingSample], dict]:
@@ -374,6 +450,8 @@ def run_self_play_batch(
     num_simulations: int = 200,
     c_puct: float = 1.5,
     temperature_threshold: int = 15,
+    temperature_init: float = 1.0,
+    temperature_final: float = 0.1,
     device: str = "cpu",
     game_store_every_n: int = 5,
     games_dir: str = "data/games",
@@ -405,6 +483,8 @@ def run_self_play_batch(
         num_simulations: MCTS simulations per move.
         c_puct: Exploration constant.
         temperature_threshold: Move number for temperature switch.
+        temperature_init: Opening temperature (exploratory).
+        temperature_final: Temperature after the decay window (greedy).
         device: Torch device.
         game_store_every_n: Save every Nth game for replay.
         games_dir: Directory to save game records.
@@ -430,26 +510,29 @@ def run_self_play_batch(
     # Never more workers than there are games to play, or cores to play them on.
     num_workers = max(1, min(num_games, os.cpu_count() or 4, num_workers))
     
-    tasks = []
-    for _ in range(num_games):
-        tasks.append({
-            'network': network,
-            'board_size': board_size,
-            'komi': komi,
-            'num_simulations': num_simulations,
-            'c_puct': c_puct,
-            'temperature_threshold': temperature_threshold,
-            'device': device,
-            'fpu_reduction': fpu_reduction,
-            'value_target_outcome_weight': value_target_outcome_weight,
-            'restrict_eye_fill': restrict_eye_fill,
-            'resign_enabled': resign_enabled,
-            'resign_threshold': resign_threshold,
-            'resign_consecutive': resign_consecutive,
-            'resign_min_move_factor': resign_min_move_factor,
-            'resign_both_sides': resign_both_sides,
-            'resign_playout_fraction': resign_playout_fraction,
-        })
+    tasks = [
+        build_self_play_task(
+            network=network,
+            board_size=board_size,
+            komi=komi,
+            num_simulations=num_simulations,
+            c_puct=c_puct,
+            temperature_threshold=temperature_threshold,
+            temperature_init=temperature_init,
+            temperature_final=temperature_final,
+            device=device,
+            fpu_reduction=fpu_reduction,
+            value_target_outcome_weight=value_target_outcome_weight,
+            restrict_eye_fill=restrict_eye_fill,
+            resign_enabled=resign_enabled,
+            resign_threshold=resign_threshold,
+            resign_consecutive=resign_consecutive,
+            resign_min_move_factor=resign_min_move_factor,
+            resign_both_sides=resign_both_sides,
+            resign_playout_fraction=resign_playout_fraction,
+        )
+        for _ in range(num_games)
+    ]
     
     completed_games = 0
     active_futures = {}  # future -> game_index
@@ -494,7 +577,10 @@ def run_self_play_batch(
                     samples, record = future.result()
                 except Exception as e:
                     print(f"Worker failed: {e}")
-                    samples, record = [], {'moves': [], 'winner': 0, 'num_moves': 0, 'elapsed_seconds': 0}
+                    # Tagged so the trainer does not count a game that never
+                    # happened towards total_games or the mercy-rule denominator.
+                    samples, record = [], {'moves': [], 'winner': 0, 'num_moves': 0,
+                                           'elapsed_seconds': 0, 'failed': True}
 
                 record['iteration'] = iteration
                 record['game_index'] = game_index

@@ -204,6 +204,10 @@ def new_match():
         'board_size': settings['board_size'],
         'komi': settings['komi'],
         'ruleset': settings['ruleset'],
+        # Bots give up games their own search has called lost, instead of
+        # playing decided endgames out move by move. None defers to each
+        # model's own resign_enabled setting.
+        'mercy_resign': data.get('mercy_resign'),
     }
 
     try:

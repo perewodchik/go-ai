@@ -46,7 +46,8 @@ class ScriptedMCTS:
         self.root_value = 0.0
         self.move_num = 0
 
-    def search(self, state, temperature=1.0, add_noise=True, allow_pass=True):
+    def search(self, state, temperature=1.0, add_noise=True, allow_pass=True,
+               min_pass_move=0):
         self.root_value = float(self.value_fn(self.move_num, state.current_player))
         self.move_num += 1
 
@@ -270,6 +271,55 @@ class TestPlayoutMeasurement:
         for _ in range(5):
             _, rec = play(resign_enabled=True, resign_playout_fraction=0.0)
             assert rec['resign_playout'] is False
+
+
+class TestResignEvidence:
+    """
+    A resigned game is an unexplained early stop unless the numbers that ended
+    it are recorded with it. These are what the review UI turns into a reason.
+    """
+
+    def test_evidence_is_recorded_with_a_resignation(self, scripted):
+        scripted.value_fn = staticmethod(black_is_lost)
+        _, rec = play(resign_enabled=True, resign_playout_fraction=0.0,
+                      resign_threshold=0.90, resign_consecutive=4)
+        ev = rec['resign_evidence']
+        assert ev is not None
+        assert ev['root_value'] == pytest.approx(-0.99)      # the losing side
+        assert ev['opponent_value'] == pytest.approx(0.99)   # and the winner
+        assert ev['streak'] >= ev['required_streak'] == 4
+        assert ev['threshold'] == 0.90
+        assert ev['both_sides'] is True
+        assert ev['min_move'] == AREA
+
+    def test_evidence_is_recorded_for_an_overruled_trigger(self, scripted):
+        """Playout games explain a verdict that was measured, not applied."""
+        scripted.value_fn = staticmethod(black_is_lost)
+        _, rec = play(resign_enabled=True, resign_playout_fraction=1.0)
+        assert rec['resigned'] is False
+        assert rec['resign_evidence'] is not None
+        assert rec['resign_evidence']['root_value'] == pytest.approx(-0.99)
+
+    def test_no_trigger_means_no_evidence(self, scripted):
+        scripted.value_fn = staticmethod(lambda move_num, player: 0.0)
+        _, rec = play(resign_enabled=True, resign_playout_fraction=0.0)
+        assert rec['resigned'] is False
+        assert rec['resign_evidence'] is None
+
+    def test_evidence_is_the_first_trigger_not_a_later_one(self, scripted):
+        """
+        A playout game keeps despairing after the rule is overruled. The
+        recorded evidence must stay the one that fired, so the move number and
+        the values describe the same moment.
+        """
+        def deepening(move_num, player):
+            if player == WHITE:
+                return 0.99
+            return -0.91 if move_num < AREA + 20 else -1.0
+        scripted.value_fn = staticmethod(deepening)
+        _, rec = play(resign_enabled=True, resign_playout_fraction=1.0)
+        assert rec['would_resign_move'] < AREA + 20
+        assert rec['resign_evidence']['root_value'] == pytest.approx(-0.91)
 
 
 class TestRecordShape:

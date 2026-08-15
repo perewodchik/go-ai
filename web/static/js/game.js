@@ -1,8 +1,9 @@
 /**
  * game.js — Game interaction logic for human vs bot play.
  *
- * Manages: setup, move submission, pass/resign/undo, score display,
- * territory estimation toggle, easy/hard mode, game over.
+ * Manages: setup (including which model you play), move submission,
+ * pass/resign/undo, score display, territory estimation toggle, easy/hard
+ * mode, game over.
  */
 
 let board = null;
@@ -15,6 +16,72 @@ let inputLocked = false;
 // Live win-rate readout: easy mode only, and off until the user asks for it.
 let showWinRate = false;
 let winrateChart = null;
+// Opponent picker state: every model in the workspace, and the one this game
+// is actually being played against.
+let opponentModels = [];
+let opponent = null;
+let gameOver = false;
+
+// ---- Opponent picker ----
+//
+// You can play ANY model, not just the one the Dashboard has active — that one
+// is only the default selection.
+
+async function loadPlayableModels() {
+    const select = document.getElementById('play-model');
+    if (!select || opponentModels.length) return;
+
+    let data;
+    try {
+        const res = await fetch('/api/game/opponents');
+        data = await res.json();
+    } catch (err) {
+        return;   // the setup panel still works with the active model default
+    }
+
+    opponentModels = data.models || [];
+    select.innerHTML = '';
+    opponentModels.forEach(model => {
+        const opt = document.createElement('option');
+        opt.value = model.model_id;
+        opt.textContent = `${model.name} — ${Math.round(model.elo)} Elo (${model.kyu_rank})`;
+        select.appendChild(opt);
+    });
+
+    if (data.active_model_id && opponentModels.some(m => m.model_id === data.active_model_id)) {
+        select.value = data.active_model_id;
+    }
+    syncOpponent();
+}
+
+/** Mirror the selected model's locked board settings into the setup panel. */
+function syncOpponent() {
+    const select = document.getElementById('play-model');
+    if (!select) return;
+    const model = opponentModels.find(m => m.model_id === select.value);
+    if (!model) return;
+
+    document.getElementById('play-cfg-board').textContent =
+        `${model.board_size}×${model.board_size}`;
+    document.getElementById('play-cfg-komi').textContent = model.komi;
+    document.getElementById('play-cfg-ruleset').textContent =
+        model.ruleset.charAt(0).toUpperCase() + model.ruleset.slice(1);
+    document.getElementById('play-model-meta').textContent =
+        `Iteration ${model.iteration} · trained at ${model.default_simulations} simulations per move`;
+
+    // Start from what the model itself trains at, clamped to the slider range.
+    const slider = document.getElementById('simulations');
+    const suggested = Math.min(Math.max(model.default_simulations, Number(slider.min)),
+                               Number(slider.max));
+    slider.value = suggested;
+    document.getElementById('sim-label').textContent = slider.value;
+}
+
+document.getElementById('play-model')?.addEventListener('change', syncOpponent);
+
+window.addEventListener('play-view-change', (event) => {
+    if (event.detail.view === 'human-setup') loadPlayableModels();
+});
 
 // ---- Setup ----
 document.querySelectorAll('.color-btn').forEach(btn => {
@@ -41,6 +108,7 @@ document.getElementById('start-game').addEventListener('click', startGame);
 
 async function startGame() {
     const numSim = parseInt(document.getElementById('simulations').value);
+    const modelSelect = document.getElementById('play-model');
 
     const res = await fetch('/api/game/new', {
         method: 'POST',
@@ -49,6 +117,10 @@ async function startGame() {
             mode: gameMode,
             player_color: playerColor,
             num_simulations: numSim,
+            model_id: modelSelect ? modelSelect.value : null,
+            // Let the bot give up a game it has already lost, rather than
+            // playing a decided endgame out move by move.
+            mercy_resign: document.getElementById('play-mercy')?.checked ?? true,
         }),
     });
 
@@ -57,24 +129,33 @@ async function startGame() {
         alert(data.error);
         return;
     }
-    
+
     gameId = data.game_id;
+    gameOver = false;
+    opponent = data;
 
     // Initialize board renderer
     const canvas = document.getElementById('go-board');
     board = new GoBoardRenderer(canvas, data.board_size, onBoardClick);
 
-    // Show/hide easy mode buttons
-    document.querySelectorAll('.easy-only').forEach(el => {
-        el.style.display = gameMode === 'easy' ? '' : 'none';
-    });
+    // Name both sides, so the panel says who is who without a status heading.
+    const botName = data.model_name || 'Bot';
+    document.getElementById('play-opponent-label').textContent = `vs ${botName}`;
+    document.getElementById('play-name-black').textContent =
+        playerColor === 'black' ? 'You' : botName;
+    document.getElementById('play-name-white').textContent =
+        playerColor === 'white' ? 'You' : botName;
+    document.getElementById('play-meta-config').textContent =
+        `${data.board_size}×${data.board_size} · komi ${data.komi}`;
+    document.getElementById('play-summary').hidden = true;
+
+    syncControls();
 
     // Switch panels
     PlayViews.show('human-game');
-    document.getElementById('btn-new-game').style.display = 'none';
     // Let the launcher offer to resume this game if the user navigates away.
     PlayViews.setHumanGame({
-        label: `Your game vs ${data.model_name || 'the bot'}`,
+        label: `Your game vs ${botName}`,
         over: false,
     });
 
@@ -87,6 +168,26 @@ async function startGame() {
 
     updateBoard(data.state);
     await refreshAnalysis();
+}
+
+/**
+ * Show only the controls that can actually do something right now.
+ *
+ * Pass/Resign/Undo/Suggest are meaningless once the game is over, so they go
+ * away rather than sitting there disabled; what to do next lives in the
+ * result banner instead.
+ */
+function syncControls() {
+    const easy = gameMode === 'easy';
+    setVisible(document.getElementById('btn-pass'), !gameOver);
+    setVisible(document.getElementById('btn-resign'), !gameOver);
+    setVisible(document.getElementById('btn-undo'), easy && !gameOver);
+    setVisible(document.getElementById('btn-suggest'), easy && !gameOver);
+    setVisible(document.getElementById('winrate-toggle-row'), easy);
+}
+
+function setVisible(el, visible) {
+    if (el) el.hidden = !visible;
 }
 
 // ---- Gameplay ----
@@ -104,9 +205,9 @@ async function onBoardClick(row, col) {
 
         const data = await res.json();
         if (data.error) {
-            // Subtle flash — illegal move (or not your turn)
-            document.getElementById('game-status').textContent = data.error;
-            setTimeout(() => document.getElementById('game-status').textContent = 'Your turn', 1500);
+            // Illegal move (or not your turn) — a toast, since the panel no
+            // longer carries a status line to flash it in.
+            showToast(data.error);
             return;
         }
 
@@ -125,7 +226,22 @@ async function onBoardClick(row, col) {
 }
 
 async function fetchBotMove() {
-    document.getElementById('game-status').textContent = 'Bot thinking...';
+    setThinking(true);
+    try {
+        await requestBotMove();
+    } finally {
+        setThinking(false);
+    }
+}
+
+/** Mark the bot's own row as thinking while it searches. */
+function setThinking(on) {
+    const botRow = document.getElementById(
+        playerColor === 'black' ? 'play-row-white' : 'play-row-black');
+    if (botRow) botRow.classList.toggle('is-thinking', on && !gameOver);
+}
+
+async function requestBotMove() {
     const res = await fetch('/api/game/bot_move', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -151,6 +267,10 @@ document.getElementById('btn-pass').addEventListener('click', async () => {
             body: JSON.stringify({ game_id: gameId }),
         });
         const data = await res.json();
+        if (data.error) {
+            showToast(data.error);
+            return;
+        }
         updateBoard(data.state);
         if (data.scores) updateScores(data.scores);
         await refreshAnalysis();
@@ -392,6 +512,8 @@ function showToast(text) {
 
 document.getElementById('btn-new-game')?.addEventListener('click', () => {
     gameId = null;
+    gameOver = false;
+    document.getElementById('play-summary').hidden = true;
     PlayViews.setHumanGame(null);
     PlayViews.show('human-setup');
     syncWinRatePanel();
@@ -400,20 +522,24 @@ document.getElementById('btn-new-game')?.addEventListener('click', () => {
 // ---- Helpers ----
 function updateBoard(state) {
     board.updateState(state);
-    document.getElementById('move-counter').textContent = `Move: ${state.move_number}`;
-    document.getElementById('black-captures').textContent = `Cap: ${state.prisoners['1'] || 0}`;
-    document.getElementById('white-captures').textContent = `Cap: ${state.prisoners['2'] || 0}`;
+    document.getElementById('move-counter').textContent = `Move ${state.move_number}`;
+    document.getElementById('black-captures').textContent = `Captured: ${state.prisoners['1'] || 0}`;
+    document.getElementById('white-captures').textContent = `Captured: ${state.prisoners['2'] || 0}`;
+
+    // Whose turn it is: the highlighted row, not a heading above it.
+    const blackToMove = !state.is_over && state.current_player === 1;
+    const whiteToMove = !state.is_over && state.current_player === 2;
+    document.getElementById('play-row-black').classList.toggle('to-move', blackToMove);
+    document.getElementById('play-row-white').classList.toggle('to-move', whiteToMove);
 
     if (state.is_over) {
-        document.getElementById('game-status').textContent = 'Game Over';
-        document.getElementById('btn-new-game').style.display = '';
+        gameOver = true;
+        setThinking(false);
+        syncControls();
         if (window.PlayViews && gameId) {
-            PlayViews.setHumanGame({ label: 'Your game', over: true });
+            const label = `Your game vs ${(opponent && opponent.model_name) || 'the bot'}`;
+            PlayViews.setHumanGame({ label, over: true });
         }
-    } else {
-        const isMyTurn = (state.current_player === 1 && playerColor === 'black') ||
-                         (state.current_player === 2 && playerColor === 'white');
-        document.getElementById('game-status').textContent = isMyTurn ? 'Your turn' : 'Bot thinking...';
     }
 }
 
@@ -432,17 +558,41 @@ function showGameOver(data) {
         title = 'Draw (Jigo)';
     } else if (result.reason === 'resignation') {
         title = `${result.winner === playerColor ? 'You Win!' : 'Bot Wins!'}`;
-        details = 'By resignation';
+        // The bot resigns on its own once the mercy rule fires, so say which
+        // side gave up rather than a bare "by resignation".
+        details = result.resigned_by === 'bot' ? 'The bot resigned' : 'By resignation';
     } else {
         title = `${result.winner === playerColor ? 'You Win!' : 'Bot Wins!'}`;
         details = `By ${result.margin?.toFixed(1) || '?'} points`;
     }
 
+    // A resignation ends the game without a score — leave those blank rather
+    // than printing question marks.
+    const black = result.black_score?.toFixed(1) || data.scores?.black?.toFixed(1) || null;
+    const white = result.white_score?.toFixed(1) || data.scores?.white?.toFixed(1) || null;
+
     document.getElementById('result-title').textContent = title;
     document.getElementById('result-details').textContent = details;
-    document.getElementById('final-black').textContent = result.black_score?.toFixed(1) || data.scores?.black?.toFixed(1) || '?';
-    document.getElementById('final-white').textContent = result.white_score?.toFixed(1) || data.scores?.white?.toFixed(1) || '?';
-    document.getElementById('btn-new-game').style.display = '';
+    document.getElementById('final-black').textContent = black || '—';
+    document.getElementById('final-white').textContent = white || '—';
+
+    // The panel keeps the result after the modal is closed — that is where the
+    // "New Game" button lives, rather than loose at the bottom of the panel.
+    gameOver = true;
+    syncControls();
+    const banner = document.getElementById('play-summary');
+    banner.hidden = false;
+    if (!result.winner || result.winner === 'draw') {
+        banner.dataset.outcome = 'draw';
+    } else {
+        banner.dataset.outcome = result.winner === playerColor ? 'win' : 'loss';
+    }
+    document.getElementById('play-summary-badge').textContent = 'Game over';
+    document.getElementById('play-summary-title').textContent = title;
+    const scoreLine = (black && white) ? `⚫ ${black} — ${white} ⚪` : '';
+    document.getElementById('play-summary-score').textContent =
+        [details, scoreLine].filter(Boolean).join(' · ');
+
     modal.style.display = 'flex';
 }
 

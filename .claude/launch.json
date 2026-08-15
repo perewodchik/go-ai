@@ -6,7 +6,7 @@
       "name": "go-ai-server",
       "runtimeExecutable": "/Users/perewodchik/Documents/projects/go-ai/venv/bin/python",
       "runtimeArgs": ["run_server.py"],
-      "port": 5062
+      "port": 5063
     }
   ]
 }

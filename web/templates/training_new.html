@@ -265,6 +265,16 @@
         </div>
 
         <div class="collapsible-content">
+            <div class="metrics-toolbar-bar">
+                <div class="graph-filter-buttons" id="selfplay-filter-btns">
+                    <button class="filter-btn active" data-limit="all" title="Show all games">All</button>
+                    <button class="filter-btn" data-limit="10" title="Show last 10 games">10</button>
+                    <button class="filter-btn" data-limit="20" title="Show last 20 games">20</button>
+                    <button class="filter-btn" data-limit="50" title="Show last 50 games">50</button>
+                    <button class="filter-btn" data-limit="100" title="Show last 100 games">100</button>
+                </div>
+            </div>
+
             <div class="pipeline-stats-grid">
                 <!-- Win Margin Dispersion & Spread column -->
                 <div class="pipeline-subcard">
@@ -295,7 +305,6 @@
                         <div class="margin-chart-wrap pipeline-margin-chart-wrap">
                             <div class="margin-axis-label margin-axis-top">Moving Avg Margin (μ) & ±1σ Spread Band →</div>
                             <canvas id="margin-dispersion-chart"></canvas>
-                            <div class="margin-axis-label margin-axis-bottom">Captures score volatility · Peaks show wide swings (close vs blowout); lower bands show uniform games.</div>
                         </div>
                     </div>
                 </div>
@@ -304,13 +313,6 @@
                 <div class="pipeline-subcard">
                     <div class="pipeline-subcard-header">
                         <h4 class="pipeline-subcard-title">⚖️ Self-Play Balance <small>(black vs white)</small></h4>
-                        <div class="graph-filter-buttons" id="selfplay-filter-btns">
-                            <button class="filter-btn active" data-limit="all" title="Show all games">All</button>
-                            <button class="filter-btn" data-limit="10" title="Show last 10 games">10</button>
-                            <button class="filter-btn" data-limit="20" title="Show last 20 games">20</button>
-                            <button class="filter-btn" data-limit="50" title="Show last 50 games">50</button>
-                            <button class="filter-btn" data-limit="100" title="Show last 100 games">100</button>
-                        </div>
                     </div>
                     <div class="balance-container-compact">
                         <div class="balance-bar">
@@ -328,9 +330,7 @@
 
                         <!-- Diverging margin chart -->
                         <div class="margin-chart-wrap pipeline-margin-chart-wrap">
-                            <div class="margin-axis-label margin-axis-top">⚫ Black winning →</div>
                             <canvas id="selfplay-margin-chart"></canvas>
-                            <div class="margin-axis-label margin-axis-bottom">⚪ White winning →</div>
                         </div>
                     </div>
                 </div>

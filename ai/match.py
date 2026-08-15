@@ -212,6 +212,9 @@ class MatchRunner:
                 'komi': self.config.komi,
                 'ruleset': self.config.scoring_method,
                 'num_games': self.config.num_games,
+                # Enough of the config for a client to offer a rematch on the
+                # same terms without having kept the original request.
+                'record_games': self.config.record_games,
                 'games_completed': len(self.outcomes),
                 'current_game': self._current_index + 1,
                 'move_delay': self.config.move_delay,

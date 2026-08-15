@@ -99,6 +99,18 @@ def create_app() -> Flask:
                                active_model=active_model,
                                models=models)
 
+    # Redesigned dashboard, served alongside the live one at / so the two can
+    # be compared while it is built out.
+    @app.route('/dashboard_new')
+    @app.route('/dashboard_new/')
+    def dashboard_new():
+        from flask import render_template
+        active_model = model_manager.get_active_model()
+        models = model_manager.list_models()
+        return render_template('dashboard_new.html',
+                               active_model=active_model,
+                               models=models)
+
     # Info / parameter guide route
     @app.route('/info')
     def info():

@@ -31,6 +31,44 @@ from game.game_state import GameState, MOVE_PASS
 from game.board import BLACK, WHITE, opponent
 
 
+def visit_distribution(visits, temperature: float) -> np.ndarray:
+    """
+    AlphaZero's move distribution pi_a ~ N_a^(1/tau), computed in log space.
+
+    The obvious formulation, `visits ** (1.0 / temperature)`, overflows: at
+    tau = 0.034 the exponent is ~29, so 50 visits produces 3.8e49. Written into
+    the float32 policy array that becomes +inf, normalising turns it into NaN,
+    and one optimizer step on a NaN target destroys the network. The sliders
+    allow tau down to 0.001, so this was reachable, not theoretical.
+
+    Working in log space and subtracting the maximum first makes the result
+    scale-invariant, so it cannot overflow at any temperature. The numbers it
+    produces are identical to the naive formula wherever the naive one is
+    representable — this is a numerics fix, not a change of target.
+
+    Args:
+        visits: Visit count per action.
+        temperature: tau > 0. Lower = more peaked on the most-visited action.
+
+    Returns:
+        Probabilities over the given actions, summing to 1.
+    """
+    counts = np.asarray(visits, dtype=np.float64)
+    total = counts.sum()
+    if total <= 0:
+        # No visits at all — nothing to prefer, so treat every action equally
+        # rather than emitting NaN from a 0/0 normalisation.
+        return np.full(counts.shape, 1.0 / max(len(counts), 1), dtype=np.float64)
+
+    with np.errstate(divide='ignore'):
+        # Unvisited actions go to -inf here and to exactly 0 after exp(), which
+        # is what we want: they were never explored, so they get no mass.
+        logits = np.log(counts) / max(temperature, 1e-12)
+    logits -= logits.max()
+    weights = np.exp(logits)
+    return weights / weights.sum()
+
+
 class MCTSNode:
     """
     A node in the MCTS search tree.
@@ -145,18 +183,27 @@ class MCTS:
         self.root_value = 0.0
 
     def search(self, state: GameState, temperature: float = 1.0,
-               add_noise: bool = True, allow_pass: bool = True) -> Tuple[Tuple[int, int], np.ndarray]:
+               add_noise: bool = True, allow_pass: bool = True,
+               min_pass_move: int = 0) -> Tuple[Tuple[int, int], np.ndarray]:
         """
         Run MCTS from the given state and return the best action.
-        
+
         Args:
             state: Current game state.
             temperature: Controls randomness of move selection.
                 - temperature=1.0: proportional to visit counts (exploratory)
                 - temperature→0: pick the most-visited move (greedy)
             add_noise: Whether to add Dirichlet noise at root (for training).
-            allow_pass: Whether MOVE_PASS is allowed as a legal action.
-        
+            allow_pass: Whether MOVE_PASS is allowed as a legal action at all.
+            min_pass_move: Game move number before which passing is forbidden.
+                Evaluated PER NODE against that node's own move number, not once
+                for the whole search. Passing a single bool down (the previous
+                behaviour) banned passing at every depth of the tree whenever it
+                was banned at the root, so during the first ~29 moves of a
+                self-play game no line in the search — however deep — could ever
+                reach a terminal position, and the value head's estimate was the
+                only grounding the search had in that phase.
+
         Returns:
             (action, policy_vector):
                 action: (row, col) or MOVE_PASS
@@ -173,28 +220,29 @@ class MCTS:
         root = MCTSNode(root_state)
 
         # Expand root node
-        self._expand(root, allow_pass=allow_pass)
-        
+        self._expand(root, allow_pass=allow_pass, min_pass_move=min_pass_move)
+
         # Add Dirichlet noise to root priors for exploration during training
         if add_noise and root.children:
             self._add_dirichlet_noise(root)
-        
+
         # Run simulations
         for _ in range(self.num_simulations):
             node = root
-            
+
             # SELECT: walk down tree picking best child
             while node.is_expanded and node.children and not node.state.is_over:
                 node = node.best_child(self.c_puct, self.fpu_reduction)
-            
+
             # If game is over at this node, use actual result
             if node.state.is_over:
                 # Value from perspective of the node's current player
                 value = self._terminal_value(node.state)
             else:
                 # EXPAND: evaluate with neural network
-                value = self._expand(node, allow_pass=allow_pass)
-            
+                value = self._expand(node, allow_pass=allow_pass,
+                                     min_pass_move=min_pass_move)
+
             # BACKUP: propagate value up the tree
             self._backup(node, value)
 
@@ -214,54 +262,65 @@ class MCTS:
                 return action_size - 1  # Pass is the last action
             return action[0] * state.board_size + action[1]
 
+        if not root.children:
+            policy[action_size - 1] = 1.0
+            return MOVE_PASS, policy
+
+        actions = list(root.children.keys())
+        visits = np.array([root.children[a].visit_count for a in actions],
+                          dtype=np.float64)
+
         if temperature < 0.01:
             # tau -> 0: the target is a *single* most-visited move. Setting every
             # child tied at max_visits to 1.0 (the old behavior) degenerates to a
             # near-uniform target whenever visits are flat (e.g. low sim counts),
             # which is exactly when the policy head can least afford a noisy label.
             # Pick one argmax deterministically and make the selected move match.
-            best_action = max(root.children.items(),
-                              key=lambda kv: kv[1].visit_count)[0]
+            best_action = actions[int(np.argmax(visits))]
             policy[_action_index(best_action)] = 1.0
             return best_action, policy
 
-        for action, child in root.children.items():
-            policy[_action_index(action)] = float(child.visit_count) ** (1.0 / temperature)
+        # One distribution serves as both the training target and the sampling
+        # distribution for the move actually played, so the move a position is
+        # stored with is always a move that had support in its own target.
+        probs = visit_distribution(visits, temperature)
+        for action, p in zip(actions, probs):
+            policy[_action_index(action)] = p
 
-        # Apply temperature to visit counts for move selection
-        action = self._select_action(root, temperature)
-
-        # Normalize policy to probabilities (training target)
-        total = policy.sum()
-        if total > 0:
-            policy = policy / total
+        action = actions[int(np.random.choice(len(actions), p=probs))]
 
         return action, policy
     
-    def _expand(self, node: MCTSNode, allow_pass: bool = True) -> float:
+    def _expand(self, node: MCTSNode, allow_pass: bool = True,
+                min_pass_move: int = 0) -> float:
         """
         Expand a leaf node: run neural network, create child nodes.
-        
+
         Returns the value estimate for this position.
         """
         state = node.state
-        
+
         # Get neural network prediction
         state_tensor = state.encode_for_nn()
         policy_probs, value = self.network.predict(state_tensor, self.device)
-        
+
         # Get legal moves
         legal_moves = state.get_legal_moves()
-        
-        # Shuffle legal moves to break MCTS tie-breaking symmetry. 
-        # When the network is untrained, priors are uniform. Without shuffling, 
-        # MCTS will always evaluate and play the very first legal moves (e.g. A9, B9) 
+
+        # Shuffle legal moves to break MCTS tie-breaking symmetry.
+        # When the network is untrained, priors are uniform. Without shuffling,
+        # MCTS will always evaluate and play the very first legal moves (e.g. A9, B9)
         # because of deterministic iteration order.
         import random
         random.shuffle(legal_moves)
-        
-        # Allow pass only if allow_pass is True or if there are no legal board moves
-        if allow_pass or not legal_moves:
+
+        # Pass legality is decided from THIS node's move number, not the root's,
+        # so an opening search can still see a game end deep in a line.
+        pass_allowed = allow_pass and state.move_number >= min_pass_move
+
+        # Allow pass only if it is permitted here, or if there is nothing else
+        # to play (the no-legal-moves fallback — never leave a node actionless).
+        if pass_allowed or not legal_moves:
             all_actions = legal_moves + [MOVE_PASS]
         else:
             all_actions = list(legal_moves)
@@ -379,29 +438,22 @@ class MCTS:
     def _select_action(self, root: MCTSNode, temperature: float) -> Tuple[int, int]:
         """
         Select an action from the root based on visit counts and temperature.
-        
-        - temperature=1.0: sample proportional to visit counts
-        - temperature→0: pick the most-visited move (argmax)
+
+        Kept as a standalone entry point for callers that only want a move.
+        search() no longer routes through it: it samples from the very same
+        distribution it returns as the training target, so the stored move can
+        never fall outside the support of the label it is stored with.
         """
         if not root.children:
             return MOVE_PASS
-        
+
         actions = list(root.children.keys())
-        visits = np.array([root.children[a].visit_count for a in actions], dtype=np.float64)
-        
+        visits = np.array([root.children[a].visit_count for a in actions],
+                          dtype=np.float64)
+
         if temperature < 0.01:
             # Greedy: pick the most-visited action
-            best_idx = np.argmax(visits)
-            return actions[best_idx]
-        
-        # Apply temperature: raise visit counts to power 1/T, then normalize
-        # Higher temperature → more uniform, lower → more peaked
-        adjusted = visits ** (1.0 / temperature)
-        total = adjusted.sum()
-        
-        if total == 0:
-            return actions[np.random.randint(len(actions))]
-        
-        probs = adjusted / total
-        idx = np.random.choice(len(actions), p=probs)
-        return actions[idx]
+            return actions[int(np.argmax(visits))]
+
+        probs = visit_distribution(visits, temperature)
+        return actions[int(np.random.choice(len(actions), p=probs))]

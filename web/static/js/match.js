@@ -25,6 +25,9 @@
     let showEstimate = false;
     let showWinRate = true;
     let lastStatus = null;
+    // Last snapshot painted — a rematch is rebuilt from it, so a match picked
+    // up from the launcher can be replayed without the original request.
+    let lastSnapshot = null;
 
     function el(id) {
         return document.getElementById(id);
@@ -247,6 +250,7 @@
                     move_delay: Number(el('match-delay').value) / 1000,
                     record_games: el('match-record').checked,
                     update_ratings: el('match-rate').checked,
+                    mercy_resign: el('match-mercy').checked,
                 }),
             });
             const data = await res.json();
@@ -263,6 +267,7 @@
 
     function enterMatch(snapshot) {
         matchId = snapshot.match_id;
+        lastSnapshot = snapshot;
 
         el('match-summary').hidden = true;
         PlayViews.show('match-live');
@@ -309,6 +314,65 @@
         PlayViews.show('match-setup');
     });
 
+    /**
+     * Run the same series again, same two bots and same settings.
+     *
+     * Rebuilt from the snapshot rather than from the form: the match being
+     * looked at may have been started in another tab, or picked up from the
+     * launcher, and the setup panel would then describe something else.
+     */
+    el('match-rematch')?.addEventListener('click', async () => {
+        if (!lastSnapshot) return;
+        const btn = el('match-rematch');
+        btn.disabled = true;
+        btn.textContent = 'Starting…';
+
+        try {
+            const res = await fetch('/api/match/new', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    player_a: specFromPlayer((lastSnapshot.players || {}).a),
+                    player_b: specFromPlayer((lastSnapshot.players || {}).b),
+                    num_games: lastSnapshot.num_games,
+                    move_delay: lastSnapshot.move_delay,
+                    record_games: lastSnapshot.record_games !== false,
+                    update_ratings: !!lastSnapshot.rated,
+                    mercy_resign: el('match-mercy')?.checked ?? true,
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                showToastMessage(data.error || 'Could not start the rematch.');
+                return;
+            }
+            stopPolling();
+            opponents = null;         // ratings moved — the picker is stale
+            enterMatch(data);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Rematch';
+        }
+    });
+
+    /** The /api/match/new spec that would recreate one side of a match. */
+    function specFromPlayer(player) {
+        if (!player) return null;
+        if (player.kind === 'model') {
+            return { type: 'model', model_id: player.model_id };
+        }
+        return { type: player.kind || 'random' };
+    }
+
+    /** The Play page's toast, shared with game.js. */
+    function showToastMessage(text) {
+        if (typeof showToast === 'function') {
+            showToast(text);
+            return;
+        }
+        showMatchError(text);
+    }
+
     // Leaving the match view does not stop the match — it is a server-side job,
     // and the launcher lists it so it can be picked back up.
     window.addEventListener('play-view-change', (event) => {
@@ -353,13 +417,14 @@
     function render(snapshot) {
         if (!snapshot) return;
         lastStatus = snapshot.status;
+        lastSnapshot = snapshot;
 
         if (snapshot.state && matchBoard) {
             matchBoard.updateState(snapshot.state);
-            el('match-move-counter').textContent = `Move: ${snapshot.state.move_number}`;
+            el('match-move-counter').textContent = `Move ${snapshot.state.move_number}`;
             const prisoners = snapshot.state.prisoners || {};
-            el('match-black-captures').textContent = `Cap: ${prisoners['1'] || 0}`;
-            el('match-white-captures').textContent = `Cap: ${prisoners['2'] || 0}`;
+            el('match-black-captures').textContent = `Captured: ${prisoners['1'] || 0}`;
+            el('match-white-captures').textContent = `Captured: ${prisoners['2'] || 0}`;
         }
 
         // The territory overlay writes its own (estimated) numbers into these
@@ -369,8 +434,9 @@
             el('match-white-score').textContent = Number(snapshot.scores.white || 0).toFixed(1);
         }
 
-        renderPlayers(snapshot);
-        renderStatus(snapshot);
+        const over = snapshot.status !== 'running' && snapshot.status !== 'pending';
+
+        renderPlayers(snapshot, over);
         renderResults(snapshot);
         renderWinRate(snapshot);
 
@@ -378,16 +444,20 @@
         pauseBtn.dataset.paused = snapshot.paused ? '1' : '0';
         pauseBtn.textContent = snapshot.paused ? '▶ Resume' : '⏸ Pause';
 
-        const over = snapshot.status !== 'running' && snapshot.status !== 'pending';
-        pauseBtn.disabled = over;
-        el('match-stop').disabled = over;
+        // A finished series has nothing left to pause, stop or slow down —
+        // those controls go away instead of sitting there disabled.
+        el('match-controls').hidden = over;
+        el('match-speed-group').hidden = over;
         renderSummary(snapshot, over);
     }
 
     /**
-     * The end-of-series banner. Previously the only sign a match had ended was
-     * the status line changing and a button appearing at the bottom of the
-     * panel — both easy to miss entirely.
+     * The end-of-series banner: who won, and the obvious next thing to do.
+     *
+     * Deliberately thin. The scoreboard right below it already carries both
+     * names, both ratings and the running score, and the results list carries
+     * every game — repeating all of that here was the bulk of what made the
+     * old banner a wall of numbers.
      */
     function renderSummary(snapshot, over) {
         const banner = el('match-summary');
@@ -396,46 +466,49 @@
         banner.hidden = !over;
         if (!over) return;
 
+        banner.dataset.outcome = snapshot.status;
+        const rematch = el('match-rematch');
+
+        if (snapshot.status === 'error') {
+            el('match-summary-icon').textContent = '⚠️';
+            el('match-summary-title').textContent =
+                snapshot.error || 'The match could not finish.';
+            el('match-summary-elo').textContent = '';
+            if (rematch) rematch.textContent = 'Try again';
+            return;
+        }
+
         const players = snapshot.players || {};
         const series = snapshot.series || {};
         const nameA = (players.a || {}).name || 'A';
         const nameB = (players.b || {}).name || 'B';
-        const draws = series.draw || 0;
+        const tied = (series.a ?? 0) === (series.b ?? 0);
+        const winner = (series.a ?? 0) > (series.b ?? 0) ? nameA : nameB;
+        const high = Math.max(series.a ?? 0, series.b ?? 0);
+        const low = Math.min(series.a ?? 0, series.b ?? 0);
 
-        let badge = 'Series complete';
-        if (snapshot.status === 'stopped') badge = 'Match stopped';
-        if (snapshot.status === 'error') badge = 'Match failed';
-        banner.dataset.outcome = snapshot.status;
-        el('match-summary-badge').textContent = badge;
+        el('match-summary-icon').textContent = tied ? '🤝' : '🏆';
+        el('match-summary-title').textContent = tied
+            ? `${nameA} and ${nameB} draw the series ${high}–${low}`
+            : `${winner} wins ${high}–${low}`;
+        if (rematch) rematch.textContent = 'Rematch';
 
-        if (snapshot.status === 'error') {
-            el('match-summary-title').textContent = snapshot.error || 'The match could not finish.';
-            el('match-summary-score').textContent = '';
-            el('match-summary-elo').textContent = '';
-            return;
-        }
+        // The one number the scoreboard cannot show afterwards: what the
+        // series did to the ratings.
+        el('match-summary-elo').innerHTML = eloMovement(snapshot);
+    }
 
-        el('match-summary-title').textContent = seriesSummary(snapshot);
-        el('match-summary-score').textContent =
-            `${nameA} ${series.a ?? 0} — ${series.b ?? 0} ${nameB}` +
-            (draws ? ` · ${draws} draw${draws === 1 ? '' : 's'}` : '') +
-            ` · ${snapshot.games_completed ?? 0} of ${snapshot.num_games} games played`;
-
-        // Elo only moved if the match was rated; say so either way, since the
-        // whole point of a series is what it did to the ratings.
-        if (!snapshot.rated) {
-            el('match-summary-elo').textContent = 'Unrated — no ratings changed.';
-            return;
-        }
-        el('match-summary-elo').innerHTML = ['a', 'b'].map(slot => {
+    /** "hot boi 812 (+7.4) · lucky thirteen 494 (−7.4)", or nothing to say. */
+    function eloMovement(snapshot) {
+        if (!snapshot.rated) return 'Unrated — no ratings changed.';
+        const players = snapshot.players || {};
+        return ['a', 'b'].map(slot => {
             const p = players[slot] || {};
+            if (p.rating_is_fixed) return `${escapeHtml(p.name || slot)}: anchor`;
             const delta = Number(p.rating_delta || 0);
-            if (p.rating_is_fixed) {
-                return `${escapeHtml(p.name || slot)}: anchor`;
-            }
             const cls = delta > 0 ? 'match-elo-up' : (delta < 0 ? 'match-elo-down' : '');
             const sign = delta > 0 ? '+' : '';
-            return `${escapeHtml(p.name || slot)}: ${Math.round(p.rating ?? 0)} ` +
+            return `${escapeHtml(p.name || slot)} ${Math.round(p.rating ?? 0)} ` +
                    `<span class="${cls}">(${sign}${delta.toFixed(1)})</span>`;
         }).join(' &nbsp;·&nbsp; ');
     }
@@ -446,7 +519,7 @@
         })[c]);
     }
 
-    function renderPlayers(snapshot) {
+    function renderPlayers(snapshot, over) {
         const players = snapshot.players || {};
         ['a', 'b'].forEach(slot => {
             const player = players[slot] || {};
@@ -473,50 +546,16 @@
 
         const draws = (snapshot.series || {}).draw || 0;
         const rated = snapshot.rated ? '' : ' · unrated';
+        const paused = (!over && snapshot.paused) ? ' · paused' : '';
         el('match-series-line').textContent =
             `Game ${Math.min(snapshot.current_game, snapshot.num_games)} of ${snapshot.num_games}` +
-            (draws ? ` · ${draws} draw${draws === 1 ? '' : 's'}` : '') + rated;
-    }
+            (draws ? ` · ${draws} draw${draws === 1 ? '' : 's'}` : '') + rated + paused;
 
-    function renderStatus(snapshot) {
-        const status = el('match-status');
-        if (snapshot.status === 'error') {
-            status.textContent = `Error: ${snapshot.error || 'match failed'}`;
-            return;
-        }
-        // Short forms only — the summary banner directly above carries the
-        // full result, and printing it twice just crowds the panel.
-        if (snapshot.status === 'finished') {
-            status.textContent = 'Series complete';
-            return;
-        }
-        if (snapshot.status === 'stopped') {
-            status.textContent = 'Match stopped';
-            return;
-        }
-        if (snapshot.paused) {
-            status.textContent = 'Paused';
-            return;
-        }
-
+        // What the removed status heading used to say, minus the parts the
+        // summary banner and the highlighted row already carry.
         const last = snapshot.last_move;
-        if (last) {
-            el('match-status').textContent = `${last.player_name} played ${moveText(last.move)}`;
-        } else {
-            status.textContent = 'Thinking…';
-        }
-    }
-
-    function seriesSummary(snapshot) {
-        const players = snapshot.players || {};
-        const series = snapshot.series || {};
-        const nameA = (players.a || {}).name || 'A';
-        const nameB = (players.b || {}).name || 'B';
-        if (series.a === series.b) return `Tied ${series.a}–${series.b} (${nameA} vs ${nameB})`;
-        const leader = series.a > series.b ? nameA : nameB;
-        const high = Math.max(series.a, series.b);
-        const low = Math.min(series.a, series.b);
-        return `${leader} wins the series ${high}–${low}`;
+        el('match-last-move').textContent =
+            last ? `Last: ${last.player_name} ${moveText(last.move)}` : '';
     }
 
     function moveText(move) {

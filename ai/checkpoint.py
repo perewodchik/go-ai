@@ -27,6 +27,7 @@ def save_weights(
     total_games: int,
     weights_path: str,
     champion_state_dict: Optional[Dict] = None,
+    gate_elo: Optional[float] = None,
 ) -> str:
     """
     Save training state to a single weights file.
@@ -43,6 +44,10 @@ def save_weights(
             generates self-play games). Stored alongside the training network
             so a restart resumes from the champion rather than from an
             un-promoted candidate. Optional — older files simply lack it.
+        gate_elo: Rating on the self-referential promotion-gate ladder. Kept
+            separate from `elo` (which is measured against the random-bot
+            anchor) because the two stop agreeing as soon as the anchor
+            saturates. Optional — older files simply lack it.
 
     Returns:
         Path to the saved file.
@@ -61,6 +66,7 @@ def save_weights(
         'elo': elo,
         'kyu_rank': kyu_rank,
         'total_games': total_games,
+        'gate_elo': gate_elo,
         'arch': arch,
         'timestamp': datetime.now().isoformat(),
     }
@@ -125,6 +131,9 @@ def load_weights(
         'elo': state.get('elo', 500),
         'kyu_rank': state.get('kyu_rank', '30k'),
         'total_games': state.get('total_games', 0),
+        # None for checkpoints written before the gate ladder existed; the
+        # trainer then seeds it from the anchor Elo.
+        'gate_elo': state.get('gate_elo'),
         'arch': saved_arch,
         'timestamp': state.get('timestamp', ''),
         # None for checkpoints saved before gating existed; the caller then

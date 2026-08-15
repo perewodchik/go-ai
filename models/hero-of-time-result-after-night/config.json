@@ -16,7 +16,20 @@
     "reflection_interval_games": 50,
     "temperature_threshold": 30,
     "temperature_init": 0.8,
-    "temperature_final": 0.101
+    "temperature_final": 0.101,
+    "gate_enabled": true,
+    "gate_games": 20,
+    "gate_threshold": 0.55,
+    "gate_simulations": 50,
+    "gate_stall_warning": 5,
+    "num_parallel_workers": 4,
+    "restrict_eye_fill": false,
+    "resign_enabled": false,
+    "resign_threshold": 0.9,
+    "resign_consecutive": 4,
+    "resign_min_move_factor": 1.0,
+    "resign_both_sides": true,
+    "resign_playout_fraction": 0.1
   },
   "network": {
     "size_preset": "small",
@@ -25,7 +38,7 @@
     "value_head_hidden": 64
   },
   "created_at": "2026-08-15T10:11:54.248712",
-  "elo": 591.1565001120211,
+  "elo": 583.1565001120211,
   "kyu_rank": "29k",
   "iteration": 19,
   "total_games": 380

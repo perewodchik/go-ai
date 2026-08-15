@@ -67,6 +67,11 @@ class GoBoardRenderer {
         // hover/click positions map to the wrong intersection.
         totalSize = Math.min(totalSize, 600);
 
+        // A hidden panel measures zero, which would make the cell size (and the
+        // stone radius) negative and throw out of the next draw. Keep the last
+        // good geometry; the view is redrawn when it comes back on screen.
+        if (totalSize < 2 * this.padding + this.boardSize) return;
+
         // Handle high-DPI displays
         const dpr = window.devicePixelRatio || 1;
         this.canvas.width = totalSize * dpr;

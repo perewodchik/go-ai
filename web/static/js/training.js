@@ -436,6 +436,44 @@ function addLogEntry(data, append = false) {
 }
 
 // ---- Games List ----
+function escapeAttr(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+                      .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Mercy-rule marker on a game row. The server explains the resignation
+ * (ai/resignation.py); the row shows the short form and carries the full
+ * reason as a tooltip. `checked` games did NOT end early — the rule fired and
+ * was deliberately overruled so it could be measured.
+ */
+function gameResignTag(game) {
+    const info = game.resignation;
+    if (!info) return '';
+
+    const title = escapeAttr(info.reason || '');
+    if (info.resigned) return `<span class="resign-tag" title="${title}">🏳</span>`;
+    if (info.false_resign) return `<span class="resign-tag is-wrong" title="${title}">⚑!</span>`;
+    return `<span class="resign-tag is-check" title="${title}">⚑</span>`;
+}
+
+/** How much of a phase ended early, on its header. */
+function gamesPhaseResignBadge(phase) {
+    const resigned = phase.resigned_count || 0;
+    const checked = phase.resign_checked_count || 0;
+    const wrong = phase.false_resign_count || 0;
+    if (!resigned && !checked) return '';
+
+    const bits = [];
+    if (resigned) bits.push(`${resigned} of ${phase.count} games ended by resignation`);
+    if (checked) bits.push(`${checked} played out as mercy-rule checks`);
+    if (wrong) bits.push(`${wrong} of those checks show the rule would have been WRONG`);
+
+    const cls = wrong ? 'phase-resign-note is-wrong' : 'phase-resign-note';
+    const label = resigned ? `🏳 ${resigned}` : `⚑ ${checked}`;
+    return `<span class="${cls}" title="${escapeAttr(bits.join('; '))}">${label}</span>`;
+}
+
 function gamesPhaseBadge(phase) {
     const color = (rate, threshold = 0.5) => {
         if (rate > threshold) return 'var(--success)';
@@ -443,26 +481,28 @@ function gamesPhaseBadge(phase) {
         return 'var(--warning)';
     };
 
+    const resign = gamesPhaseResignBadge(phase);
+
     if (phase.phase === 'promotion') {
         const rate = phase.candidate_win_rate !== undefined && phase.candidate_win_rate !== null
             ? phase.candidate_win_rate
             : phase.gate_win_rate;
-        if (rate === undefined || rate === null) return '';
+        if (rate === undefined || rate === null) return resign;
 
         const pct = Math.round(rate * 100);
-        return `<span class="group-note" style="color: ${color(rate, phase.gate_threshold || 0.5)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
+        return `${resign}<span class="group-note" style="color: ${color(rate, phase.gate_threshold || 0.5)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
             ${pct}%
         </span>`;
     }
 
     if (phase.phase === 'eval' && phase.win_rate !== null && phase.win_rate !== undefined) {
         const pct = Math.round(phase.win_rate * 100);
-        return `<span class="group-note" style="color: ${color(phase.win_rate)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
+        return `${resign}<span class="group-note" style="color: ${color(phase.win_rate)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
             ${pct}%
         </span>`;
     }
 
-    return '';
+    return resign;
 }
 
 async function loadGamesList() {
@@ -526,9 +566,13 @@ async function loadGamesList() {
                     let resultText = 'Draw';
                     if (game.winner === 1) resultText = `B+${game.margin || '?'}`;
                     else if (game.winner === 2) resultText = `W+${game.margin || '?'}`;
+                    // Resigned games have no margin — B+R / W+R, as in Go.
+                    if (game.resignation && game.resignation.resigned && game.resignation.result) {
+                        resultText = game.resignation.result;
+                    }
 
                     item.innerHTML = `
-                        <span>${winnerIcon} ${label}</span>
+                        <span>${winnerIcon} ${label}${gameResignTag(game)}</span>
                         <span class="meta"><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves</span>
                     `;
                     item.addEventListener('click', () => {

@@ -39,7 +39,13 @@ def _eval_worker(kwargs: dict) -> int:
     # it the same move filter would quietly make the baseline stronger and the
     # measured Elo incomparable with every iteration recorded before the setting
     # was switched on.
+    # Search settings come from the model's config, not from MCTS's own
+    # defaults. They used to be left at 1.5 / 0.35 here, so tuning c_puct
+    # changed how self-play searched but not how the resulting network was
+    # measured.
     mcts = MCTS(network=network, num_simulations=num_simulations, device=device,
+                c_puct=kwargs.get('c_puct', 1.5),
+                fpu_reduction=kwargs.get('fpu_reduction', 0.35),
                 restrict_eye_fill=kwargs.get('restrict_eye_fill', False))
     random_bot = RandomBot(pass_probability=0.05)
     scorer = get_scorer("chinese")
@@ -118,6 +124,8 @@ def evaluate_against_random(
     num_workers: int = 4,
     progress_callback: Optional[Callable] = None,
     restrict_eye_fill: bool = False,
+    c_puct: float = 1.5,
+    fpu_reduction: float = 0.35,
 ) -> float:
     """
     Play games against the random bot and return win rate.
@@ -147,6 +155,8 @@ def evaluate_against_random(
             'iteration': iteration,
             'games_dir': games_dir,
             'restrict_eye_fill': restrict_eye_fill,
+            'c_puct': c_puct,
+            'fpu_reduction': fpu_reduction,
         })
 
     wins = 0
@@ -213,6 +223,8 @@ def _play_gate_game(
     iteration: int,
     games_dir: Optional[str],
     restrict_eye_fill: bool = False,
+    c_puct: float = 1.5,
+    fpu_reduction: float = 0.35,
 ) -> int:
     """
     Play one candidate-vs-champion game and record it. Returns 1 if the
@@ -229,9 +241,11 @@ def _play_gate_game(
     # under the conditions they will actually play under, so an asymmetric
     # filter here would measure the filter instead of the networks.
     current_mcts = MCTS(network=current_network, num_simulations=num_simulations,
-                        device=device, restrict_eye_fill=restrict_eye_fill)
+                        device=device, c_puct=c_puct, fpu_reduction=fpu_reduction,
+                        restrict_eye_fill=restrict_eye_fill)
     opponent_mcts = MCTS(network=opponent_network, num_simulations=num_simulations,
-                         device=device, restrict_eye_fill=restrict_eye_fill)
+                         device=device, c_puct=c_puct, fpu_reduction=fpu_reduction,
+                         restrict_eye_fill=restrict_eye_fill)
     scorer = get_scorer("chinese")
 
     state = GameState(board_size=board_size, komi=komi)
@@ -311,6 +325,8 @@ def evaluate_against_checkpoint(
     stop_checker: Optional[Callable[[], bool]] = None,
     progress_callback: Optional[Callable] = None,
     restrict_eye_fill: bool = False,
+    c_puct: float = 1.5,
+    fpu_reduction: float = 0.35,
 ) -> float:
     """
     Play the promotion-gate match between the candidate (`current_network`) and
@@ -345,6 +361,8 @@ def evaluate_against_checkpoint(
             'iteration': iteration,
             'games_dir': games_dir,
             'restrict_eye_fill': restrict_eye_fill,
+            'c_puct': c_puct,
+            'fpu_reduction': fpu_reduction,
         }
 
     workers = max(1, min(num_games, num_workers, os.cpu_count() or 4))
@@ -446,17 +464,68 @@ def compute_pairwise_elo(elo_a: float, elo_b: float, score_a: float,
     return max(0.0, elo_a + delta), max(0.0, elo_b - delta)
 
 
-def compute_elo_update(current_elo: float, opponent_elo: float, win_rate: float) -> float:
+def clamp_score(win_rate: float, num_games: int) -> float:
+    """
+    Pull a perfect (or perfectly bad) score in by half a game.
+
+    A clean sweep of N games does not demonstrate infinite superiority; it
+    demonstrates "at least as good as N-0.5 out of N". Without this correction
+    any rating derived from a saturated score runs away, because the formulae
+    below both send a score of exactly 1.0 to +infinity.
+
+    With N=4 the score is capped at 0.875, with N=20 at 0.975 — so gathering
+    more evidence is what buys the right to claim a bigger gap, which is the
+    behaviour you want.
+    """
+    if num_games <= 0:
+        return win_rate
+    margin = 1.0 / (2.0 * num_games)
+    return min(max(win_rate, margin), 1.0 - margin)
+
+
+def performance_elo_gap(win_rate: float, num_games: int) -> float:
+    """
+    Elo difference implied by a head-to-head score between equally rated players.
+
+        gap = -400 * log10(1/score - 1)
+
+    This is what the promotion gate has been measuring and discarding: it plays
+    `gate_games` rated games between candidate and champion every iteration and
+    then reduces the whole match to one promote/reject boolean. A 60% score over
+    20 games is ~+70 Elo of evidence, and that is a real, self-referential
+    measurement of progress — unlike the random-bot anchor, which stops carrying
+    information the moment the bot wins every game.
+    """
+    score = clamp_score(win_rate, num_games)
+    if score <= 0.0:
+        return -4000.0
+    if score >= 1.0:
+        return 4000.0
+    return -400.0 * math.log10(1.0 / score - 1.0)
+
+
+def compute_elo_update(current_elo: float, opponent_elo: float, win_rate: float,
+                       num_games: int = 0) -> float:
     """
     Update Elo rating based on win rate against an opponent.
-    
+
     Uses standard Elo formula:
         expected = 1 / (1 + 10^((opponent - current) / 400))
         new_elo = current + K * (actual - expected)
-    
+
     K-factor is 32 (standard for developing players).
+
+    `num_games` (when given) applies the half-game correction above. This is the
+    fix for unbounded Elo drift: against a FIXED anchor, once win_rate saturates
+    at 1.0 the update is 32 * (1 - expected), which is strictly positive forever
+    — +5.4 Elo per iteration at Elo 778, +3.3 at 1000, never reaching zero. The
+    rating then measures how many iterations have run, not how strong the bot
+    is. With the correction the rating converges to the ceiling the evaluation
+    can actually support (anchor + 400*log10(2N-1)) and stops there: about
+    +338 Elo for 4 eval games, +654 for 20.
     """
     K = 32
+    score = clamp_score(win_rate, num_games) if num_games else win_rate
     expected = 1.0 / (1.0 + math.pow(10, (opponent_elo - current_elo) / 400))
-    new_elo = current_elo + K * (win_rate - expected)
+    new_elo = current_elo + K * (score - expected)
     return max(0, new_elo)  # Floor at 0

@@ -23,6 +23,7 @@ from ai.game_store import (
     migrate_legacy_layout,
     resolve_game_path,
 )
+from ai.resignation import annotate_resignation
 from param_bounds import sanitize_params
 
 training_bp = Blueprint('training', __name__)
@@ -137,7 +138,7 @@ def list_games():
         for game_file, data in load_human_game_files(games_dir):
             data['filename'] = game_file.rel_path
             data['phase'] = PHASE_HUMAN
-            recorded.append(data)
+            recorded.append(annotate_resignation(data))
 
         if recorded:
             result.append({
@@ -154,7 +155,7 @@ def list_games():
         for game_file, data in load_match_game_files(games_dir):
             data['filename'] = game_file.rel_path
             data['phase'] = PHASE_MATCH
-            matches.append(data)
+            matches.append(annotate_resignation(data))
 
         if matches:
             by_match = {}
@@ -185,6 +186,7 @@ def list_games():
     for game_file, data in load_game_files(games_dir):
         data['filename'] = game_file.rel_path
         data['phase'] = game_file.phase
+        annotate_resignation(data)
         grouped.setdefault(game_file.iteration, {}).setdefault(game_file.phase, []).append(data)
 
     # Metrics supply the per-iteration Elo and the gate outcome.
@@ -208,6 +210,14 @@ def list_games():
                 'count': len(games),
                 'games': games,
             }
+
+            # How much of this phase ended early, so a group summary can say so
+            # without the user opening it. `checked` counts the playout games
+            # where the mercy rule fired and was deliberately overruled.
+            resign_info = [g['resignation'] for g in games if g.get('resignation')]
+            group['resigned_count'] = sum(1 for r in resign_info if r['resigned'])
+            group['resign_checked_count'] = sum(1 for r in resign_info if r['checked'])
+            group['false_resign_count'] = sum(1 for r in resign_info if r['false_resign'])
 
             if phase == PHASE_PROMOTION:
                 decided = [g for g in games if g.get('winner')]
@@ -273,6 +283,10 @@ def get_game(rel_path):
 
     with open(path) as f:
         game_data = json.load(f)
+
+    # Why the game ended, if it ended in a resignation — same shape the games
+    # list carries, so the review page explains a row the same way it lists it.
+    annotate_resignation(game_data)
 
     # Reconstruct exact board states for accurate replay (including captures)
     from game.game_state import GameState

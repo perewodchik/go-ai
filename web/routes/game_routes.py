@@ -5,7 +5,10 @@ Supports two modes:
 - Easy: move suggestions, analysis overlay, undo/redo
 - Hard: pure play, no assistance
 
-Board size and komi are locked to the active model's configuration.
+The opponent is any model in the workspace — the Dashboard's active model is
+only the default. Board size, komi and ruleset are locked to whichever model
+was picked, and every session carries its own network, so two games against
+two different models can be open at once.
 """
 
 import uuid
@@ -15,12 +18,15 @@ from flask import Blueprint, render_template, request, jsonify, session
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from config import Config
 from game.game_state import GameState, MOVE_PASS, MOVE_RESIGN
 from game.board import BLACK, WHITE
 from game.scoring.base import get_scorer
 from game.scoring.estimator import ScoreEstimator
 from ai.game_store import save_human_game
 from ai.mcts import MCTS
+from ai.mercy_rule import MercyRule
+from ai.model_loader import load_model_network
 
 game_bp = Blueprint('game', __name__)
 
@@ -29,34 +35,61 @@ game_sessions = {}
 score_estimator = ScoreEstimator()
 
 
-def _get_network():
-    """Get the current trained network from the trainer."""
-    from web.app import trainer
-    if trainer is None:
-        return None, None
-    # Use the dedicated CPU eval_network for fast unbatched human games
-    return trainer.eval_network, "cpu"
+def _get_manager():
+    from web.app import model_manager
+    return model_manager
 
 
 def _get_active_model():
     """Get active model info."""
-    from web.app import model_manager
-    return model_manager.get_active_model()
+    return _get_manager().get_active_model()
 
 
-def _restrict_eye_fill() -> bool:
+def _load_opponent(model_id: str) -> dict:
     """
-    Whether the active model's own-two-eye-fill restriction is on.
+    Everything a game session needs to let `model_id` play: its network and the
+    settings the model was trained under.
 
-    Read from the live trainer config (the same object the training loop uses)
-    so a bot playing a human here is subject to exactly the restriction it was
-    trained under. Never applies to the human's own moves — those go through
-    play_move(), which the restriction deliberately does not touch.
+    The ACTIVE model plays through the trainer's own CPU eval_network — that is
+    the live champion, which during training is ahead of what is on disk. Any
+    other model is loaded (and cached) by ai.model_loader, exactly as a bot-vs-bot
+    match loads it.
+
+    `restrict_eye_fill` comes from the chosen model's config so a bot playing a
+    human is subject to the restriction it was trained under. It never applies
+    to the human's own moves — those go through play_move(), which the
+    restriction deliberately does not touch.
+
+    Raises ValueError if the model does not exist.
     """
     from web.app import trainer
-    if trainer is None:
-        return False
-    return bool(getattr(trainer.config.training, 'restrict_eye_fill', False))
+
+    mgr = _get_manager()
+    info = mgr.get_model(model_id)
+    if info is None:
+        raise ValueError(f"Model not found: {model_id}")
+
+    config = Config.from_model(info, mgr.get_model_dir(model_id))
+
+    if trainer is not None and model_id == mgr.get_active_model_id():
+        network = trainer.eval_network
+    else:
+        network, _, _ = load_model_network(model_id, manager=mgr)
+
+    return {
+        'model_id': info.id,
+        'model_name': info.name,
+        'model_iteration': info.iteration,
+        'network': network,
+        'board_size': info.board_size,
+        'komi': info.komi,
+        'scoring_method': info.ruleset,
+        'c_puct': config.mcts.c_puct,
+        'restrict_eye_fill': bool(config.training.restrict_eye_fill),
+        'games_dir': config.paths.games_dir,
+        'default_simulations': config.mcts.num_simulations,
+        'config': config,
+    }
 
 
 @game_bp.route('/play')
@@ -65,34 +98,78 @@ def play_page():
     return render_template('play.html', active_model=model)
 
 
+@game_bp.route('/api/game/opponents')
+def list_opponents():
+    """
+    Models that can be played against, plus which one the Dashboard has active
+    (the default selection in the setup panel).
+    """
+    mgr = _get_manager()
+    models = [{
+        'model_id': info.id,
+        'name': info.name,
+        'board_size': info.board_size,
+        'komi': info.komi,
+        'ruleset': info.ruleset,
+        'elo': round(info.elo, 1),
+        'kyu_rank': info.kyu_rank,
+        'iteration': info.iteration,
+        'default_simulations': info.training.num_simulations,
+    } for info in mgr.list_models()]
+
+    return jsonify({
+        'models': models,
+        'active_model_id': mgr.get_active_model_id(),
+    })
+
+
 @game_bp.route('/api/game/new', methods=['POST'])
 def new_game():
-    """Create a new game session. Board size and komi come from the active model."""
-    model = _get_active_model()
-    if not model:
+    """
+    Create a new game session.
+
+    The opponent is `model_id` when the client sends one, otherwise the active
+    model; board size, komi and ruleset are locked to whichever it is.
+    """
+    data = request.get_json() or {}
+
+    model_id = (data.get('model_id') or '').strip() or _get_manager().get_active_model_id()
+    if not model_id:
         return jsonify({'error': 'No model selected. Create or select a model from the Dashboard.'}), 400
 
-    network, device = _get_network()
-    if network is None:
+    try:
+        opponent = _load_opponent(model_id)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except Exception as exc:
+        # A weights file that no longer matches the model's architecture, most
+        # likely — say so instead of failing on the first move.
+        return jsonify({'error': f'Could not load {model_id}: {exc}'}), 400
+
+    if opponent['network'] is None:
         return jsonify({'error': 'Model not loaded'}), 400
 
-    data = request.get_json() or {}
-    # Board size and komi are locked to model
-    board_size = model.board_size
-    komi = model.komi
+    board_size = opponent['board_size']
+    komi = opponent['komi']
     mode = data.get('mode', 'hard')  # 'easy' or 'hard'
     player_color = data.get('player_color', 'black')  # 'black' or 'white'
-    num_simulations = data.get('num_simulations', 200)
+    num_simulations = data.get('num_simulations') or opponent['default_simulations']
 
     game_id = str(uuid.uuid4())[:8]
     state = GameState(board_size=board_size, komi=komi)
+
+    # Mercy rule: the bot gives up once its own search has called the game lost
+    # for several moves running, instead of playing a decided endgame out.
+    mercy = MercyRule.from_config(opponent['config'], board_size,
+                                  enabled=data.get('mercy_resign'))
 
     game_sessions[game_id] = {
         'state': state,
         'mode': mode,
         'player_color': BLACK if player_color == 'black' else WHITE,
-        'num_simulations': num_simulations,
-        'scoring_method': model.ruleset,
+        'num_simulations': int(num_simulations),
+        'mercy': mercy,
+        **opponent,
     }
 
     response = {
@@ -102,8 +179,11 @@ def new_game():
         'player_color': player_color,
         'board_size': board_size,
         'komi': komi,
-        # Names the game in the Play launcher's in-progress list.
-        'model_name': model.name,
+        'ruleset': opponent['scoring_method'],
+        'model_id': opponent['model_id'],
+        # Names the game in the Play launcher's list.
+        'model_name': opponent['model_name'],
+        'mercy_resign': mercy.describe(),
     }
 
     # If player is white, bot plays first (as black)
@@ -152,6 +232,33 @@ def make_move():
     })
 
 
+def _result_for(sess: dict, scorer, black_score: float, white_score: float):
+    """
+    How the game ended, or None while it is still running.
+
+    A resignation has no margin to report — the loser gave up rather than
+    being counted out — so the winner comes from the state itself.
+    """
+    state = sess['state']
+    if not state.is_over:
+        return None
+
+    if state.resign_color:
+        return {
+            'winner': 'black' if state.winner == BLACK else 'white',
+            'reason': 'resignation',
+            'resigned_by': 'human' if state.resign_color == sess['player_color'] else 'bot',
+        }
+
+    winner, margin = scorer.determine_winner(state)
+    return {
+        'winner': 'black' if winner == BLACK else ('white' if winner == WHITE else 'draw'),
+        'margin': margin,
+        'black_score': black_score,
+        'white_score': white_score,
+    }
+
+
 @game_bp.route('/api/game/bot_move', methods=['POST'])
 def get_bot_move():
     """Trigger the bot to make a move."""
@@ -178,6 +285,9 @@ def get_bot_move():
         'state': state.to_dict(),
         'bot_move': bot_move,
         'scores': {'black': black_score, 'white': white_score},
+        # The bot's move can END the game — two passes, or the mercy rule. Say
+        # so here, or the client has a finished game and no result to show.
+        'result': _result_for(sess, scorer, black_score, white_score),
     })
 
 
@@ -204,20 +314,11 @@ def pass_turn():
     scoring_method = sess.get('scoring_method', 'chinese')
     scorer = get_scorer(scoring_method)
     black_score, white_score = scorer.score(state)
-    result = None
-    if state.is_over:
-        winner, margin = scorer.determine_winner(state)
-        result = {
-            'winner': 'black' if winner == BLACK else ('white' if winner == WHITE else 'draw'),
-            'margin': margin,
-            'black_score': black_score,
-            'white_score': white_score,
-        }
 
     return jsonify({
         'state': state.to_dict(),
         'scores': {'black': black_score, 'white': white_score},
-        'result': result,
+        'result': _result_for(sess, scorer, black_score, white_score),
     })
 
 
@@ -234,12 +335,12 @@ def resign():
     state = sess['state']
     state.play_resign()
 
+    scorer = get_scorer(sess.get('scoring_method', 'chinese'))
+    black_score, white_score = scorer.score(state)
+
     return jsonify({
         'state': state.to_dict(),
-        'result': {
-            'winner': 'black' if state.winner == BLACK else 'white',
-            'reason': 'resignation',
-        },
+        'result': _result_for(sess, scorer, black_score, white_score),
     })
 
 
@@ -277,12 +378,10 @@ def suggest_move():
     if sess['mode'] != 'easy':
         return jsonify({'error': 'Suggestions only in easy mode'}), 403
 
-    network, device = _get_network()
-    if network is None:
+    if sess['network'] is None:
         return jsonify({'error': 'Model not loaded'}), 400
 
-    mcts = MCTS(network=network, num_simulations=sess['num_simulations'], device=device,
-                restrict_eye_fill=_restrict_eye_fill())
+    mcts = _session_mcts(sess)
     action, policy = mcts.search(sess['state'], temperature=0.1, add_noise=False)
 
     suggestion = list(action) if action != MOVE_PASS else 'pass'
@@ -352,15 +451,15 @@ def _replay_positions(state: GameState):
     return move_list, encoded, movers
 
 
-def _win_rate_curve(state: GameState) -> list:
+def _win_rate_curve(state: GameState, network) -> list:
     """
     Black's win probability (%) at every position of a session's game.
 
-    Evaluated in one batch with the network's value head — the same quantity
-    the review page charts, so a recorded game's curve matches what the
-    reviewer would recompute for it. Returns [] if no usable network.
+    Evaluated in one batch with the value head of the network the session is
+    playing against — the same quantity the review page charts, so a recorded
+    game's curve matches what the reviewer would recompute for it. Returns []
+    if no usable network.
     """
-    network, device = _get_network()
     if network is None:
         return []
 
@@ -370,7 +469,7 @@ def _win_rate_curve(state: GameState) -> list:
 
     try:
         import torch
-        _, values = network.predict_batch(torch.stack(encoded), device)
+        _, values = network.predict_batch(torch.stack(encoded), "cpu")
     except Exception:
         # Board-size mismatch or a network that failed to load — the curve is
         # an extra, never a reason to fail the move the user just played.
@@ -396,7 +495,7 @@ def game_win_rate():
     if sess['mode'] != 'easy':
         return jsonify({'error': 'Win rate only available in easy mode'}), 403
 
-    curve = _win_rate_curve(sess['state'])
+    curve = _win_rate_curve(sess['state'], sess['network'])
     return jsonify({
         'win_rates': curve,
         'move_number': sess['state'].move_number,
@@ -406,18 +505,15 @@ def game_win_rate():
 @game_bp.route('/api/game/record', methods=['POST'])
 def record_game():
     """
-    Save the session's game to the model's games/human/ directory, so it shows
-    up in Review Games alongside the training games.
+    Save the session's game to the games/human/ directory of the model it was
+    played against, so it shows up in Review Games alongside that model's
+    training games.
     """
     data = request.get_json() or {}
     game_id = data.get('game_id')
 
     if game_id not in game_sessions:
         return jsonify({'error': 'Game not found'}), 404
-
-    from web.app import trainer
-    if trainer is None:
-        return jsonify({'error': 'No model selected'}), 400
 
     sess = game_sessions[game_id]
     state = sess['state']
@@ -431,7 +527,6 @@ def record_game():
     winner, margin = (scorer.determine_winner(state) if state.is_over else (None, 0.0))
 
     player_color = sess['player_color']
-    model = _get_active_model()
     name = (data.get('name') or '').strip()
 
     record = {
@@ -439,7 +534,7 @@ def record_game():
         'komi': state.komi,
         'moves': move_list,
         'num_moves': len(move_list),
-        'win_rates': _win_rate_curve(state),
+        'win_rates': _win_rate_curve(state, sess['network']),
         'winner': int(winner) if winner else 0,
         'black_score': black_score,
         'white_score': white_score,
@@ -453,29 +548,46 @@ def record_game():
         'num_simulations': sess.get('num_simulations'),
         'resigned_by': int(state.resign_color) if state.resign_color else None,
         'unfinished': not state.is_over,
-        'model_name': model.name if model else None,
+        'model_name': sess.get('model_name'),
         # Which trained version of the bot this was played against.
-        'model_iteration': getattr(trainer, 'iteration', None),
+        'model_iteration': sess.get('model_iteration'),
     }
 
-    rel_path = save_human_game(trainer.config.paths.games_dir, record)
+    rel_path = save_human_game(sess['games_dir'], record)
     return jsonify({'saved': True, 'game_id': rel_path}), 201
+
+
+def _session_mcts(sess: dict) -> MCTS:
+    """MCTS bound to the network and search settings of this session's model."""
+    return MCTS(
+        network=sess['network'],
+        num_simulations=sess['num_simulations'],
+        c_puct=sess.get('c_puct', 1.5),
+        device="cpu",   # unbatched single positions: CPU beats MPS here
+        restrict_eye_fill=sess.get('restrict_eye_fill', False),
+    )
 
 
 def _bot_move(game_id: str) -> dict:
     """Have the bot make a move in the given game session."""
     sess = game_sessions[game_id]
     state = sess['state']
-    network, device = _get_network()
 
-    if network is None:
+    if sess['network'] is None:
         # Fallback: pass if no model loaded
         state.play_pass()
         return {'type': 'pass'}
 
-    mcts = MCTS(network=network, num_simulations=sess['num_simulations'], device=device,
-                restrict_eye_fill=_restrict_eye_fill())
+    mcts = _session_mcts(sess)
     action, _ = mcts.search(state, temperature=0.1, add_noise=False)
+
+    # The search that chose the move is also the evidence for giving up on the
+    # game — a bot that has been lost for several of its own moves resigns
+    # rather than grinding out a decided endgame.
+    mercy = sess.get('mercy')
+    if mercy is not None and mercy.observe(mcts.root_value, state.move_number):
+        state.play_resign()
+        return {'type': 'resign'}
 
     move_info = {}
     if action == MOVE_PASS:

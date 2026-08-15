@@ -31,6 +31,42 @@ def opponent(color: int) -> int:
     return WHITE if color == BLACK else BLACK
 
 
+# ------------------------------------------------------------------
+# Precomputed adjacency.
+#
+# Board geometry never changes, but `neighbors()` used to rebuild it on every
+# call: allocate a list, loop four offsets, bounds-check each one. Profiling a
+# single 96-simulation search measured 152,067 calls — 33% of total search
+# time, more than double what the neural network cost. Group flood-fills and
+# liberty counts are the callers, so this sits underneath everything the rules
+# engine does.
+#
+# The tables are per board size, built once, shared by every Board of that size
+# (including copies) and never mutated. Callers only ever iterate the result or
+# take its length, so handing out a tuple is safe.
+# ------------------------------------------------------------------
+_NEIGHBOUR_TABLES = {}
+
+
+def neighbour_table(size: int) -> tuple:
+    """Adjacency for a board of `size`, indexed as table[row][col]."""
+    table = _NEIGHBOUR_TABLES.get(size)
+    if table is None:
+        table = tuple(
+            tuple(
+                tuple(
+                    (r + dr, c + dc)
+                    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                    if 0 <= r + dr < size and 0 <= c + dc < size
+                )
+                for c in range(size)
+            )
+            for r in range(size)
+        )
+        _NEIGHBOUR_TABLES[size] = table
+    return table
+
+
 class ZobristHash:
     """
     Zobrist hashing for fast board state comparison.
@@ -88,6 +124,7 @@ class Board:
         self.grid = np.zeros((size, size), dtype=np.int8)
         self.zobrist = ZobristHash(size)
         self.board_hash = 0  # Hash of empty board is 0
+        self._neighbours = neighbour_table(size)
     
     def copy(self) -> 'Board':
         """Deep copy the board state. Used when exploring hypothetical moves."""
@@ -96,6 +133,7 @@ class Board:
         new.grid = self.grid.copy()
         new.zobrist = self.zobrist  # Shared (immutable random table)
         new.board_hash = self.board_hash
+        new._neighbours = self._neighbours  # Shared (immutable geometry)
         return new
     
     def _flat(self, row: int, col: int) -> int:
@@ -110,17 +148,14 @@ class Board:
         """Check if (row, col) is within bounds."""
         return 0 <= row < self.size and 0 <= col < self.size
     
-    def neighbors(self, row: int, col: int) -> list:
+    def neighbors(self, row: int, col: int) -> tuple:
         """
-        Return list of (row, col) for the 4 orthogonal neighbors
-        that are within bounds. Go uses 4-connectivity (no diagonals).
+        Return the (row, col) of the 4 orthogonal neighbors that are within
+        bounds. Go uses 4-connectivity (no diagonals).
+
+        A shared, precomputed tuple — see `neighbour_table`. Never mutate it.
         """
-        result = []
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nr, nc = row + dr, col + dc
-            if self.is_on_board(nr, nc):
-                result.append((nr, nc))
-        return result
+        return self._neighbours[row][col]
     
     def get_group(self, row: int, col: int) -> FrozenSet[Tuple[int, int]]:
         """
@@ -132,17 +167,18 @@ class Board:
         if color == EMPTY:
             return frozenset()
         
-        visited = set()
+        grid = self.grid
+        table = self._neighbours
+        visited = {(row, col)}
         queue = [(row, col)]
-        visited.add((row, col))
-        
+
         while queue:
             r, c = queue.pop()
-            for nr, nc in self.neighbors(r, c):
-                if (nr, nc) not in visited and self.grid[nr, nc] == color:
+            for nr, nc in table[r][c]:
+                if (nr, nc) not in visited and grid[nr, nc] == color:
                     visited.add((nr, nc))
                     queue.append((nr, nc))
-        
+
         return frozenset(visited)
     
     def get_liberties(self, group: FrozenSet[Tuple[int, int]]) -> Set[Tuple[int, int]]:
@@ -150,19 +186,23 @@ class Board:
         Find all liberties (empty neighbors) of a group.
         A group with 0 liberties is captured.
         """
+        grid = self.grid
+        table = self._neighbours
         liberties = set()
         for r, c in group:
-            for nr, nc in self.neighbors(r, c):
-                if self.grid[nr, nc] == EMPTY:
+            for nr, nc in table[r][c]:
+                if grid[nr, nc] == EMPTY:
                     liberties.add((nr, nc))
         return liberties
     
     def liberty_count(self, group: FrozenSet[Tuple[int, int]]) -> int:
         """Count liberties without building the full set (slightly faster)."""
+        grid = self.grid
+        table = self._neighbours
         liberties = set()
         for r, c in group:
-            for nr, nc in self.neighbors(r, c):
-                if self.grid[nr, nc] == EMPTY:
+            for nr, nc in table[r][c]:
+                if grid[nr, nc] == EMPTY:
                     liberties.add((nr, nc))
         return len(liberties)
     

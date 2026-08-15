@@ -25,7 +25,7 @@
                 <span class="play-launch-icon">👤</span>
                 <span class="play-launch-name">New Game vs Bot</span>
                 <span class="play-launch-note">
-                    Play {{ active_model.name }} on a {{ active_model.board_size }}×{{ active_model.board_size }} board,
+                    Play any trained model — {{ active_model.name }} by default —
                     with optional undo and move suggestions.
                 </span>
             </button>
@@ -40,32 +40,42 @@
         </div>
 
         <div class="play-inprogress" id="play-inprogress" hidden>
-            <div class="review-panel-title">In progress</div>
+            <div class="review-panel-title">Games</div>
             <div class="play-inprogress-list" id="play-inprogress-list"></div>
             <p class="play-inprogress-note">
-                Bot matches keep playing on the server while you do something else.
+                Running and recently finished games. Bot matches keep playing on the
+                server while you do something else.
             </p>
         </div>
     </div>
 
     <!-- Setup panel (shown before game starts) -->
-    <div id="setup-panel" class="setup-panel glass" style="display:none;">
-        <button class="play-back-link" data-play-back>← Play</button>
-        <h2>Play vs {{ active_model.name }}</h2>
+    <div id="human-setup-view" class="play-view play-view-narrow" style="display:none;">
+        <div class="play-topbar">
+            <button class="play-back-btn" data-play-back>← Back</button>
+        </div>
+        <div class="setup-panel glass">
+        <h2>Play vs Bot</h2>
 
-        <!-- Display locked model config -->
-        <div class="locked-config" style="display: flex; gap: 1rem; margin-bottom: 1.5rem; padding: 1rem; background: rgba(0,0,0,0.2); border-radius: 8px;">
-            <div style="flex: 1;">
-                <div style="font-size: 0.8rem; color: var(--text-muted);">Board Size</div>
-                <div style="font-weight: 500;">{{ active_model.board_size }}×{{ active_model.board_size }}</div>
+        <div class="form-group">
+            <label for="play-model">Opponent</label>
+            <select id="play-model" class="match-select"></select>
+            <div id="play-model-meta" class="match-meta"></div>
+        </div>
+
+        <!-- Board settings, locked to whichever model is selected -->
+        <div class="locked-config">
+            <div>
+                <div class="locked-config-label">Board Size</div>
+                <div class="locked-config-value" id="play-cfg-board">{{ active_model.board_size }}×{{ active_model.board_size }}</div>
             </div>
-            <div style="flex: 1;">
-                <div style="font-size: 0.8rem; color: var(--text-muted);">Komi</div>
-                <div style="font-weight: 500;">{{ active_model.komi }}</div>
+            <div>
+                <div class="locked-config-label">Komi</div>
+                <div class="locked-config-value" id="play-cfg-komi">{{ active_model.komi }}</div>
             </div>
-            <div style="flex: 1;">
-                <div style="font-size: 0.8rem; color: var(--text-muted);">Ruleset</div>
-                <div style="font-weight: 500;">{{ active_model.ruleset | capitalize }}</div>
+            <div>
+                <div class="locked-config-label">Ruleset</div>
+                <div class="locked-config-value" id="play-cfg-ruleset">{{ active_model.ruleset | capitalize }}</div>
             </div>
         </div>
 
@@ -88,40 +98,72 @@
             <input type="range" id="simulations" min="10" max="400" value="200" step="10">
             <span id="sim-label">200</span>
         </div>
+        <div class="toggle-group play-toggle-group">
+            <label class="toggle" for="play-mercy"
+                   title="The bot gives up once its own search has called the game lost for several moves running">
+                <span class="toggle-label-wrap"><span class="toggle-text">Bot resigns lost games</span></span>
+                <input type="checkbox" id="play-mercy" checked>
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
         <button id="start-game" class="btn-primary">Start Game</button>
+        </div>
     </div>
 
     <!-- Game board (shown during game) -->
-    <div id="game-area" class="game-area" style="display:none;">
+    <div id="game-area" class="play-view" style="display:none;">
+        <!-- The way back is a page header above the board, not a control
+             inside the panel where it read as a game action. -->
+        <div class="play-topbar">
+            <button class="play-back-btn" data-play-back
+                    title="Your game is kept — resume it from the Play menu">← Back</button>
+            <span class="play-topbar-title" id="play-opponent-label">vs Bot</span>
+        </div>
+        <div class="game-area">
         <div class="board-section">
             <canvas id="go-board"></canvas>
         </div>
         <div class="info-panel glass">
-            <div class="game-info">
-                <div class="game-status-row">
-                    <h3 id="game-status">Your turn</h3>
-                    <span id="move-counter" class="play-move-badge">Move: 0</span>
+            <!-- Result banner: the panel's own record of how the game ended,
+                 so closing the modal does not leave the panel silent. -->
+            <div id="play-summary" class="play-summary" hidden>
+                <div class="play-summary-badge" id="play-summary-badge">Game over</div>
+                <h3 class="play-summary-title" id="play-summary-title">—</h3>
+                <div class="play-summary-score" id="play-summary-score"></div>
+                <div class="play-summary-actions">
+                    <button id="btn-new-game" class="btn-primary">New Game</button>
+                    <a href="/training/review" class="btn-secondary play-summary-review">Review Games</a>
                 </div>
-                <div class="score-display">
-                    <div class="score-item">
-                        <span class="stone black-stone">⚫</span>
-                        <span>Black: <strong id="black-score">0</strong></span>
-                        <span class="captures" id="black-captures">Cap: 0</span>
+            </div>
+
+            <div class="game-info">
+                <!-- Who is to move is shown by highlighting the row, and the
+                     move count lives on the meta line below the two players. -->
+                <div class="play-scoreboard">
+                    <div class="play-player-row" id="play-row-black">
+                        <span class="play-player-color">⚫</span>
+                        <span class="play-player-name" id="play-name-black">Black</span>
+                        <span class="play-player-score" id="black-score">0</span>
+                        <span class="play-player-caps" id="black-captures">Captured: 0</span>
                     </div>
-                    <div class="score-item">
-                        <span class="stone white-stone">⚪</span>
-                        <span>White: <strong id="white-score">0</strong></span>
-                        <span class="captures" id="white-captures">Cap: 0</span>
+                    <div class="play-player-row" id="play-row-white">
+                        <span class="play-player-color">⚪</span>
+                        <span class="play-player-name" id="play-name-white">White</span>
+                        <span class="play-player-score" id="white-score">0</span>
+                        <span class="play-player-caps" id="white-captures">Captured: 0</span>
+                    </div>
+                    <div class="play-meta-line">
+                        <span id="move-counter">Move 0</span>
+                        <span id="play-meta-config"></span>
                     </div>
                 </div>
             </div>
             <div class="game-controls">
                 <button id="btn-pass" class="btn-secondary">Pass</button>
                 <button id="btn-resign" class="btn-danger">Resign</button>
-                <button id="btn-undo" class="btn-secondary easy-only" style="display:none;">Undo</button>
-                <button id="btn-suggest" class="btn-secondary easy-only" style="display:none;">Suggest</button>
-                <button id="btn-record" class="btn-secondary" title="Save this game to Review Games">💾 Record</button>
-                <button class="btn-secondary" data-play-back title="Your game is kept — resume it from the Play menu">← Play</button>
+                <button id="btn-undo" class="btn-secondary easy-only">Undo</button>
+                <button id="btn-suggest" class="btn-secondary easy-only">Suggest</button>
+                <button id="btn-record" class="btn-secondary control-wide" title="Save this game to Review Games">💾 Record</button>
             </div>
             <div class="toggle-group play-toggle-group">
                 <label class="toggle" for="toggle-estimate" title="Show real-time estimated board territory overlay">
@@ -131,7 +173,7 @@
                     <input type="checkbox" id="toggle-estimate">
                     <span class="toggle-slider"></span>
                 </label>
-                <label class="toggle easy-only" id="winrate-toggle-row" for="toggle-winrate" title="Show real-time win rate curve" style="display:none;">
+                <label class="toggle easy-only" id="winrate-toggle-row" for="toggle-winrate" title="Show real-time win rate curve" hidden>
                     <span class="toggle-label-wrap">
                         <span class="toggle-text">Live Win Rate</span>
                     </span>
@@ -150,13 +192,16 @@
                     <canvas id="play-winrate-chart"></canvas>
                 </div>
             </div>
-            <button id="btn-new-game" class="btn-primary" style="display:none;">New Game</button>
+        </div>
         </div>
     </div>
 
     <!-- ---------- Bot vs Bot: setup ---------- -->
-    <div id="match-setup-panel" class="setup-panel glass" style="display:none;">
-        <button class="play-back-link" data-play-back>← Play</button>
+    <div id="match-setup-view" class="play-view play-view-wide" style="display:none;">
+        <div class="play-topbar">
+            <button class="play-back-btn" data-play-back>← Back</button>
+        </div>
+        <div class="setup-panel glass">
         <h2>Bot vs Bot</h2>
         <p class="match-intro">
             Pick two bots and how many games they play. Colors swap every game, and
@@ -200,37 +245,44 @@
                 <input type="checkbox" id="match-rate" checked>
                 <span class="toggle-slider"></span>
             </label>
+            <label class="toggle" for="match-mercy"
+                   title="A bot gives up once its own search has called the game lost for several moves running">
+                <span class="toggle-label-wrap"><span class="toggle-text">Resign lost games</span></span>
+                <input type="checkbox" id="match-mercy" checked>
+                <span class="toggle-slider"></span>
+            </label>
         </div>
         <button id="match-start" class="btn-primary">Start Match</button>
+        </div>
     </div>
 
     <!-- ---------- Bot vs Bot: live board ---------- -->
-    <div id="match-area" class="game-area" style="display:none;">
+    <div id="match-area" class="play-view" style="display:none;">
+        <div class="play-topbar">
+            <button class="play-back-btn" data-play-back
+                    title="The match keeps running on the server">← Back</button>
+            <span class="play-topbar-title" id="match-topbar-title">Bot vs Bot</span>
+        </div>
+        <div class="game-area">
         <div class="board-section">
             <canvas id="match-board"></canvas>
         </div>
         <div class="info-panel glass">
             <!-- Series result. Sits at the TOP of the panel: the old New Match
                  button lived below the win-rate chart and results list, where
-                 it was off-screen exactly when it was needed. -->
-            <div id="match-summary" class="match-summary" hidden>
-                <div class="match-summary-badge" id="match-summary-badge">Series complete</div>
-                <h3 class="match-summary-title" id="match-summary-title">—</h3>
-                <div class="match-summary-score" id="match-summary-score"></div>
-                <div class="match-summary-elo" id="match-summary-elo"></div>
-                <div class="match-summary-actions">
-                    <button id="match-new" class="btn-primary">New Match</button>
-                    <button class="btn-secondary" data-play-back>← Play</button>
-                    <a href="/training/review" class="btn-secondary match-summary-review">Review Games</a>
+                 it was off-screen exactly when it was needed. Who won and what
+                 to do next — the scoreboard below already has the numbers. -->
+            <div id="match-summary" class="play-summary play-summary-final" hidden>
+                <div class="play-summary-icon" id="match-summary-icon">🏆</div>
+                <h3 class="play-summary-title" id="match-summary-title">—</h3>
+                <div class="play-summary-score" id="match-summary-elo"></div>
+                <div class="play-summary-actions">
+                    <button id="match-rematch" class="btn-primary">Rematch</button>
+                    <button id="match-new" class="btn-secondary">New Match</button>
                 </div>
             </div>
 
             <div class="game-info">
-                <div class="game-status-row">
-                    <h3 id="match-status">Starting…</h3>
-                    <span id="match-move-counter" class="play-move-badge">Move: 0</span>
-                </div>
-
                 <div class="match-scoreboard">
                     <div class="match-player-row" id="match-row-a">
                         <span class="match-player-color" id="match-color-a">⚫</span>
@@ -247,27 +299,34 @@
                     <div class="match-series-line" id="match-series-line">Game 1 of 4</div>
                 </div>
 
-                <div class="score-display">
-                    <div class="score-item">
-                        <span class="stone black-stone">⚫</span>
-                        <span>Black: <strong id="match-black-score">0</strong></span>
-                        <span class="captures" id="match-black-captures">Cap: 0</span>
+                <div class="play-scoreboard">
+                    <div class="play-player-row">
+                        <span class="play-player-color">⚫</span>
+                        <span class="play-player-name">Black</span>
+                        <span class="play-player-score" id="match-black-score">0</span>
+                        <span class="play-player-caps" id="match-black-captures">Captured: 0</span>
                     </div>
-                    <div class="score-item">
-                        <span class="stone white-stone">⚪</span>
-                        <span>White: <strong id="match-white-score">0</strong></span>
-                        <span class="captures" id="match-white-captures">Cap: 0</span>
+                    <div class="play-player-row">
+                        <span class="play-player-color">⚪</span>
+                        <span class="play-player-name">White</span>
+                        <span class="play-player-score" id="match-white-score">0</span>
+                        <span class="play-player-caps" id="match-white-captures">Captured: 0</span>
+                    </div>
+                    <div class="play-meta-line">
+                        <span id="match-move-counter">Move 0</span>
+                        <span id="match-last-move"></span>
                     </div>
                 </div>
             </div>
 
-            <div class="game-controls">
+            <!-- Hidden once the series ends: there is nothing left to pause
+                 or stop, and the summary above carries the actions instead. -->
+            <div class="game-controls" id="match-controls">
                 <button id="match-pause" class="btn-secondary">⏸ Pause</button>
                 <button id="match-stop" class="btn-danger">Stop Match</button>
-                <button class="btn-secondary" data-play-back title="The match keeps running on the server">← Play</button>
             </div>
 
-            <div class="form-group match-speed-group">
+            <div class="form-group match-speed-group" id="match-speed-group">
                 <label>Move Delay</label>
                 <input type="range" id="match-live-delay" min="0" max="2000" value="300" step="100">
                 <span id="match-live-delay-label">0.3s</span>
@@ -296,12 +355,14 @@
                 </div>
             </div>
 
+            <!-- Every finished game links to itself in Review Games. -->
             <div class="match-results-panel">
                 <div class="review-panel-title">Results</div>
                 <div id="match-results-list" class="match-results-list">
                     <span class="match-results-empty">No games finished yet.</span>
                 </div>
             </div>
+        </div>
         </div>
     </div>
 

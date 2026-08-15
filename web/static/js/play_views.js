@@ -19,16 +19,16 @@
  */
 
 (function () {
+    // Each view is one wrapper: a "← Back" header followed by the view's own
+    // content. Everything inside is laid out by CSS, so switching views only
+    // ever shows or hides these five elements.
     const VIEW_PANELS = {
         'launcher': ['play-launcher'],
-        'human-setup': ['setup-panel'],
+        'human-setup': ['human-setup-view'],
         'human-game': ['game-area'],
-        'match-setup': ['match-setup-panel'],
+        'match-setup': ['match-setup-view'],
         'match-live': ['match-area'],
     };
-
-    // Panels that are CSS grids; the rest are plain blocks.
-    const GRID_PANELS = new Set(['game-area', 'match-area']);
 
     const LIST_POLL_MS = 2000;
 
@@ -48,11 +48,7 @@
             ids.forEach(id => {
                 const node = el(id);
                 if (!node) return;
-                if (name !== view) {
-                    node.style.display = 'none';
-                } else {
-                    node.style.display = GRID_PANELS.has(id) ? 'grid' : '';
-                }
+                node.style.display = (name === view) ? '' : 'none';
             });
         });
 

@@ -36,9 +36,11 @@ from ai.evaluator import (
     evaluate_against_random,
     evaluate_against_checkpoint,
     compute_elo_update,
+    performance_elo_gap,
 )
 from ai.checkpoint import save_weights, load_weights
 from ai.game_store import migrate_legacy_layout
+from ai.replay_store import buffer_path, load_buffer, save_buffer
 
 
 class ReplayBuffer:
@@ -192,6 +194,11 @@ class Trainer:
         self.total_games = 0
         self.elo = config.training.elo_anchor  # Start at random bot level
         self.best_elo = self.elo
+        # Rating on the promotion-gate ladder. `elo` above is measured against
+        # the random bot, which stops carrying information once the bot wins
+        # every game; this one only moves when a candidate actually beats the
+        # champion, so it cannot drift upward on its own.
+        self.gate_elo = float(config.training.elo_anchor)
         
         # Metrics history (for charts). `_history_loaded` tracks whether the
         # on-disk log has been merged in yet — see get_metrics_history().
@@ -241,6 +248,10 @@ class Trainer:
 
         # Load weights if available
         self._try_load_weights()
+        # ...and the samples those weights were trained on. Without this every
+        # restart starts the next iteration from a few hundred samples and the
+        # candidate it produces reliably loses its gate match.
+        self._try_load_replay_buffer()
     
     @staticmethod
     def _empty_resign_stats() -> dict:
@@ -364,6 +375,9 @@ class Trainer:
                     self.iteration = meta.get('iteration', 0)
                     self.elo = meta.get('elo', 500)
                     self.total_games = meta.get('total_games', 0)
+                    # Checkpoints predating the gate ladder seed it from the
+                    # anchor rating rather than restarting it at zero.
+                    self.gate_elo = float(meta.get('gate_elo') or self.elo)
                     self.current_stage['iteration'] = self.iteration
                     # Restore the gated champion as the self-play generator.
                     # Checkpoints written before gating existed have no champion
@@ -378,6 +392,49 @@ class Trainer:
             except Exception as e:
                 self._emit('warning', f"Failed to load weights: {e}")
     
+    @property
+    def _replay_path(self) -> str:
+        return buffer_path(self.config.paths.data_dir)
+
+    def _try_load_replay_buffer(self) -> None:
+        """Restore the replay buffer saved next to weights.pt, if it fits."""
+        try:
+            samples, reason = load_buffer(
+                self._replay_path,
+                board_size=self.config.board.size,
+                num_input_planes=self.config.network.num_input_planes,
+            )
+        except Exception as e:
+            self._emit('warning', f'Failed to load replay buffer: {e}')
+            return
+
+        if reason:
+            self._emit('warning', reason)
+            return
+        if samples:
+            self.replay_buffer.add(samples)
+            self._emit('info',
+                       f'Restored {len(samples)} replay samples '
+                       f'({len(self.replay_buffer)} in buffer)')
+
+    def _save_replay_buffer(self) -> None:
+        """
+        Persist the replay buffer. Called from the same place as the weights
+        save so the two never drift apart by more than one iteration.
+        """
+        try:
+            save_buffer(
+                self.replay_buffer.buffer,
+                self._replay_path,
+                board_size=self.config.board.size,
+                num_input_planes=self.config.network.num_input_planes,
+                max_samples=self.config.training.replay_buffer_size,
+            )
+        except Exception as e:
+            # Never let this take down a training run — the buffer is a
+            # performance asset, not a correctness requirement.
+            self._emit('warning', f'Failed to save replay buffer: {e}')
+
     def _emit(self, event_type: str, message: str = "", data: dict = None) -> None:
         """Send a progress event to the web dashboard."""
         if self.progress_callback:
@@ -487,6 +544,8 @@ class Trainer:
                     num_simulations=effective_sims,
                     c_puct=self.config.mcts.c_puct,
                     temperature_threshold=self.config.mcts.temperature_threshold,
+                    temperature_init=self.config.mcts.temperature_init,
+                    temperature_final=self.config.mcts.temperature_final,
                     device="cpu",
                     game_store_every_n=self.config.training.game_store_every_n,
                     games_dir=self.config.paths.games_dir,
@@ -509,7 +568,11 @@ class Trainer:
                 if self._force_stop_requested:
                     break
 
-                self.total_games += self.config.training.num_self_play_games
+                # Credit the games that actually finished, not the games that
+                # were requested — a force-stop cancels part of the batch, and
+                # counting the cancelled ones drifts total_games away from the
+                # number of games on disk for good.
+                self.total_games += self._resign_stats['games']
                 self.replay_buffer.add(samples)
                 
                 self._set_stage(
@@ -622,6 +685,8 @@ class Trainer:
                         num_workers=self.config.training.num_parallel_workers,
                         progress_callback=_on_eval_game_progress,
                         restrict_eye_fill=self.config.training.restrict_eye_fill,
+                        c_puct=self.config.mcts.c_puct,
+                        fpu_reduction=self.config.mcts.fpu_reduction,
                     )
                     eval_seconds = round(time.time() - eval_start, 2)
 
@@ -631,7 +696,8 @@ class Trainer:
                     # Update Elo based on win rate against random bot
                     old_elo = self.elo
                     self.elo = compute_elo_update(
-                        self.elo, self.config.training.elo_anchor, win_rate
+                        self.elo, self.config.training.elo_anchor, win_rate,
+                        num_games=self.config.training.eval_games,
                     )
                     
                     kyu = elo_to_rank(self.elo)
@@ -679,6 +745,7 @@ class Trainer:
                     'timestamp': datetime.now().isoformat(),
                     'gate_win_rate': self.last_gate_win_rate,
                     'gate_rejections': self.gate_rejections,
+                    'gate_elo': round(self.gate_elo, 1),
                     **diagnostics,
                     **self._resign_metrics(),
                 }
@@ -803,6 +870,8 @@ class Trainer:
                 stop_checker=self._check_force_stop,
                 progress_callback=_on_gate_game_progress,
                 restrict_eye_fill=cfg.restrict_eye_fill,
+                c_puct=self.config.mcts.c_puct,
+                fpu_reduction=self.config.mcts.fpu_reduction,
             )
         except Exception as e:
             # Never let a gate failure take down training — fall back to
@@ -821,6 +890,12 @@ class Trainer:
             self.eval_network.load_state_dict(
                 {k: v.detach().cpu() for k, v in self.network.state_dict().items()}
             )
+            # The candidate started as a copy of the champion, so their rating
+            # gap is exactly what this match just measured. Only promotions move
+            # the ladder: a rejected candidate leaves the champion — and its
+            # rating — untouched, which is why this series cannot inflate.
+            gap = performance_elo_gap(win_rate, cfg.gate_games)
+            self.gate_elo += gap
             self.gate_rejections = 0
             self._set_stage(
                 'gate', 'Promotion Gate (Promoted)', 3,
@@ -830,8 +905,11 @@ class Trainer:
             )
             self._emit('gate_promoted',
                        f'✅ Candidate promoted (beat champion {win_rate:.0%} '
-                       f'≥ {cfg.gate_threshold:.0%})',
-                       data={'gate_win_rate': win_rate})
+                       f'≥ {cfg.gate_threshold:.0%}) · gate Elo '
+                       f'{self.gate_elo:.0f} ({gap:+.0f})',
+                       data={'gate_win_rate': win_rate,
+                             'gate_elo': self.gate_elo,
+                             'gate_elo_gain': round(gap, 1)})
             return True, win_rate
 
         # Rejected: the champion keeps generating self-play data.
@@ -974,13 +1052,24 @@ class Trainer:
                 total_games=self.total_games,
                 weights_path=self.config.paths.weights_path,
                 champion_state_dict=self.eval_network.state_dict(),
+                gate_elo=self.gate_elo,
             )
             self._emit('info', f'Weights saved (iteration {self.iteration})')
         except Exception as e:
             self._emit('warning', f'Failed to save weights: {e}')
 
+        self._save_replay_buffer()
+
     def save_weights_now(self) -> str:
-        """Force an immediate weights save. Called from API."""
+        """
+        Force an immediate weights save. Called from API.
+
+        The champion has to be written here too. Without it the file carries no
+        champion entry, and the next restart falls back to treating the training
+        network as champion — silently handing self-play generation to a
+        candidate that never passed the gate. One click of "save weights" used
+        to be enough to defeat gating across a restart.
+        """
         save_weights(
             model=self.network,
             optimizer=self.optimizer,
@@ -989,6 +1078,8 @@ class Trainer:
             kyu_rank=elo_to_rank(self.elo),
             total_games=self.total_games,
             weights_path=self.config.paths.weights_path,
+            champion_state_dict=self.eval_network.state_dict(),
+            gate_elo=self.gate_elo,
         )
         self._emit('info', f'Weights saved manually (iteration {self.iteration})')
         return self.config.paths.weights_path
@@ -1135,6 +1226,17 @@ class Trainer:
             })
             return
 
+        if record.get('failed'):
+            # The worker died; there is no game here to tally. Progress still
+            # advances (the slot is done) but nothing is counted as played.
+            self._set_stage(
+                'self_play', 'Self-Play Data Generation', 1,
+                completed_items=game_num, total_items=total,
+                active_games=active_list, num_workers=w_count,
+                detail=f'Generated {game_num}/{total} games (1 worker failed)'
+            )
+            return
+
         # Tally passes per colour for the collapse guard. A colour that starts
         # passing heavily is handing away points under area scoring.
         for m in record.get('moves', []):
@@ -1240,6 +1342,7 @@ class Trainer:
             'iteration': self.iteration,
             'total_games': self.total_games,
             'elo': self.elo,
+            'gate_elo': round(self.gate_elo, 1),
             'kyu_rank': elo_to_rank(self.elo),
             'buffer_size': len(self.replay_buffer),
             'device': self.device,

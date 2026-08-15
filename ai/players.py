@@ -29,7 +29,8 @@ persist. The random bot is the Elo ANCHOR, so its rating is fixed — see
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, Any, Callable
 
-from game.game_state import GameState, MOVE_PASS
+from game.game_state import GameState, MOVE_PASS, MOVE_RESIGN
+from ai.mercy_rule import MercyRule
 from ai.mcts import MCTS
 from ai.random_bot import RandomBot
 
@@ -127,7 +128,8 @@ class ModelPlayer(Player):
                  restrict_eye_fill: bool = False, device: str = "cpu",
                  rating: float = RANDOM_BOT_ELO, iteration: int = 0,
                  temperature: float = 0.1, meta: Optional[dict] = None,
-                 rating_sink: Optional[Callable[[str, float], None]] = None):
+                 rating_sink: Optional[Callable[[str, float], None]] = None,
+                 mercy: Optional[MercyRule] = None):
         super().__init__(
             name=name,
             # A model's rating lives in its config.json, so the model id is the
@@ -147,6 +149,9 @@ class ModelPlayer(Player):
         self.board_size = board_size
         self.temperature = temperature
         self._rating_sink = rating_sink
+        # Mercy rule: gives up a game its own search has called lost for
+        # several moves running, instead of playing out a decided endgame.
+        self.mercy = mercy
         self.mcts = MCTS(
             network=network,
             num_simulations=num_simulations,
@@ -155,9 +160,19 @@ class ModelPlayer(Player):
             restrict_eye_fill=restrict_eye_fill,
         )
 
+    def game_started(self, state: GameState, color: int) -> None:
+        if self.mercy:
+            self.mercy.reset()
+
     def select_move(self, state: GameState) -> Tuple[int, int]:
         # add_noise=False: this is competitive play, not data generation.
         action, _ = self.mcts.search(state, temperature=self.temperature, add_noise=False)
+
+        # The search that produced this move also produced the evidence for
+        # giving up on it, so the check goes here rather than in the caller.
+        if self.mercy and self.mercy.observe(self.mcts.root_value, state.move_number):
+            return MOVE_RESIGN
+
         return action
 
     def commit_rating(self, new_rating: float) -> None:
@@ -241,6 +256,8 @@ def _make_model_player(spec: dict, context: dict) -> Player:
         num_simulations=spec.get('num_simulations'),
         board_size=context.get('board_size'),
         label=spec.get('name'),
+        # None leaves the model's own resign_enabled in charge.
+        mercy_resign=spec.get('mercy_resign', context.get('mercy_resign')),
     )
 
 

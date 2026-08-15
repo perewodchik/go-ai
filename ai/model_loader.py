@@ -21,6 +21,7 @@ from config import Config, elo_to_rank
 from model_manager import ModelManager
 from ai.network import GoNetwork
 from ai.checkpoint import load_weights
+from ai.mercy_rule import MercyRule
 from ai.players import ModelPlayer
 
 
@@ -123,13 +124,17 @@ def persist_model_rating(model_id: str, rating: float) -> None:
 def build_model_player(model_id: str, num_simulations: Optional[int] = None,
                        board_size: Optional[int] = None,
                        label: Optional[str] = None,
-                       manager: Optional[ModelManager] = None) -> ModelPlayer:
+                       manager: Optional[ModelManager] = None,
+                       mercy_resign: Optional[bool] = None) -> ModelPlayer:
     """
     Build a ready-to-play ModelPlayer for a stored model.
 
     `board_size`, when given, is the board the match will actually be played on;
     a model trained for a different size cannot play it, so that is rejected
     here rather than producing a shape error mid-game.
+
+    `mercy_resign` turns the mercy rule on or off for this player, overriding
+    the model's own `resign_enabled` (a training setting); None defers to it.
     """
     network, info, config = load_model_network(model_id, manager=manager)
 
@@ -153,4 +158,5 @@ def build_model_player(model_id: str, num_simulations: Optional[int] = None,
         iteration=info.iteration,
         meta={'kyu_rank': info.kyu_rank, 'ruleset': info.ruleset, 'komi': info.komi},
         rating_sink=persist_model_rating,
+        mercy=MercyRule.from_config(config, info.board_size, enabled=mercy_resign),
     )

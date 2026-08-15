@@ -32,6 +32,9 @@
             <div class="review-header">
                 <h2 id="review-title">Game Review</h2>
                 <div id="review-meta" class="review-meta"></div>
+                <!-- Why a game ended early — filled only for resigned games and
+                     mercy-rule checks, hidden for everything else. -->
+                <div id="review-resign-note" class="resign-note" style="display: none;"></div>
             </div>
 
             <div class="board-container" style="max-width: 600px; margin: 0 auto;">
@@ -40,9 +43,9 @@
 
             <div class="review-controls">
                 <button id="btn-first" class="btn-primary" title="First Move">⏮</button>
-                <button id="btn-prev" class="btn-primary">◀ Prev</button>
+                <button id="btn-prev" class="btn-primary" title="Previous Move">◀</button>
                 <div class="move-counter" id="move-counter">&nbsp;&nbsp;0 / &nbsp;&nbsp;0</div>
-                <button id="btn-next" class="btn-primary">Next ▶</button>
+                <button id="btn-next" class="btn-primary" title="Next Move">▶</button>
                 <button id="btn-last" class="btn-primary" title="Last Move">⏭</button>
             </div>
 

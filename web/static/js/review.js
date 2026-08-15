@@ -121,6 +121,83 @@ async function loadGamesList() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Resignations
+//
+// The server explains them (ai/resignation.py) and hands the explanation over
+// on every game as `resignation`; the page only decides where it goes. Three
+// shapes appear:
+//   * resigned      — the game ended early. Its `margin` is a board score, not
+//                     a result, so rows show Go's B+R / W+R instead.
+//   * checked       — the mercy rule fired but the game was played out anyway
+//                     to test it. Not an early end, still worth flagging.
+//   * false_resign  — a check the rule got WRONG. The loudest thing here.
+// ---------------------------------------------------------------------------
+
+/** Result string for a game row: B+R / W+R when resigned, else the margin. */
+function gameResultText(game, fallback) {
+    const info = game.resignation;
+    if (info && info.resigned && info.result) return info.result;
+    return fallback;
+}
+
+/** Small flag on a list row, carrying the full reason as its tooltip. */
+function resignTag(game) {
+    const info = game.resignation;
+    if (!info) return '';
+
+    const title = escapeAttr(info.reason || '');
+    if (info.resigned) {
+        return `<span class="resign-tag" title="${title}">🏳 ${escapeHtml(info.badge)}</span>`;
+    }
+    if (info.false_resign) {
+        return `<span class="resign-tag is-wrong" title="${title}">⚑ Wrong resign</span>`;
+    }
+    return `<span class="resign-tag is-check" title="${title}">⚑ ${escapeHtml(info.badge)}</span>`;
+}
+
+function escapeAttr(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+                      .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * The explanation panel under the game title: what ended the game, why, and
+ * the numbers behind it. Hidden for games that ended on the board.
+ */
+function renderResignNote(data) {
+    const note = document.getElementById('review-resign-note');
+    if (!note) return;
+
+    const info = data.resignation;
+    if (!info) {
+        note.style.display = 'none';
+        note.innerHTML = '';
+        return;
+    }
+
+    let cls = 'resign-note';
+    if (!info.resigned) cls += info.false_resign ? ' is-wrong' : ' is-check';
+
+    const facts = (info.facts || []).map(f => `
+        <div class="resign-fact">
+            <span class="resign-fact-label">${escapeHtml(f.label)}</span>
+            <span class="resign-fact-value">${escapeHtml(f.value)}</span>
+        </div>
+    `).join('');
+
+    note.className = cls;
+    note.style.display = 'none';
+    note.innerHTML = `
+        <div class="resign-note-head">
+            <span class="resign-note-icon">${info.resigned ? '🏳' : '⚑'}</span>
+            <span>${escapeHtml(info.headline)}</span>
+        </div>
+        <p class="resign-note-reason">${escapeHtml(info.reason)}</p>
+        ${facts ? `<div class="resign-facts">${facts}</div>` : ''}
+    `;
+}
+
 /** Colour a win rate: above 50% good, below 50% bad. */
 function winRateColor(rate, threshold = 0.5) {
     if (rate > threshold) return 'var(--success)';
@@ -128,29 +205,51 @@ function winRateColor(rate, threshold = 0.5) {
     return 'var(--warning)';
 }
 
+/**
+ * How many games of a phase ended early, shown on the phase header so the
+ * mercy rule's reach is visible without opening the section.
+ */
+function phaseResignBadge(phase) {
+    const resigned = phase.resigned_count || 0;
+    const checked = phase.resign_checked_count || 0;
+    const wrong = phase.false_resign_count || 0;
+    if (!resigned && !checked) return '';
+
+    const bits = [];
+    if (resigned) bits.push(`${resigned} of ${phase.count} games ended by resignation`);
+    if (checked) bits.push(`${checked} played out as mercy-rule checks`);
+    if (wrong) bits.push(`${wrong} of those checks show the rule would have been WRONG`);
+
+    const cls = wrong ? 'phase-resign-note is-wrong' : 'phase-resign-note';
+    const label = resigned ? `🏳 ${resigned}` : `⚑ ${checked}`;
+    return `<span class="${cls}" title="${escapeAttr(bits.join('; '))}">${label}</span>`;
+}
+
 /** Right-hand badge on a phase header: candidate win rate, or AI win rate. */
 function phaseSummaryBadge(phase) {
+    const resign = phaseResignBadge(phase);
+
     if (phase.phase === 'promotion') {
         const rate = phase.candidate_win_rate !== undefined && phase.candidate_win_rate !== null
             ? phase.candidate_win_rate
             : phase.gate_win_rate;
-        if (rate === undefined || rate === null) return '';
+        if (rate === undefined || rate === null) return resign;
 
         const threshold = phase.gate_threshold || 0.5;
         const pct = Math.round(rate * 100);
-        return `<span class="group-note" style="color: ${winRateColor(rate, threshold)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
+        return `${resign}<span class="group-note" style="color: ${winRateColor(rate, threshold)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
             ${pct}%
         </span>`;
     }
 
     if (phase.phase === 'eval' && phase.win_rate !== null && phase.win_rate !== undefined) {
         const pct = Math.round(phase.win_rate * 100);
-        return `<span class="group-note" style="color: ${winRateColor(phase.win_rate)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
+        return `${resign}<span class="group-note" style="color: ${winRateColor(phase.win_rate)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
             ${pct}%
         </span>`;
     }
 
-    return '';
+    return resign;
 }
 
 /** The "My Recorded Games" section — games saved from the Play page. */
@@ -247,7 +346,7 @@ function buildMatchGameItem(game) {
     }
 
     item.innerHTML = `
-        <div style="font-weight: 600; margin-bottom: 0.15rem;">Game ${(game.game_index || 0) + 1}</div>
+        <div style="font-weight: 600; margin-bottom: 0.15rem;">Game ${(game.game_index || 0) + 1}${resignTag(game)}</div>
         <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(resultText)}</div>
         <div class="match-game-line">⚫ ${escapeHtml(black)} vs ⚪ ${escapeHtml(white)} &middot; ${game.num_moves} moves</div>
     `;
@@ -286,7 +385,7 @@ function buildRecordedGameItem(game) {
     const body = document.createElement('div');
     body.className = 'recorded-item-body';
     body.innerHTML = `
-        <div style="font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(title)}</div>
+        <div style="font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(title)}${resignTag(game)}</div>
         <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${resultText}</div>
         <div style="font-size: 0.8rem; color: var(--text-muted);">${game.num_moves} moves${when ? ` &middot; ${when}` : ''}</div>
     `;
@@ -363,6 +462,9 @@ function buildGameItem(game, phase) {
     let resultText = 'Draw';
     if (game.winner === 1) resultText = `B+${game.margin !== undefined ? Number(game.margin).toFixed(1) : '?'}`;
     else if (game.winner === 2) resultText = `W+${game.margin !== undefined ? Number(game.margin).toFixed(1) : '?'}`;
+    // A resigned game has no margin — its `margin` field is the board score at
+    // the point it stopped, which would read as a played-out result.
+    resultText = gameResultText(game, resultText);
 
     if (phase === 'promotion') {
         if (game.winner !== 0) {
@@ -375,7 +477,7 @@ function buildGameItem(game, phase) {
         }
 
         item.innerHTML = `
-            <div style="font-weight: 600; margin-bottom: 0.15rem;">${winnerIcon} Promotion #${game.game_index}</div>
+            <div style="font-weight: 600; margin-bottom: 0.15rem;">${winnerIcon} Promotion #${game.game_index}${resignTag(game)}</div>
             <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${outcomeLine}</div>
             <div style="font-size: 0.85rem; color: var(--text-muted);">${game.num_moves} moves</div>
         `;
@@ -392,7 +494,7 @@ function buildGameItem(game, phase) {
 
         item.innerHTML = `
             <div style="margin-bottom: 0.25rem;">
-                <strong>${winnerIcon} ${label}</strong>
+                <strong>${winnerIcon} ${label}</strong>${resignTag(game)}
             </div>
             <div style="font-size: 0.85rem; color: var(--text-muted);">
                 <span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves
@@ -439,6 +541,7 @@ async function loadGame(filename) {
             resultText = `W+${data.margin !== undefined ? Number(data.margin).toFixed(1) : '?'}`;
             winnerIcon = '⚪';
         }
+        resultText = gameResultText(data, resultText);
 
         if (data.phase === 'human') {
             const humanColor = data.human_color === 2 ? 2 : 1;
@@ -531,6 +634,49 @@ async function loadGame(filename) {
         }
 
         document.getElementById('review-title').textContent = titleText;
+
+        // Every branch above builds its own meta line; the resignation pill and
+        // the explanation below it are the same for all of them.
+        renderResignNote(data);
+
+        const resignInfo = data.resignation;
+        if (resignInfo) {
+            const meta = document.getElementById('review-meta');
+            const pillClass = resignInfo.resigned
+                ? 'resign-pill'
+                : (resignInfo.false_resign ? 'resign-pill is-wrong' : 'resign-pill is-check');
+            const pillBtn = document.createElement('button');
+            pillBtn.type = 'button';
+            pillBtn.id = 'review-resign-badge';
+            pillBtn.className = `review-meta-pill ${pillClass}`;
+            pillBtn.setAttribute('aria-expanded', 'false');
+            pillBtn.title = 'Click to show details';
+            pillBtn.innerHTML = `${resignInfo.resigned ? '🏳' : '⚑'} ${escapeHtml(resignInfo.badge)}`;
+
+            pillBtn.addEventListener('click', () => {
+                const note = document.getElementById('review-resign-note');
+                if (!note) return;
+                const isHidden = note.style.display === 'none';
+                if (isHidden) {
+                    note.style.display = 'block';
+                    pillBtn.classList.add('is-active');
+                    pillBtn.setAttribute('aria-expanded', 'true');
+                    pillBtn.title = 'Click to hide details';
+                } else {
+                    note.style.display = 'none';
+                    pillBtn.classList.remove('is-active');
+                    pillBtn.setAttribute('aria-expanded', 'false');
+                    pillBtn.title = 'Click to show details';
+                }
+            });
+
+            // Right after the outcome pill, which is the claim it qualifies.
+            if (meta.firstElementChild) {
+                meta.firstElementChild.insertAdjacentElement('afterend', pillBtn);
+            } else {
+                meta.appendChild(pillBtn);
+            }
+        }
 
         initWinrateChart(data);
 
