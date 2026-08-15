@@ -167,6 +167,131 @@ function updateRandomMargins(series) {
     setMarginSeries(randomMarginChart, series, '#4caf50', '#ef5350');
 }
 
+/**
+ * Champion lineage chart — bars are each iteration's gate score against the
+ * reigning champion, the line is the champion's cumulative self-referential
+ * Elo. This is the progress metric that matters: win-rate-vs-random saturates
+ * at 100% and stays there even while the model degrades, whereas every gate
+ * match is a fresh head-to-head against the previous best.
+ */
+const gateChart = (() => {
+    const el = document.getElementById('gate-chart');
+    if (!el) return null;
+    return new Chart(el, {
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    type: 'bar',
+                    label: 'Gate score',
+                    yAxisID: 'y',
+                    data: [],
+                    backgroundColor: [],
+                    borderWidth: 0,
+                    order: 2,
+                },
+                {
+                    type: 'line',
+                    label: 'Champion strength',
+                    yAxisID: 'y1',
+                    data: [],
+                    borderColor: '#c8956c',
+                    backgroundColor: 'rgba(200, 149, 108, 0.10)',
+                    borderWidth: 2,
+                    fill: true,
+                    stepped: true,      // strength is constant until a promotion
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    order: 1,
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        title: (items) => `Iteration ${items[0].label}`,
+                        label: (item) => {
+                            if (item.datasetIndex === 0) {
+                                const p = gateChart._promoted?.[item.dataIndex];
+                                return `Gate: ${(item.raw * 100).toFixed(0)}%  ${p ? 'promoted' : 'rejected'}`;
+                            }
+                            const d = gateChart._delta?.[item.dataIndex] || 0;
+                            return `Strength: ${Number(item.raw).toFixed(0)} Elo` + (d ? ` (+${d.toFixed(0)})` : '');
+                        },
+                    },
+                },
+                annotation: undefined,
+            },
+            scales: {
+                x: {
+                    grid: { color: 'rgba(255,255,255,0.06)' },
+                    ticks: { color: '#9a9a9a', maxTicksLimit: 14 },
+                },
+                y: {
+                    position: 'left',
+                    min: 0,
+                    max: 1,
+                    title: { display: true, text: 'Gate score', color: '#9a9a9a' },
+                    grid: { color: 'rgba(255,255,255,0.06)' },
+                    ticks: { color: '#9a9a9a', stepSize: 0.25, callback: v => `${v * 100}%` },
+                },
+                y1: {
+                    position: 'right',
+                    title: { display: true, text: 'Champion Elo', color: '#c8956c' },
+                    grid: { drawOnChartArea: false },
+                    ticks: { color: '#c8956c' },
+                },
+            },
+        },
+        plugins: [{
+            // Dashed promotion-threshold rule drawn straight onto the canvas,
+            // so no external annotation plugin is needed.
+            id: 'gateThreshold',
+            afterDatasetsDraw(chart) {
+                const t = chart.$gateThreshold;
+                if (t == null) return;
+                const { ctx, chartArea, scales } = chart;
+                const y = scales.y.getPixelForValue(t);
+                ctx.save();
+                ctx.setLineDash([5, 4]);
+                ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(chartArea.left, y);
+                ctx.lineTo(chartArea.right, y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = 'rgba(255,255,255,0.6)';
+                ctx.font = '10px Inter, sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(`promote ≥ ${Math.round(t * 100)}%`, chartArea.right - 4, y - 4);
+                ctx.restore();
+            },
+        }],
+    });
+})();
+
+/** Replace the champion-lineage chart's data from /api/gate_history points. */
+function updateGateChart(points, threshold) {
+    if (!gateChart) return;
+    gateChart.data.labels = points.map(p => p.iteration);
+    gateChart.data.datasets[0].data = points.map(p => p.gate_win_rate);
+    gateChart.data.datasets[0].backgroundColor = points.map(
+        p => (p.promoted ? 'rgba(76, 175, 80, 0.75)' : 'rgba(239, 83, 80, 0.55)')
+    );
+    gateChart.data.datasets[1].data = points.map(p => p.gate_elo);
+    gateChart._promoted = points.map(p => p.promoted);
+    gateChart._delta = points.map(p => p.elo_delta);
+    gateChart.$gateThreshold = threshold ?? 0.55;
+    gateChart.update('none');
+}
+
 const MAX_CHART_POINTS = 100;
 
 /**
@@ -234,4 +359,144 @@ function updateCharts(metrics) {
         policyLossChart.update('none');
         valueLossChart.update('none');
     }
+}
+
+// ---- Time Breakdown Chart ----
+const timeBreakdownChart = (() => {
+    const el = document.getElementById('time-breakdown-chart');
+    if (!el) return null;
+
+    return new Chart(el, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'Self',
+                    key: 'self_play',
+                    data: [],
+                    borderColor: '#4fc3f7',
+                    backgroundColor: 'rgba(79, 195, 247, 0.15)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 3,
+                },
+                {
+                    label: 'Training',
+                    key: 'nn_train',
+                    data: [],
+                    borderColor: '#ab47bc',
+                    backgroundColor: 'rgba(171, 71, 188, 0.15)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 3,
+                },
+                {
+                    label: 'Random',
+                    key: 'random_eval',
+                    data: [],
+                    borderColor: '#66bb6a',
+                    backgroundColor: 'rgba(102, 187, 106, 0.15)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 3,
+                },
+                {
+                    label: 'Champion',
+                    key: 'champion_gate',
+                    data: [],
+                    borderColor: '#ffa726',
+                    backgroundColor: 'rgba(255, 167, 38, 0.15)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 3,
+                },
+                {
+                    label: 'Total',
+                    key: 'total',
+                    data: [],
+                    borderColor: '#f5f5f5',
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 3,
+                },
+            ],
+        },
+        options: {
+            ...chartDefaults,
+            plugins: {
+                ...chartDefaults.plugins,
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        title: (items) => `Iteration ${items[0].label}`,
+                        label: (item) => {
+                            const val = item.raw;
+                            if (val === null || val === undefined) return `${item.dataset.label}: —`;
+                            let timeStr = `${val.toFixed(1)}s`;
+                            if (val >= 60) {
+                                const m = Math.floor(val / 60);
+                                const s = (val % 60).toFixed(0);
+                                timeStr += ` (${m}m ${s}s)`;
+                            }
+                            return `${item.dataset.label}: ${timeStr}`;
+                        },
+                    },
+                },
+            },
+            scales: {
+                ...chartDefaults.scales,
+                y: {
+                    ...chartDefaults.scales.y,
+                    title: { display: true, text: 'Seconds', color: '#9a9a9a', font: { size: 11 } },
+                    ticks: {
+                        color: '#9a9a9a',
+                        callback: (v) => v >= 60 ? `${(v/60).toFixed(1)}m` : `${v}s`,
+                    },
+                },
+            },
+        },
+    });
+})();
+
+/** Update Time Breakdown Chart data & filter visibility. */
+function updateTimeBreakdownChart(history, activeFilters = {}) {
+    if (!timeBreakdownChart || !Array.isArray(history)) return;
+
+    const labels = history.map(h => h.iteration);
+
+    const dsData = {
+        self_play: history.map(h => h.self_play_time ?? 0),
+        nn_train: history.map(h => h.nn_train_time ?? 0),
+        random_eval: history.map(h => h.random_eval_time ?? 0),
+        champion_gate: history.map(h => h.champion_gate_time ?? 0),
+        total: history.map(h => h.total_time ?? 0),
+    };
+
+    timeBreakdownChart.data.labels = labels;
+
+    timeBreakdownChart.data.datasets.forEach(ds => {
+        const key = ds.key;
+        ds.data = dsData[key] || [];
+
+        // If key is present in activeFilters dictionary and is false, hide dataset
+        if (activeFilters && typeof activeFilters === 'object') {
+            if (activeFilters[key] === false) {
+                ds.hidden = true;
+            } else {
+                ds.hidden = false;
+            }
+        } else {
+            ds.hidden = false;
+        }
+    });
+
+    timeBreakdownChart.update('none');
 }

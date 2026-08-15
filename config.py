@@ -171,7 +171,12 @@ class TrainingConfig:
     
     # Self-play
     num_self_play_games: int = 5           # Games per iteration before training (Reduced for faster iterations)
-    num_parallel_workers: int = 4          # Parallel self-play workers (M2 has 4P+4E cores)
+    # Worker processes for EVERY game-playing phase — self-play, the promotion
+    # gate, and the random-bot eval. All three play independent games on CPU,
+    # so they share one setting. Capped at the CPU count and at the number of
+    # games in that phase. (M2 has 4P+4E cores; 6 measures faster than 4 there,
+    # since 4 workers leave the E-cores idle while stragglers hold up the batch.)
+    num_parallel_workers: int = 4
     
     # Replay buffer
     replay_buffer_size: int = 50_000       # Max training samples to keep
@@ -198,11 +203,34 @@ class TrainingConfig:
     # update is accepted unconditionally and the loop can walk into a
     # degenerate network with nothing able to detect or reject it.
     gate_enabled: bool = True
-    gate_games: int = 10                   # Head-to-head games (colors alternate)
+    # Statistical power depends on the NUMBER of games, not sims per game, while
+    # cost is roughly (games x sims). Measured on a 9x9 M2: ~35s/game at 100
+    # sims, ~18s/game at 50. So 20 games x 50 sims costs the same wall-clock as
+    # 10 x 100 but makes strictly better decisions at every effect size —
+    # e.g. a clearly worse candidate (true p=0.35) is blocked 94.7% of the time
+    # instead of 90.5%, and a genuinely better one (p=0.65) accepted 87.8%
+    # instead of 75.1%.
+    gate_games: int = 20                   # Head-to-head games (colors alternate)
     gate_threshold: float = 0.55           # Candidate must win >= this share
-    gate_simulations: int = 100            # Sims per move during the gate match
+    gate_simulations: int = 50             # Sims per move during the gate match
     # Consecutive rejections before warning that training has stalled.
     gate_stall_warning: int = 5
+
+    # --- Value target blending --------------------------------------------
+    # The value head is trained on `lambda * z + (1 - lambda) * q`, where z is
+    # the final game outcome (±1) and q is the MCTS root evaluation at that
+    # position (both from the mover's perspective).
+    #
+    # This is the fix for value-head collapse AT THE SOURCE. With outcome-only
+    # targets, every position in a game shares one label, so once one colour
+    # wins nearly every game the label is predictable from the turn-colour
+    # plane alone and the network stops reading the board. Because q varies
+    # position-to-position even when z is constant across the whole game, the
+    # colour shortcut stops being a good fit and the network is forced to
+    # evaluate the actual position. (This is what KataGo does.)
+    #
+    # 1.0 = pure game outcome (original AlphaZero, collapse-prone).
+    value_target_outcome_weight: float = 0.6
 
     # --- Collapse guard ---------------------------------------------------
     # Tripwires for value-head collapse: when one colour wins nearly every
@@ -210,12 +238,27 @@ class TrainingConfig:
     # turn-colour plane, which makes MCTS blind. These detect that state.
     collapse_guard_enabled: bool = True
     collapse_value_std_min: float = 0.05   # Min spread of value head over positions
-    collapse_pass_rate_max: float = 0.15   # Max share of a colour's moves that are passes
+    # Calibrated against hot-boi's 48-iteration history: White's pass rate was
+    # 6-20% while healthy and 31-46% once collapsed. 0.15 fired on 6 of the 15
+    # healthy iterations (alarm fatigue); 0.25 sits in the empty band between
+    # the two regimes — 0 false alarms, 0 missed collapses, and it still fires
+    # at iteration 22, well before the confirmed collapse at 29.
+    collapse_pass_rate_max: float = 0.25   # Max share of a colour's moves that are passes
     collapse_probe_positions: int = 128    # Buffer positions sampled for the probe
     collapse_auto_stop: bool = False       # True = halt training when tripped
     
     # Elo
     elo_anchor: int = 500                  # Random bot starts at this Elo (≈30 kyu)
+
+
+def _model_default(training_params, key: str):
+    """
+    Read an optional per-model training override, falling back to the default
+    declared on TrainingConfig for that same field.
+    """
+    fallback = TrainingConfig.__dataclass_fields__[key].default
+    value = getattr(training_params, key, None)
+    return fallback if value is None else value
 
 
 @dataclass
@@ -292,13 +335,18 @@ class Config:
             replay_buffer_size=model_info.training.replay_buffer_size,
             reflection_interval_games=model_info.training.reflection_interval_games,
             # Gate / collapse-guard settings are optional per-model overrides;
-            # models that predate them fall back to the safe defaults above.
-            gate_enabled=getattr(model_info.training, "gate_enabled", True),
-            gate_games=getattr(model_info.training, "gate_games", 10),
-            gate_threshold=getattr(model_info.training, "gate_threshold", 0.55),
-            gate_simulations=getattr(model_info.training, "gate_simulations", 100),
-            collapse_guard_enabled=getattr(model_info.training, "collapse_guard_enabled", True),
-            collapse_auto_stop=getattr(model_info.training, "collapse_auto_stop", False),
+            # models that predate them fall back to the defaults declared on
+            # TrainingConfig itself — never to a second, hand-written copy of
+            # them, which is how gate_games/gate_simulations previously drifted
+            # away from the values the dataclass documents.
+            gate_enabled=_model_default(model_info.training, "gate_enabled"),
+            gate_games=_model_default(model_info.training, "gate_games"),
+            gate_threshold=_model_default(model_info.training, "gate_threshold"),
+            gate_simulations=_model_default(model_info.training, "gate_simulations"),
+            gate_stall_warning=_model_default(model_info.training, "gate_stall_warning"),
+            num_parallel_workers=_model_default(model_info.training, "num_parallel_workers"),
+            collapse_guard_enabled=_model_default(model_info.training, "collapse_guard_enabled"),
+            collapse_auto_stop=_model_default(model_info.training, "collapse_auto_stop"),
         )
         # Network architecture is stored per-model so that a saved weights.pt
         # is always rebuilt into the matching network. Fall back to defaults

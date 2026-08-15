@@ -40,6 +40,17 @@ class TrainingParams:
     temperature_threshold: int = 30
     temperature_init: float = 0.8
     temperature_final: float = 0.1
+    # --- Champion vs candidate (promotion gate) ---
+    # Defaults mirror config.TrainingConfig; models saved before these existed
+    # load as None and fall back to the TrainingConfig defaults in
+    # Config.from_model, so old configs keep behaving exactly as before.
+    gate_enabled: bool = True
+    gate_games: int = 20
+    gate_threshold: float = 0.55
+    gate_simulations: int = 50
+    gate_stall_warning: int = 5
+    # Worker processes shared by self-play, the gate, and the random-bot eval.
+    num_parallel_workers: int = 4
 
 
 @dataclass
@@ -82,6 +93,11 @@ class ModelInfo:
     @classmethod
     def from_dict(cls, data: dict) -> "ModelInfo":
         training_data = data.pop("training", {})
+        # `gate_workers` was briefly a gate-only setting before it became the
+        # shared worker count for every game-playing phase. Carry the stored
+        # value over instead of silently dropping it back to the default.
+        if "gate_workers" in training_data and "num_parallel_workers" not in training_data:
+            training_data["num_parallel_workers"] = training_data["gate_workers"]
         training = TrainingParams(**{
             k: v for k, v in training_data.items()
             if k in TrainingParams.__dataclass_fields__

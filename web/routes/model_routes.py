@@ -66,6 +66,38 @@ def _resolve_network_params(data: dict, board_size: int):
     return arch, None
 
 
+from param_bounds import PARAM_BOUNDS, CATEGORIES, sanitize_params
+
+# Training params that are editable but have no slider in PARAM_BOUNDS.
+EXTRA_TRAINING_KEYS = (
+    'batch_size', 'num_epochs_per_iteration',
+    'replay_buffer_size', 'reflection_interval_games',
+)
+
+
+def _collect_training_params(data: dict) -> dict:
+    """
+    Pull the editable training params out of a request body.
+
+    Everything with a slider goes through sanitize_params, so a hand-crafted
+    request cannot store a value the UI would refuse to produce.
+    """
+    params = sanitize_params(data)
+    for key in EXTRA_TRAINING_KEYS:
+        if key in data and data[key] is not None:
+            params[key] = data[key]
+    return params
+
+
+@model_bp.route('/api/param_bounds')
+def get_param_bounds():
+    """Return centralized parameter bounds & categories for UI sliders."""
+    return jsonify({
+        'bounds': PARAM_BOUNDS,
+        'categories': CATEGORIES,
+    })
+
+
 @model_bp.route('/api/network_presets')
 def network_presets():
     """
@@ -133,14 +165,7 @@ def create_model():
     if ruleset not in ('chinese', 'japanese'):
         return jsonify({'error': f'Invalid ruleset: {ruleset}'}), 400
 
-    training_params = {}
-    for key in ('num_self_play_games', 'eval_games', 'num_simulations',
-                'c_puct', 'learning_rate', 'batch_size',
-                'num_epochs_per_iteration', 'replay_buffer_size',
-                'reflection_interval_games', 'temperature_threshold',
-                'temperature_init', 'temperature_final'):
-        if key in data:
-            training_params[key] = data[key]
+    training_params = _collect_training_params(data)
 
     network_params, net_err = _resolve_network_params(data, board_size)
     if net_err:
@@ -227,14 +252,7 @@ def update_model(model_id):
 
     komi = data.get('komi')
 
-    training_params = {}
-    for key in ('num_self_play_games', 'eval_games', 'num_simulations',
-                'c_puct', 'learning_rate', 'batch_size',
-                'num_epochs_per_iteration', 'replay_buffer_size',
-                'reflection_interval_games', 'temperature_threshold',
-                'temperature_init', 'temperature_final'):
-        if key in data:
-            training_params[key] = data[key]
+    training_params = _collect_training_params(data)
 
     # Warn (but allow) if changing board size on a model that already has weights.
     board_size_changed = board_size is not None and board_size != existing.board_size

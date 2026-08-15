@@ -8,7 +8,7 @@ let currentMoveIndex = 0;
 let winrateChart = null;
 let winrateBlack = [];   // base series: Black's win % per move
 let winrateSide = 1;     // perspective shown: 1 = Black, 2 = White
-let showTerritoryOverlay = true;  // coloured overlay on the board (numbers show regardless)
+let showTerritoryOverlay = false;  // coloured overlay on the board (numbers show regardless); off by default
 
 document.addEventListener('DOMContentLoaded', () => {
     loadGamesList();
@@ -31,10 +31,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // numbers in the Territory panel (those are always shown).
     const btnOverlay = document.getElementById('btn-territory-overlay');
     if (btnOverlay) {
-        btnOverlay.addEventListener('click', () => {
-            showTerritoryOverlay = !showTerritoryOverlay;
+        const syncOverlayBtn = () => {
             btnOverlay.classList.toggle('active', showTerritoryOverlay);
             btnOverlay.textContent = showTerritoryOverlay ? '👁 Overlay' : '🚫 Overlay';
+        };
+        syncOverlayBtn();  // reflect the default (off) on load
+        btnOverlay.addEventListener('click', () => {
+            showTerritoryOverlay = !showTerritoryOverlay;
+            syncOverlayBtn();
             if (reviewBoard) {
                 reviewBoard.showEstimate = showTerritoryOverlay;
                 reviewBoard.draw();
@@ -67,93 +71,41 @@ async function loadGamesList() {
             details.className = 'iteration-group';
             if (groupIdx === 0) details.open = true;
 
-            let evalCount = 0;
-            let aiWins = 0;
-            group.games.forEach(game => {
-                if (game.is_eval && game.network_color !== undefined) {
-                    evalCount++;
-                    if (game.winner === game.network_color) {
-                        aiWins++;
-                    }
-                }
-            });
+            const eloText = group.elo
+                ? `<span class="group-note">~${group.elo} Elo</span>`
+                : '';
 
-            let winrateHtml = '';
-            if (evalCount > 0) {
-                const wr = Math.round((aiWins / evalCount) * 100);
-                let wrColor = 'var(--text-muted)';
-                if (wr > 50) wrColor = 'var(--success)';
-                else if (wr < 50) wrColor = 'var(--danger)';
-                else wrColor = 'var(--warning)';
-
-                winrateHtml = `<span style="font-size: 0.85em; font-weight: normal; color: ${wrColor};">WR: ${wr}% (${aiWins}/${evalCount})</span>`;
-            }
-
-            const eloText = group.elo ? `<span style="color: var(--text-muted); font-size: 0.85em; font-weight: normal; margin-left: 0.5rem;">(~${group.elo} Elo)</span>` : '';
-
-            details.innerHTML = `<summary style="display: flex; justify-content: space-between; align-items: center;">
+            const summary = document.createElement('summary');
+            summary.innerHTML = `
                 <span>Iteration ${group.iteration}${eloText}</span>
-                ${winrateHtml}
-            </summary>`;
+                <span class="group-note">${group.total_games} games</span>
+            `;
+            details.appendChild(summary);
 
-            // Sort games: eval games first, then by game index
-            group.games.sort((a, b) => {
-                if (a.is_eval && !b.is_eval) return -1;
-                if (!a.is_eval && b.is_eval) return 1;
-                return a.game_index - b.game_index;
-            });
-
-            group.games.forEach(game => {
-                const item = document.createElement('div');
-                item.className = 'game-item review-list-item';
-
-                // Highlight if currently selected
-                if (currentGameData && currentGameData.filename === game.filename) {
-                    item.classList.add('active');
+            // Second level: one collapsible section per phase of the iteration.
+            (group.phases || []).forEach((phase, phaseIdx) => {
+                const phaseEl = document.createElement('details');
+                phaseEl.className = 'phase-group';
+                // Open the promotion section by default on the newest iteration —
+                // it's the match that decided whether the model moved forward.
+                if (groupIdx === 0 && (phaseIdx === 0 || phase.phase === 'promotion')) {
+                    phaseEl.open = true;
                 }
 
-                const winnerIcon = game.winner === 1 ? '⚫' : (game.winner === 2 ? '⚪' : '🤝');
-                let label = '';
-
-                if (game.is_eval) {
-                    const aiColorStr = game.network_color === 1 ? '⚫ Black' : '⚪ White';
-                    label = `Eval #${game.game_index} (AI as ${aiColorStr} vs RandomBot)`;
-                } else {
-                    label = `Self-Play #${game.game_index}`;
-                }
-
-                let resultText = 'Draw';
-                if (game.winner === 1) resultText = `B+${game.margin !== undefined ? Number(game.margin).toFixed(1) : '?'}`;
-                else if (game.winner === 2) resultText = `W+${game.margin !== undefined ? Number(game.margin).toFixed(1) : '?'}`;
-
-                let resultColor = 'var(--text-muted)';
-                if (game.is_eval && game.network_color !== undefined && game.winner !== 0) {
-                    resultColor = (game.winner === game.network_color) ? 'var(--success)' : 'var(--danger)';
-                }
-
-                item.innerHTML = `
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
-                        <strong>${winnerIcon} ${label}</strong>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--text-muted);">
-                        <span><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves</span>
-                        <span>${new Date(game.timestamp).toLocaleTimeString()}</span>
-                    </div>
+                const phaseSummary = document.createElement('summary');
+                phaseSummary.innerHTML = `
+                    <span>${phase.label} <span class="group-note">${phase.count}</span></span>
+                    ${phaseSummaryBadge(phase)}
                 `;
+                phaseEl.appendChild(phaseSummary);
 
-                item.addEventListener('click', () => {
-                    document.querySelectorAll('.game-item').forEach(el => el.classList.remove('active'));
-                    item.classList.add('active');
-
-                    const url = new URL(window.location);
-                    url.searchParams.set('game', game.filename);
-                    window.history.pushState({}, '', url);
-
-                    loadGame(game.filename);
+                phase.games.forEach(game => {
+                    phaseEl.appendChild(buildGameItem(game, phase.phase));
                 });
 
-                details.appendChild(item);
+                details.appendChild(phaseEl);
             });
+
             list.appendChild(details);
         });
     } catch (e) {
@@ -161,10 +113,112 @@ async function loadGamesList() {
     }
 }
 
+/** Colour a win rate: above 50% good, below 50% bad. */
+function winRateColor(rate, threshold = 0.5) {
+    if (rate > threshold) return 'var(--success)';
+    if (rate < threshold) return 'var(--danger)';
+    return 'var(--warning)';
+}
+
+/** Right-hand badge on a phase header: candidate win rate, or AI win rate. */
+function phaseSummaryBadge(phase) {
+    if (phase.phase === 'promotion') {
+        const rate = phase.candidate_win_rate !== undefined && phase.candidate_win_rate !== null
+            ? phase.candidate_win_rate
+            : phase.gate_win_rate;
+        if (rate === undefined || rate === null) return '';
+
+        const threshold = phase.gate_threshold || 0.5;
+        const pct = Math.round(rate * 100);
+        return `<span class="group-note" style="color: ${winRateColor(rate, threshold)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
+            ${pct}%
+        </span>`;
+    }
+
+    if (phase.phase === 'eval' && phase.win_rate !== null && phase.win_rate !== undefined) {
+        const pct = Math.round(phase.win_rate * 100);
+        return `<span class="group-note" style="color: ${winRateColor(phase.win_rate)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
+            ${pct}%
+        </span>`;
+    }
+
+    return '';
+}
+
+/** One clickable game row inside a phase section. */
+function buildGameItem(game, phase) {
+    const item = document.createElement('div');
+    item.className = 'game-item review-list-item';
+
+    if (currentGameData && currentGameData.filename === game.filename) {
+        item.classList.add('active');
+    }
+
+    const winnerIcon = game.winner === 1 ? '⚫' : (game.winner === 2 ? '⚪' : '🤝');
+    const colorStr = (c) => (c === 1 ? '⚫ Black' : '⚪ White');
+
+    let resultColor = 'var(--text-muted)';
+    let resultText = 'Draw';
+    if (game.winner === 1) resultText = `B+${game.margin !== undefined ? Number(game.margin).toFixed(1) : '?'}`;
+    else if (game.winner === 2) resultText = `W+${game.margin !== undefined ? Number(game.margin).toFixed(1) : '?'}`;
+
+    if (phase === 'promotion') {
+        if (game.winner !== 0) {
+            resultColor = game.candidate_won ? 'var(--success)' : 'var(--danger)';
+        }
+        let outcomeLine = 'Draw';
+        if (game.winner !== 0) {
+            const winnerWho = game.candidate_won ? 'Candidate' : 'Champion';
+            outcomeLine = `${winnerWho} won - ${resultText}`;
+        }
+
+        item.innerHTML = `
+            <div style="font-weight: 600; margin-bottom: 0.15rem;">${winnerIcon} Promotion #${game.game_index}</div>
+            <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${outcomeLine}</div>
+            <div style="font-size: 0.85rem; color: var(--text-muted);">${game.num_moves} moves</div>
+        `;
+    } else {
+        let label;
+        if (phase === 'eval' || game.is_eval) {
+            label = `Eval #${game.game_index} (AI as ${colorStr(game.network_color)} vs RandomBot)`;
+            if (game.network_color !== undefined && game.winner !== 0) {
+                resultColor = (game.winner === game.network_color) ? 'var(--success)' : 'var(--danger)';
+            }
+        } else {
+            label = `Self-Play #${game.game_index}`;
+        }
+
+        item.innerHTML = `
+            <div style="margin-bottom: 0.25rem;">
+                <strong>${winnerIcon} ${label}</strong>
+            </div>
+            <div style="font-size: 0.85rem; color: var(--text-muted);">
+                <span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves
+            </div>
+        `;
+    }
+
+    item.addEventListener('click', () => {
+        document.querySelectorAll('.game-item').forEach(el => el.classList.remove('active'));
+        item.classList.add('active');
+
+        const url = new URL(window.location);
+        url.searchParams.set('game', game.filename);
+        window.history.pushState({}, '', url);
+
+        loadGame(game.filename);
+    });
+
+    return item;
+}
+
 async function loadGame(filename) {
     try {
         const cacheBuster = new Date().getTime();
-        const res = await fetch(`/training/api/games/${filename}?t=${cacheBuster}`);
+        // The id is a path under games/ (iter_000001/promotion/promo_0000.json),
+        // so escape each segment but keep the separators.
+        const encodedPath = filename.split('/').map(encodeURIComponent).join('/');
+        const res = await fetch(`/training/api/games/${encodedPath}?t=${cacheBuster}`);
         if (!res.ok) throw new Error('Game not found');
 
         const data = await res.json();
@@ -177,26 +231,61 @@ async function loadGame(filename) {
         const canvas = document.getElementById('review-board');
         const size = data.board_size || 9;
 
-        reviewBoard = new GoBoardRenderer(canvas, size);
+        reviewBoard = new GoBoardRenderer(canvas, size, null, { enableHover: false });
 
         // Informative Game Title & Meta
         let titleText = '';
-        let resultText = '';
+        let resultText = 'Draw';
+        let winnerIcon = '🤝';
         const komi = data.komi || 6.5;
 
-        if (data.winner === 1) resultText = `Black wins (B+${data.margin !== undefined ? Number(data.margin).toFixed(1) : '?'})`;
-        else if (data.winner === 2) resultText = `White wins (W+${data.margin !== undefined ? Number(data.margin).toFixed(1) : '?'})`;
-        else resultText = 'Draw';
+        if (data.winner === 1) {
+            resultText = `B+${data.margin !== undefined ? Number(data.margin).toFixed(1) : '?'}`;
+            winnerIcon = '⚫';
+        } else if (data.winner === 2) {
+            resultText = `W+${data.margin !== undefined ? Number(data.margin).toFixed(1) : '?'}`;
+            winnerIcon = '⚪';
+        }
 
-        if (data.is_eval) {
-            const aiColor = data.network_color === 1 ? '⚫ Black' : '⚪ White';
-            const randColor = data.network_color === 1 ? '⚪ White' : '⚫ Black';
-            const outcomeStr = (data.winner === data.network_color) ? '🎉 Go AI Won' : '❌ RandomBot Won';
+        if (data.phase === 'promotion') {
+            const candIcon = data.candidate_color === 1 ? '⚫' : '⚪';
+            const champIcon = data.champion_color === 1 ? '⚫' : '⚪';
+            const outcomeStr = data.winner === 0
+                ? '🤝 Draw'
+                : (data.candidate_won ? `🎉 Candidate Won (${resultText})` : `🛡 Champion Held (${resultText})`);
+            const outcomeClass = data.winner === 0 ? 'outcome-draw' : (data.candidate_won ? 'outcome-win' : 'outcome-loss');
+
+            titleText = `Iteration ${data.iteration} · Promotion Match #${data.game_index || 0}`;
+            document.getElementById('review-meta').innerHTML = `
+                <span class="review-meta-pill ${outcomeClass}">${outcomeStr}</span>
+                <span class="review-meta-pill">Cand ${candIcon} vs Champ ${champIcon}</span>
+                <span class="review-meta-pill">♟️ ${data.moves.length} moves</span>
+                <span class="review-meta-pill">⚖️ Komi ${komi}</span>
+            `;
+        } else if (data.is_eval) {
+            const aiIcon = data.network_color === 1 ? '⚫' : '⚪';
+            const randIcon = data.network_color === 1 ? '⚪' : '⚫';
+            const aiWon = data.winner === data.network_color;
+            const outcomeStr = (data.winner === 0)
+                ? '🤝 Draw'
+                : (aiWon ? `🎉 Go AI Won (${resultText})` : `❌ RandomBot Won (${resultText})`);
+            const outcomeClass = data.winner === 0 ? 'outcome-draw' : (aiWon ? 'outcome-win' : 'outcome-loss');
+
             titleText = `Iteration ${data.iteration} · Eval Match #${data.game_index || 1}`;
-            document.getElementById('review-meta').innerHTML = `<strong>${outcomeStr}</strong> (${resultText}) &middot; Go AI (${aiColor}) vs RandomBot (${randColor}) &middot; ${data.moves.length} moves &middot; Komi ${komi}`;
+            document.getElementById('review-meta').innerHTML = `
+                <span class="review-meta-pill ${outcomeClass}">${outcomeStr}</span>
+                <span class="review-meta-pill">Go AI ${aiIcon} vs RandomBot ${randIcon}</span>
+                <span class="review-meta-pill">♟️ ${data.moves.length} moves</span>
+                <span class="review-meta-pill">⚖️ Komi ${komi}</span>
+            `;
         } else {
+            const outcomeClass = data.winner === 0 ? 'outcome-draw' : 'outcome-neutral';
             titleText = `Iteration ${data.iteration} · Self-Play Game #${data.game_index || 1}`;
-            document.getElementById('review-meta').innerHTML = `<strong>${resultText}</strong> &middot; ${data.moves.length} moves &middot; Komi ${komi}`;
+            document.getElementById('review-meta').innerHTML = `
+                <span class="review-meta-pill ${outcomeClass}">${winnerIcon} ${resultText}</span>
+                <span class="review-meta-pill">♟️ ${data.moves.length} moves</span>
+                <span class="review-meta-pill">⚖️ Komi ${komi}</span>
+            `;
         }
 
         document.getElementById('review-title').textContent = titleText;
@@ -242,9 +331,11 @@ function initWinrateChart(data) {
     }
     container.style.display = 'block';
 
-    // Default perspective: for eval games (AI vs RandomBot), show the AI's side;
-    // otherwise default to Black.
-    if (data.is_eval && (data.network_color === 1 || data.network_color === 2)) {
+    // Default perspective: show the side whose strength is being judged — the
+    // AI in eval games, the candidate in promotion matches; else Black.
+    if (data.phase === 'promotion' && (data.candidate_color === 1 || data.candidate_color === 2)) {
+        winrateSide = data.candidate_color;
+    } else if (data.is_eval && (data.network_color === 1 || data.network_color === 2)) {
         winrateSide = data.network_color;
     } else {
         winrateSide = 1;
@@ -397,18 +488,6 @@ function updateTerritoryPanel(est) {
     leadEl.className = 'territory-lead ' + (
         est.lead.startsWith('B') ? 'lead-black' : (est.lead.startsWith('W') ? 'lead-white' : 'lead-tie')
     );
-
-    // Stones in atari can flip the estimate next move, so flag them — but only then.
-    const atariEl = document.getElementById('territory-atari');
-    const parts = [];
-    if (est.atariStonesBlack > 0) parts.push(`⚫ ${est.atariStonesBlack}`);
-    if (est.atariStonesWhite > 0) parts.push(`⚪ ${est.atariStonesWhite}`);
-    if (parts.length > 0) {
-        atariEl.textContent = `⚠ In atari: ${parts.join('  ')}`;
-        atariEl.style.display = 'block';
-    } else {
-        atariEl.style.display = 'none';
-    }
 }
 
 function jumpToMove(index) {

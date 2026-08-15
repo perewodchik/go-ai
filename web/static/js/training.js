@@ -118,6 +118,7 @@ socket.on('training_update', (data) => {
         resetCharts();
         allMetrics = [];
         loadHistoricalMetrics();
+        loadGateHistory();
     } else if (incomingModel && !currentModelId) {
         currentModelId = incomingModel;
     }
@@ -230,6 +231,7 @@ socket.on('training_update', (data) => {
         if (metricsTableVisible()) renderMetricsTable();
         loadGamesList();
         loadLearningStats();
+        loadGateHistory();
     }
 
     // Log entry
@@ -274,6 +276,39 @@ function addLogEntry(data, append = false) {
 }
 
 // ---- Games List ----
+
+/**
+ * Right-hand badge on a phase header.
+ */
+function gamesPhaseBadge(phase) {
+    const color = (rate, threshold = 0.5) => {
+        if (rate > threshold) return 'var(--success)';
+        if (rate < threshold) return 'var(--danger)';
+        return 'var(--warning)';
+    };
+
+    if (phase.phase === 'promotion') {
+        const rate = phase.candidate_win_rate !== undefined && phase.candidate_win_rate !== null
+            ? phase.candidate_win_rate
+            : phase.gate_win_rate;
+        if (rate === undefined || rate === null) return '';
+
+        const pct = Math.round(rate * 100);
+        return `<span class="group-note" style="color: ${color(rate, phase.gate_threshold || 0.5)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
+            ${pct}%
+        </span>`;
+    }
+
+    if (phase.phase === 'eval' && phase.win_rate !== null && phase.win_rate !== undefined) {
+        const pct = Math.round(phase.win_rate * 100);
+        return `<span class="group-note" style="color: ${color(phase.win_rate)}; font-weight: 700; font-size: 0.95rem; white-space: nowrap;">
+            ${pct}%
+        </span>`;
+    }
+
+    return '';
+}
+
 async function loadGamesList() {
     try {
         const res = await fetch('/training/api/games');
@@ -285,74 +320,67 @@ async function loadGamesList() {
             const details = document.createElement('details');
             details.className = 'iteration-group';
             if (groupIdx === 0) details.open = true; // Open the most recent by default
-            
-            let evalCount = 0;
-            let aiWins = 0;
-            group.games.forEach(game => {
-                if (game.is_eval && game.network_color !== undefined) {
-                    evalCount++;
-                    if (game.winner === game.network_color) {
-                        aiWins++;
-                    }
-                }
-            });
-            
-            let winrateHtml = '';
-            if (evalCount > 0) {
-                const wr = Math.round((aiWins / evalCount) * 100);
-                let wrColor = 'var(--text-muted)';
-                if (wr > 50) wrColor = 'var(--success)';
-                else if (wr < 50) wrColor = 'var(--danger)';
-                else wrColor = 'var(--warning)';
-                
-                winrateHtml = `<span style="font-size: 0.85em; font-weight: normal; color: ${wrColor};">WR: ${wr}% (${aiWins}/${evalCount})</span>`;
-            }
-            
-            const eloText = group.elo ? `<span style="color: var(--text-muted); font-size: 0.85em; font-weight: normal; margin-left: 0.5rem;">(~${group.elo} Elo)</span>` : '';
-            
-            details.innerHTML = `<summary style="display: flex; justify-content: space-between; align-items: center;">
+
+            const eloText = group.elo ? `<span class="group-note">~${group.elo} Elo</span>` : '';
+
+            details.innerHTML = `<summary>
                 <span>Iteration ${group.iteration}${eloText}</span>
-                ${winrateHtml}
+                <span class="group-note">${group.total_games} games</span>
             </summary>`;
-            
-            // Sort games: eval games first, then by game index
-            group.games.sort((a, b) => {
-                if (a.is_eval && !b.is_eval) return -1;
-                if (!a.is_eval && b.is_eval) return 1;
-                return a.game_index - b.game_index;
-            });
-            
-            group.games.forEach(game => {
-                const item = document.createElement('div');
-                item.className = 'game-item';
-                
-                const winnerIcon = game.winner === 1 ? '⚫' : (game.winner === 2 ? '⚪' : '🤝');
-                let label = game.is_eval ? `Eval ${game.game_index}` : `Game ${game.game_index}`;
-                
-                if (game.is_eval && game.network_color !== undefined) {
-                    const aiIcon = game.network_color === 1 ? '⚫' : '⚪';
-                    const randIcon = game.network_color === 1 ? '⚪' : '⚫';
-                    label = `Eval ${game.game_index} (${aiIcon} AI vs ${randIcon} Rand)`;
+
+            // Second level: the phase that produced the games (self-play,
+            // promotion gate, eval vs random).
+            (group.phases || []).forEach((phase, phaseIdx) => {
+                const phaseEl = document.createElement('details');
+                phaseEl.className = 'phase-group';
+                if (groupIdx === 0 && (phaseIdx === 0 || phase.phase === 'promotion')) {
+                    phaseEl.open = true;
                 }
-                
-                let resultText = 'Draw';
-                if (game.winner === 1) resultText = `B+${game.margin || '?'}`;
-                else if (game.winner === 2) resultText = `W+${game.margin || '?'}`;
-                
-                let resultColor = 'var(--text-muted)';
-                if (game.is_eval && game.network_color !== undefined && game.winner !== 0) {
-                    resultColor = (game.winner === game.network_color) ? 'var(--success)' : 'var(--danger)';
-                }
-                
-                item.innerHTML = `
-                    <span>${winnerIcon} ${label}</span>
-                    <span class="meta"><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves</span>
-                `;
-                item.addEventListener('click', () => {
-                    window.location.href = `/training/review?game=${encodeURIComponent(game.filename)}`;
+
+                phaseEl.innerHTML = `<summary>
+                    <span>${phase.label} <span class="group-note">${phase.count}</span></span>
+                    ${gamesPhaseBadge(phase)}
+                </summary>`;
+
+                phase.games.forEach(game => {
+                    const item = document.createElement('div');
+                    item.className = 'game-item';
+
+                    const winnerIcon = game.winner === 1 ? '⚫' : (game.winner === 2 ? '⚪' : '🤝');
+                    const icon = (c) => (c === 1 ? '⚫' : '⚪');
+
+                    let label = `Game ${game.game_index}`;
+                    let resultColor = 'var(--text-muted)';
+
+                    if (phase.phase === 'promotion') {
+                        label = `Promo ${game.game_index} (${icon(game.candidate_color)} Cand vs ${icon(game.champion_color)} Champ)`;
+                        if (game.winner !== 0) {
+                            resultColor = game.candidate_won ? 'var(--success)' : 'var(--danger)';
+                        }
+                    } else if (phase.phase === 'eval' || game.is_eval) {
+                        label = `Eval ${game.game_index} (${icon(game.network_color)} AI vs ${icon(game.network_color === 1 ? 2 : 1)} Rand)`;
+                        if (game.network_color !== undefined && game.winner !== 0) {
+                            resultColor = (game.winner === game.network_color) ? 'var(--success)' : 'var(--danger)';
+                        }
+                    }
+
+                    let resultText = 'Draw';
+                    if (game.winner === 1) resultText = `B+${game.margin || '?'}`;
+                    else if (game.winner === 2) resultText = `W+${game.margin || '?'}`;
+
+                    item.innerHTML = `
+                        <span>${winnerIcon} ${label}</span>
+                        <span class="meta"><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves</span>
+                    `;
+                    item.addEventListener('click', () => {
+                        window.location.href = `/training/review?game=${encodeURIComponent(game.filename)}`;
+                    });
+                    phaseEl.appendChild(item);
                 });
-                details.appendChild(item);
+
+                details.appendChild(phaseEl);
             });
+
             list.appendChild(details);
         });
     } catch (e) { /* ignore */ }
@@ -508,6 +536,7 @@ async function loadLearningStats() {
         // --- Render self-play & vs random bot with current active filter ---
         renderSelfPlayStats(stats);
         renderRandomStats(stats);
+        renderTimeMetrics(stats);
     } catch (e) { /* ignore */ }
 }
 
@@ -535,22 +564,28 @@ const btnTuneToggle = document.getElementById('btn-tune-toggle');
 const btnTuneApply = document.getElementById('btn-tune-apply');
 const btnTuneCancel = document.getElementById('btn-tune-cancel');
 
+let tunerParamBounds = null;
+
+async function initTunerParamSliders(values = {}) {
+    const container = document.getElementById('tuner-param-categories');
+    if (!container) return;
+    if (!tunerParamBounds) {
+        tunerParamBounds = await getParamBounds();
+    }
+    if (!tunerParamBounds) return;
+
+    container.innerHTML = buildParamSlidersHTML('tune', tunerParamBounds, values);
+    bindParamSliders('tune', tunerParamBounds);
+    setParamSliderValues('tune', tunerParamBounds, values);
+}
+
 // Prefill the tuner inputs from the active model's stored training params.
 async function prefillTuner() {
     try {
         const res = await fetch('/models/api/active');
         const model = await res.json();
         if (!model || !model.training) return;
-        const t = model.training;
-        const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
-        set('tune-sp', t.num_self_play_games);
-        set('tune-eval', t.eval_games);
-        set('tune-mcts', t.num_simulations);
-        set('tune-cpuct', t.c_puct);
-        set('tune-lr', t.learning_rate);
-        set('tune-temp-thresh', t.temperature_threshold);
-        set('tune-temp-init', t.temperature_init);
-        set('tune-temp-final', t.temperature_final);
+        await initTunerParamSliders(model.training);
     } catch (e) { /* ignore */ }
 }
 
@@ -573,22 +608,7 @@ if (btnTuneCancel) btnTuneCancel.addEventListener('click', closeTuner);
 
 if (btnTuneApply) {
     btnTuneApply.addEventListener('click', async () => {
-        const num = (id) => {
-            const el = document.getElementById(id);
-            if (!el || el.value === '') return null;
-            const v = parseFloat(el.value);
-            return isNaN(v) ? null : v;
-        };
-        const payload = {
-            num_self_play_games: num('tune-sp'),
-            eval_games: num('tune-eval'),
-            num_simulations: num('tune-mcts'),
-            c_puct: num('tune-cpuct'),
-            learning_rate: num('tune-lr'),
-            temperature_threshold: num('tune-temp-thresh'),
-            temperature_init: num('tune-temp-init'),
-            temperature_final: num('tune-temp-final'),
-        };
+        const payload = extractParamSliderValues('tune', tunerParamBounds);
 
         btnTuneApply.disabled = true;
         btnTuneApply.textContent = 'Applying...';
@@ -670,7 +690,7 @@ function renderMetricsTable() {
 
 function metricsTableVisible() {
     const card = document.getElementById('metrics-table-card');
-    return card && !card.hidden;
+    return card && !card.hidden && card.style.display !== 'none';
 }
 
 // ---- Chart / Table view toggle ----
@@ -684,15 +704,77 @@ function setupMetricsViewToggle() {
             const charts = document.getElementById('metrics-charts');
             const table = document.getElementById('metrics-table-card');
             if (btn.dataset.view === 'table') {
-                if (charts) charts.hidden = true;
-                if (table) table.hidden = false;
+                if (charts) {
+                    charts.hidden = true;
+                    charts.style.display = 'none';
+                }
+                if (table) {
+                    table.hidden = false;
+                    table.style.display = 'block';
+                }
                 renderMetricsTable();
             } else {
-                if (table) table.hidden = true;
-                if (charts) charts.hidden = false;
+                if (table) {
+                    table.hidden = true;
+                    table.style.display = 'none';
+                }
+                if (charts) {
+                    charts.hidden = false;
+                    charts.style.display = '';
+                }
             }
         });
     });
+}
+
+// ---- Champion lineage (promotion gate) ----
+async function loadGateHistory() {
+    const panel = document.getElementById('gate-panel');
+    if (!panel) return;
+    try {
+        const res = await fetch('/training/api/gate_history');
+        const { points, summary } = await res.json();
+
+        const empty = document.getElementById('gate-empty');
+        const hasData = Array.isArray(points) && points.length > 0;
+        if (empty) empty.style.display = hasData ? 'none' : '';
+
+        updateGateChart(points || [], summary.gate_threshold);
+
+        const set = (id, txt) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = txt;
+        };
+
+        if (!hasData) {
+            ['gate-elo', 'gate-promotions', 'gate-avg', 'gate-streak'].forEach(id => set(id, '—'));
+            set('gate-promo-rate', 'no gated iterations yet');
+            set('gate-last-promo', '—');
+            set('gate-champ-version', 'v1');
+            return;
+        }
+
+        const elo = summary.gate_elo || 0;
+        set('gate-elo', `${elo >= 0 ? '+' : ''}${Math.round(elo)}`);
+        set('gate-promotions', `${summary.promotions}/${summary.gated_iterations}`);
+        set('gate-promo-rate', `${Math.round((summary.promotion_rate || 0) * 100)}% accepted`);
+        set('gate-avg', `${Math.round((summary.avg_gate_win_rate || 0) * 100)}%`);
+        set('gate-champ-version', `v${summary.champion_version}`);
+
+        const streak = summary.current_reject_streak || 0;
+        set('gate-streak', streak === 0 ? 'just promoted' : `${streak} iter`);
+        set('gate-last-promo',
+            summary.last_promotion_iteration
+                ? `last at iter ${summary.last_promotion_iteration}`
+                : 'no promotions yet');
+
+        // Flag a stagnating ladder — the point of this panel.
+        const streakEl = document.getElementById('gate-streak');
+        if (streakEl) {
+            streakEl.style.color = streak >= 5 ? 'var(--danger)'
+                : streak >= 3 ? 'var(--warning)' : '';
+        }
+    } catch (e) { /* ignore */ }
 }
 
 // ---- Initial Load ----
@@ -720,11 +802,146 @@ async function loadHistoricalMetrics() {
     } catch (e) { /* ignore */ }
 }
 
+let activeTimeGraphFilters = {
+    self_play: true,
+    nn_train: true,
+    random_eval: true,
+    champion_gate: true,
+    total: true,
+};
+
+function renderTimeMetrics(stats) {
+    if (!stats || !stats.time_metrics) return;
+    const tm = stats.time_metrics;
+    const summary = tm.summary || {};
+    const history = tm.history || [];
+    const el = (id) => document.getElementById(id);
+
+    const lastIterTotal = summary.last_iter_total || 0.1;
+
+    // Summary badges
+    if (el('tm-last-iter-total')) el('tm-last-iter-total').textContent = formatDuration(summary.last_iter_total);
+    if (el('tm-all-time-total')) el('tm-all-time-total').textContent = formatDuration(summary.all_time_total);
+
+    // Tab 1: Overview Table
+    const spLast = summary.sp_total_last || 0;
+    const nnLast = summary.nn_total_last || 0;
+    const randLast = summary.rand_total_last || 0;
+    const champLast = summary.champ_total_last || 0;
+
+    const spPct = Math.round((spLast / lastIterTotal) * 100);
+    const nnPct = Math.round((nnLast / lastIterTotal) * 100);
+    const randPct = Math.round((randLast / lastIterTotal) * 100);
+    const champPct = Math.round((champLast / lastIterTotal) * 100);
+
+    if (el('tm-sp-bar')) el('tm-sp-bar').style.width = `${Math.min(100, spPct)}%`;
+    if (el('tm-sp-pct')) el('tm-sp-pct').textContent = `${spPct}%`;
+    if (el('tm-sp-total-last')) el('tm-sp-total-last').textContent = formatDuration(summary.sp_total_last);
+    if (el('tm-sp-total-all')) el('tm-sp-total-all').textContent = formatDuration(summary.sp_total_all);
+
+    if (el('tm-nn-bar')) el('tm-nn-bar').style.width = `${Math.min(100, nnPct)}%`;
+    if (el('tm-nn-pct')) el('tm-nn-pct').textContent = `${nnPct}%`;
+    if (el('tm-nn-total-last')) el('tm-nn-total-last').textContent = formatDuration(summary.nn_total_last);
+    if (el('tm-nn-total-all')) el('tm-nn-total-all').textContent = formatDuration(summary.nn_total_all);
+
+    if (el('tm-rand-bar')) el('tm-rand-bar').style.width = `${Math.min(100, randPct)}%`;
+    if (el('tm-rand-pct')) el('tm-rand-pct').textContent = `${randPct}%`;
+    if (el('tm-rand-total-last')) el('tm-rand-total-last').textContent = formatDuration(summary.rand_total_last);
+    if (el('tm-rand-total-all')) el('tm-rand-total-all').textContent = formatDuration(summary.rand_total_all);
+
+    if (el('tm-champ-bar')) el('tm-champ-bar').style.width = `${Math.min(100, champPct)}%`;
+    if (el('tm-champ-pct')) el('tm-champ-pct').textContent = `${champPct}%`;
+    if (el('tm-champ-total-last')) el('tm-champ-total-last').textContent = formatDuration(summary.champ_total_last);
+    if (el('tm-champ-total-all')) el('tm-champ-total-all').textContent = formatDuration(summary.champ_total_all);
+
+    // Tab 2: Chart
+    if (typeof updateTimeBreakdownChart === 'function') {
+        updateTimeBreakdownChart(history, activeTimeGraphFilters);
+    }
+
+    // Tab 3: Time History Table
+    const body = el('time-history-table-body');
+    const empty = el('time-history-empty');
+    if (body) {
+        if (!history.length) {
+            body.innerHTML = '';
+            if (empty) empty.style.display = '';
+        } else {
+            if (empty) empty.style.display = 'none';
+            const rows = history.slice().reverse();
+            body.innerHTML = rows.map(h => `
+                <tr>
+                    <td><span class="iter-tag">Iter ${h.iteration}</span></td>
+                    <td class="time-cell-total"><strong>${formatDuration(h.total_time)}</strong></td>
+                    <td><span class="time-chip chip-sp">${formatDuration(h.self_play_time)}</span></td>
+                    <td><span class="time-chip chip-nn">${formatDuration(h.nn_train_time)}</span></td>
+                    <td><span class="time-chip chip-rand">${formatDuration(h.random_eval_time)}</span></td>
+                    <td><span class="time-chip chip-champ">${formatDuration(h.champion_gate_time)}</span></td>
+                </tr>
+            `).join('');
+        }
+    }
+}
+
+function setupTimeMetricsTabsAndFilters() {
+    // Tabs setup
+    const tabBtns = document.querySelectorAll('#time-metrics-tabs .time-tab-btn');
+    tabBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            tabBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            const selected = btn.dataset.tab;
+            const contents = {
+                summary: document.getElementById('time-tab-summary'),
+                graphs: document.getElementById('time-tab-graphs'),
+                history: document.getElementById('time-tab-history'),
+            };
+
+            Object.keys(contents).forEach(key => {
+                if (contents[key]) {
+                    if (key === selected) {
+                        contents[key].classList.add('active');
+                        contents[key].style.display = 'block';
+                    } else {
+                        contents[key].classList.remove('active');
+                        contents[key].style.display = 'none';
+                    }
+                }
+            });
+
+            if (selected === 'graphs' && typeof timeBreakdownChart !== 'undefined' && timeBreakdownChart) {
+                timeBreakdownChart.resize();
+                timeBreakdownChart.update();
+            }
+        });
+    });
+
+    // Time Graph Multi-Select Filter Toggles setup
+    const filterBtns = document.querySelectorAll('#time-graph-toggles .filter-btn');
+    filterBtns.forEach(btn => {
+        const seriesKey = btn.dataset.series;
+        btn.classList.toggle('active', !!activeTimeGraphFilters[seriesKey]);
+
+        btn.addEventListener('click', () => {
+            btn.classList.toggle('active');
+            activeTimeGraphFilters[seriesKey] = btn.classList.contains('active');
+            if (cachedLearningStats && cachedLearningStats.time_metrics) {
+                if (typeof updateTimeBreakdownChart === 'function') {
+                    updateTimeBreakdownChart(cachedLearningStats.time_metrics.history, activeTimeGraphFilters);
+                }
+            }
+        });
+    });
+}
+
 // Request current status on load to fix blank UI on refresh
 socket.emit('request_status');
 
 loadHistoricalMetrics();
 loadGamesList();
 loadLearningStats();
+loadGateHistory();
 setupGraphFilters();
+setupTimeMetricsTabsAndFilters();
 setupMetricsViewToggle();

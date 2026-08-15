@@ -38,6 +38,7 @@ from ai.evaluator import (
     compute_elo_update,
 )
 from ai.checkpoint import save_weights, load_weights
+from ai.game_store import migrate_legacy_layout
 
 
 class ReplayBuffer:
@@ -200,11 +201,21 @@ class Trainer:
 
         # Promotion-gate bookkeeping
         self.gate_rejections = 0          # Consecutive candidates refused
+        self.stall_breaks = 0             # Times the stall breaker has fired
         self.last_gate_win_rate = None    # Candidate's score in the last gate match
         # Per-iteration pass tallies, refreshed each self-play phase and read
         # by the collapse guard. {colour: [passes, total_moves]}
         self._pass_stats = {1: [0, 0], 2: [0, 0]}
         
+        # Fold any pre-existing flat game files into the per-iteration layout
+        # so old and new games show up in the same history tree.
+        try:
+            moved = migrate_legacy_layout(config.paths.games_dir)
+            if moved:
+                self._emit('info', f'Reorganised {moved} stored games into per-iteration folders')
+        except OSError as e:
+            self._emit('warning', f'Game history migration skipped: {e}')
+
         # Load weights if available
         self._try_load_weights()
     
@@ -303,6 +314,7 @@ class Trainer:
                 effective_sims = simulations_for_board(
                     self.config.mcts, self.config.board.size)
 
+                sp_start = time.time()
                 # Use eval_network on CPU for self-play (much faster for batch_size=1)
                 samples = run_self_play_batch(
                     network=self.eval_network,
@@ -318,8 +330,11 @@ class Trainer:
                     iteration=self.iteration,
                     progress_callback=self._on_game_complete,
                     fpu_reduction=self.config.mcts.fpu_reduction,
+                    value_target_outcome_weight=self.config.training.value_target_outcome_weight,
                     stop_checker=self._check_force_stop,
+                    num_workers=self.config.training.num_parallel_workers,
                 )
+                sp_seconds = round(time.time() - sp_start, 2)
                 
                 if self._force_stop_requested:
                     break
@@ -331,6 +346,8 @@ class Trainer:
                            f'Self-play done: {len(samples)} samples, buffer size: {len(self.replay_buffer)}')
                 
                 # --- Phase 2: Training ---
+                train_metrics = {}
+                gate_seconds = 0.0
                 if len(self.replay_buffer) >= self.config.training.batch_size:
                     self._emit('training_start', 'Training network...')
 
@@ -340,14 +357,12 @@ class Trainer:
                         break
 
                     # --- Promotion gate ---
-                    # The freshly trained candidate only replaces the champion
-                    # (the network that generates self-play games) if it beats
-                    # it head-to-head. Promoting unconditionally is what let a
-                    # degenerate network take over the self-play loop with
-                    # nothing able to detect or reject it.
+                    gate_start = time.time()
                     promoted, gate_wr = self._run_promotion_gate()
+                    gate_seconds = round(time.time() - gate_start, 2)
                     train_metrics['gate_win_rate'] = gate_wr
                     train_metrics['gate_promoted'] = promoted
+                    train_metrics['champion_gate_seconds'] = gate_seconds
 
                     if self._force_stop_requested:
                         break
@@ -358,37 +373,52 @@ class Trainer:
                     break
 
                 # --- Phase 3: Evaluation ---
-                self._emit('eval_start', 'Evaluating against random bot...')
-                
-                win_rate = evaluate_against_random(
-                    network=self.eval_network,
-                    board_size=self.config.board.size,
-                    komi=self.config.board.komi,
-                    num_simulations=effective_sims,
-                    num_games=self.config.training.eval_games,
-                    device="cpu",
-                    iteration=self.iteration,
-                    games_dir=self.config.paths.games_dir,
-                    stop_checker=self._check_force_stop,
-                )
+                if self.config.training.eval_games <= 0:
+                    self._emit('eval_start', 'Skipping evaluation (eval_games=0)...')
+                    eval_seconds = 0.0
+                    win_rate = None
+                    kyu = elo_to_rank(self.elo)
+                    eval_data = {
+                        'win_rate_vs_random': None,
+                        'elo_delta': 0.0,
+                    }
+                    self._emit('eval_done', f'Evaluation skipped, Elo: {self.elo:.0f} ({kyu})',
+                               data=eval_data)
+                else:
+                    self._emit('eval_start', 'Evaluating against random bot...')
+                    
+                    eval_start = time.time()
+                    win_rate = evaluate_against_random(
+                        network=self.eval_network,
+                        board_size=self.config.board.size,
+                        komi=self.config.board.komi,
+                        num_simulations=effective_sims,
+                        num_games=self.config.training.eval_games,
+                        device="cpu",
+                        iteration=self.iteration,
+                        games_dir=self.config.paths.games_dir,
+                        stop_checker=self._check_force_stop,
+                        num_workers=self.config.training.num_parallel_workers,
+                    )
+                    eval_seconds = round(time.time() - eval_start, 2)
 
-                if self._force_stop_requested:
-                    break
-                
-                # Update Elo based on win rate against random bot
-                old_elo = self.elo
-                self.elo = compute_elo_update(
-                    self.elo, self.config.training.elo_anchor, win_rate
-                )
-                
-                kyu = elo_to_rank(self.elo)
-                
-                eval_data = {
-                    'win_rate_vs_random': win_rate,
-                    'elo_delta': self.elo - old_elo,
-                }
-                self._emit('eval_done', f'Win rate vs random: {win_rate:.1%}, Elo: {self.elo:.0f} ({kyu})',
-                           data=eval_data)
+                    if self._force_stop_requested:
+                        break
+                    
+                    # Update Elo based on win rate against random bot
+                    old_elo = self.elo
+                    self.elo = compute_elo_update(
+                        self.elo, self.config.training.elo_anchor, win_rate
+                    )
+                    
+                    kyu = elo_to_rank(self.elo)
+                    
+                    eval_data = {
+                        'win_rate_vs_random': win_rate,
+                        'elo_delta': self.elo - old_elo,
+                    }
+                    self._emit('eval_done', f'Win rate vs random: {win_rate:.1%}, Elo: {self.elo:.0f} ({kyu})',
+                               data=eval_data)
                 
                 # --- Phase 4: Save weights (EVERY iteration to prevent data loss) ---
                 self._save_weights()
@@ -408,12 +438,15 @@ class Trainer:
                     'win_rate_vs_random': win_rate,
                     'buffer_size': len(self.replay_buffer),
                     'elapsed_seconds': round(elapsed, 1),
+                    'self_play_seconds': sp_seconds,
+                    'random_eval_seconds': eval_seconds,
+                    'champion_gate_seconds': gate_seconds,
                     'timestamp': datetime.now().isoformat(),
                     'gate_win_rate': self.last_gate_win_rate,
                     'gate_rejections': self.gate_rejections,
                     **diagnostics,
                 }
-                if 'train_metrics' in dir() and train_metrics:
+                if train_metrics:
                     metrics.update(train_metrics)
                 
                 self.metrics_history.append(metrics)
@@ -475,13 +508,16 @@ class Trainer:
         """
         cfg = self.config.training
 
-        if not cfg.gate_enabled:
+        if not cfg.gate_enabled or cfg.gate_games <= 0:
             # Legacy behaviour: accept every update unconditionally.
             self.eval_network.load_state_dict(self.network.state_dict())
             return True, None
 
+        workers = max(1, min(cfg.num_parallel_workers, cfg.gate_games))
         self._emit('gate_start',
-                   f'Promotion gate: candidate vs champion ({cfg.gate_games} games)')
+                   f'Promotion gate: candidate vs champion '
+                   f'({cfg.gate_games} games @ {cfg.gate_simulations} sims, '
+                   f'{workers} workers)')
 
         candidate = self._cpu_copy(self.network)
         champion = self._cpu_copy(self.eval_network)
@@ -495,11 +531,20 @@ class Trainer:
                 num_simulations=cfg.gate_simulations,
                 num_games=cfg.gate_games,
                 device="cpu",
+                iteration=self.iteration,
+                games_dir=self.config.paths.games_dir,
+                num_workers=cfg.num_parallel_workers,
+                stop_checker=self._check_force_stop,
             )
         except Exception as e:
             # Never let a gate failure take down training — fall back to
             # keeping the existing champion, which is the safe direction.
             self._emit('warning', f'Promotion gate failed ({e}); keeping champion')
+            return False, None
+
+        if self._force_stop_requested:
+            # The match was cut short, so its win rate is not a verdict on the
+            # candidate. Leave the champion (and the rejection streak) alone.
             return False, None
 
         self.last_gate_win_rate = win_rate
@@ -532,9 +577,24 @@ class Trainer:
                 {k: v.to(self.device) for k, v in self.eval_network.state_dict().items()}
             )
             self.gate_rejections = 0
+            self.stall_breaks += 1
             self._emit('warning',
                        f'⚠️ {cfg.gate_stall_warning} consecutive rejections — '
-                       f'training network reset to the champion to break the stall.')
+                       f'training network reset to the champion to break the stall '
+                       f'(stall #{self.stall_breaks}).')
+
+            # Repeated stalls are qualitatively different from one bad streak:
+            # resetting to the champion only helps if the DATA can produce a
+            # better candidate. If it cannot — e.g. self-play is so one-sided
+            # that every candidate inherits a degenerate value target — this
+            # loop is stable and training silently makes no progress forever.
+            # Escalate rather than let that look like normal operation.
+            if self.stall_breaks >= 3:
+                self._emit('collapse_warning',
+                           f'🚨 Training has stalled {self.stall_breaks} times: no candidate '
+                           f'can beat the champion. This usually means the champion\'s '
+                           f'self-play is too one-sided to learn from — check the colour '
+                           f'balance and pass rates rather than waiting it out.')
 
         return False, win_rate
 
@@ -672,6 +732,7 @@ class Trainer:
         
         Returns dict with training metrics (losses).
         """
+        train_start = time.time()
         self.network.train()
         
         total_policy_loss = 0.0
@@ -734,6 +795,7 @@ class Trainer:
             'value_loss': round(avg_value_loss, 4),
             'total_loss': round(avg_policy_loss + avg_value_loss, 4),
             'learning_rate': self.optimizer.param_groups[0]['lr'],
+            'nn_train_seconds': round(time.time() - train_start, 2),
         }
     
     def _on_game_complete(self, game_num: int, total: int, record: dict) -> None:

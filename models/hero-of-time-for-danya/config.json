@@ -1,0 +1,32 @@
+{
+  "id": "hero-of-time-for-danya",
+  "name": "hero of time for danya",
+  "board_size": 9,
+  "komi": 6.5,
+  "ruleset": "chinese",
+  "training": {
+    "num_self_play_games": 20,
+    "eval_games": 1,
+    "num_simulations": 200,
+    "c_puct": 1.5,
+    "learning_rate": 0.002,
+    "batch_size": 32,
+    "num_epochs_per_iteration": 3,
+    "replay_buffer_size": 50000,
+    "reflection_interval_games": 50,
+    "temperature_threshold": 30,
+    "temperature_init": 0.8,
+    "temperature_final": 0.1
+  },
+  "network": {
+    "size_preset": "small",
+    "num_res_blocks": 4,
+    "num_filters": 64,
+    "value_head_hidden": 64
+  },
+  "created_at": "2026-08-14T23:21:59.460756",
+  "elo": 591.1565001120211,
+  "kyu_rank": "29k",
+  "iteration": 7,
+  "total_games": 140
+}

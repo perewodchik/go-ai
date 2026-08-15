@@ -110,9 +110,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (netSlider) netSlider.addEventListener('input', renderNetSize);
 
+    let modalParamBounds = null;
+
+    const initModalParamSliders = async (values = {}) => {
+        const container = document.getElementById('modal-param-categories');
+        if (!container) return;
+        if (!modalParamBounds) {
+            modalParamBounds = await getParamBounds();
+        }
+        if (!modalParamBounds) return;
+
+        container.innerHTML = buildParamSlidersHTML('modal-param', modalParamBounds, values);
+        bindParamSliders('modal-param', modalParamBounds);
+        setParamSliderValues('modal-param', modalParamBounds, values);
+    };
+
     const closeCreateModal = () => { if (createModal) createModal.style.display = 'none'; };
 
-    const openCreateModal = () => {
+    const openCreateModal = async () => {
         editingModel = null;
         if (formTitle) formTitle.textContent = 'Create New Model';
         btnConfirmCreate.textContent = 'Create Model';
@@ -123,14 +138,9 @@ document.addEventListener('DOMContentLoaded', () => {
         setField('new-model-board-size', '9');
         setField('new-model-komi', '6.5');
         setField('new-model-ruleset', 'chinese');
-        setField('new-model-sp', '5');
-        setField('new-model-eval', '4');
-        setField('new-model-mcts', '96');
-        setField('new-model-cpuct', '1.5');
-        setField('new-model-lr', '0.002');
-        setField('new-model-temp-thresh', '30');
-        setField('new-model-temp-init', '0.8');
-        setField('new-model-temp-final', '0.1');
+
+        await initModalParamSliders();
+
         setNetSizeLocked(false);
         loadNetworkPresets(9).then(() => setNetSizeToKey(netDefaultKey));
         if (createModal) createModal.style.display = 'flex';
@@ -152,15 +162,9 @@ document.addEventListener('DOMContentLoaded', () => {
             setField('new-model-board-size', String(model.board_size));
             setField('new-model-komi', model.komi);
             setField('new-model-ruleset', model.ruleset);
+
             const t = model.training || {};
-            setField('new-model-sp', t.num_self_play_games);
-            setField('new-model-eval', t.eval_games);
-            setField('new-model-mcts', t.num_simulations);
-            setField('new-model-cpuct', t.c_puct);
-            setField('new-model-lr', t.learning_rate);
-            setField('new-model-temp-thresh', t.temperature_threshold !== undefined ? t.temperature_threshold : 30);
-            setField('new-model-temp-init', t.temperature_init !== undefined ? t.temperature_init : 0.8);
-            setField('new-model-temp-final', t.temperature_final !== undefined ? t.temperature_final : 0.1);
+            await initModalParamSliders(t);
 
             // Network size is frozen after creation — show it, but locked.
             const netKey = (model.network && model.network.size_preset) || 'small';
@@ -212,19 +216,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            const paramValues = extractParamSliderValues('modal-param', modalParamBounds);
+
             const payload = {
                 name: name,
                 board_size: parseInt(document.getElementById('new-model-board-size').value),
                 komi: parseFloat(document.getElementById('new-model-komi').value),
                 ruleset: document.getElementById('new-model-ruleset').value,
-                num_self_play_games: parseInt(document.getElementById('new-model-sp').value),
-                eval_games: parseInt(document.getElementById('new-model-eval').value),
-                num_simulations: parseInt(document.getElementById('new-model-mcts').value),
-                c_puct: parseFloat(document.getElementById('new-model-cpuct').value),
-                learning_rate: parseFloat(document.getElementById('new-model-lr').value),
-                temperature_threshold: parseInt(document.getElementById('new-model-temp-thresh').value),
-                temperature_init: parseFloat(document.getElementById('new-model-temp-init').value),
-                temperature_final: parseFloat(document.getElementById('new-model-temp-final').value),
+                ...paramValues,
             };
 
             const isEdit = editingModel !== null;

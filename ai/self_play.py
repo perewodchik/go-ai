@@ -10,11 +10,15 @@ All games contribute training samples to the replay buffer regardless.
 N is set in config (game_store_every_n, default 5).
 
 MULTIPROCESSING NOTE:
-On M2 MacBook Air, we use a single process for self-play because:
-1. MPS (Apple GPU) can't easily be shared across processes.
-2. Sequential play with MPS inference is fast enough (~5-10 games/min on 9x9).
-3. Multiprocessing adds complexity with diminishing returns on MPS.
-If running on CPU-only, multiprocessing IS beneficial — uncomment the parallel code.
+Self-play games are independent, so `run_self_play_batch` plays them across a
+ProcessPoolExecutor. This is the only path — there is no sequential branch;
+`num_workers=1` just means a pool of one.
+
+That is safe on Apple Silicon specifically because the trainer hands this
+function its CPU-resident champion (`device="cpu"`), not the MPS training
+network — MPS does not share across processes, but nothing here touches it.
+Worker count is `config.training.num_parallel_workers`, shared with the
+promotion gate and the random-bot eval.
 """
 
 import os
@@ -31,6 +35,7 @@ from game.board import BLACK, WHITE
 from game.scoring.base import get_scorer
 from ai.mcts import MCTS
 from ai.network import GoNetwork
+from ai.game_store import PHASE_SELF_PLAY, save_game
 
 
 # A single training sample: (encoded_state, mcts_policy, game_outcome)
@@ -49,6 +54,7 @@ def play_self_play_game(
     device: str = "cpu",
     max_moves: int = 200,
     fpu_reduction: float = 0.35,
+    value_target_outcome_weight: float = 0.6,
 ) -> Tuple[List[TrainingSample], dict]:
     """
     Play one complete self-play game and collect training data.
@@ -127,7 +133,10 @@ def play_self_play_game(
         
         # Store training data (before applying the move)
         state_tensor = state.encode_for_nn()
-        history.append((state_tensor, policy, state.current_player))
+        # Store the MCTS root evaluation alongside the position. It is the
+        # per-position component of the value target (see value_target_outcome_weight)
+        # and is already from this mover's perspective.
+        history.append((state_tensor, policy, state.current_player, mcts.root_value))
         
         # Record move for game replay
         move_list.append({
@@ -175,18 +184,26 @@ def play_self_play_game(
     # replay buffer with premature game noise. Uses the un-jittered base so the
     # discard threshold stays stable from game to game.
     if len(move_list) >= base_min_pass:
-        for move_idx, (state_tensor, policy, player_color) in enumerate(history):
+        w = value_target_outcome_weight
+        for move_idx, (state_tensor, policy, player_color, root_q) in enumerate(history):
             if move_idx >= max_training_moves:
                 break  # Skip late-game filler positions
-            
+
             if winner_color is None:
                 outcome = 0.0  # Draw
             elif player_color == winner_color:
                 outcome = 1.0  # This player won
             else:
                 outcome = -1.0  # This player lost
-            
-            samples.append((state_tensor, policy, outcome))
+
+            # Blend the game outcome with this position's own search evaluation.
+            # Outcome alone gives every position in a game the SAME label, so
+            # when one colour wins nearly every game the label becomes
+            # predictable from the turn-colour plane and the value head stops
+            # reading the board entirely. root_q varies position-to-position,
+            # which keeps the target grounded in the actual position.
+            target = w * outcome + (1.0 - w) * float(root_q)
+            samples.append((state_tensor, policy, max(-1.0, min(1.0, target))))
     
     # Build game record for storage/replay
     game_record = {
@@ -233,7 +250,9 @@ def run_self_play_batch(
     iteration: int = 0,
     progress_callback: Optional[Callable] = None,
     fpu_reduction: float = 0.35,
+    value_target_outcome_weight: float = 0.6,
     stop_checker: Optional[Callable[[], bool]] = None,
+    num_workers: int = 4,
 ) -> List[TrainingSample]:
     """
     Run a batch of self-play games and return all training samples.
@@ -255,6 +274,7 @@ def run_self_play_batch(
         iteration: Current training iteration (for filename).
         progress_callback: Called after each game with (game_num, total, game_record).
         stop_checker: Function returning True if training loop wants immediate stop.
+        num_workers: Games to play concurrently (capped by num_games and CPU count).
     
     Returns:
         List of all training samples from all games.
@@ -265,8 +285,8 @@ def run_self_play_batch(
     import concurrent.futures
     import multiprocessing as mp
     
-    # Restrict to at most 4 parallel CPU workers to prevent thermal throttling on Macs
-    num_workers = min(num_games, os.cpu_count() or 4, 4)
+    # Never more workers than there are games to play, or cores to play them on.
+    num_workers = max(1, min(num_games, os.cpu_count() or 4, num_workers))
     
     tasks = []
     for _ in range(num_games):
@@ -279,6 +299,7 @@ def run_self_play_batch(
             'temperature_threshold': temperature_threshold,
             'device': device,
             'fpu_reduction': fpu_reduction,
+            'value_target_outcome_weight': value_target_outcome_weight,
         })
     
     completed_games = 0
@@ -306,15 +327,12 @@ def run_self_play_batch(
                 
                 record['iteration'] = iteration
                 record['game_index'] = game_index
-                
+
                 all_samples.extend(samples)
-                
+
                 # Store every Nth game for replay in the web UI
                 if completed_games % game_store_every_n == 0:
-                    game_filename = f"iter_{iteration:06d}_game_{game_index:04d}.json"
-                    game_path = os.path.join(games_dir, game_filename)
-                    with open(game_path, 'w') as f:
-                        json.dump(record, f, indent=2)
+                    save_game(games_dir, iteration, PHASE_SELF_PLAY, game_index, record)
                 
                 completed_games += 1
                 

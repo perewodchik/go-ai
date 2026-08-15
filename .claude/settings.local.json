@@ -29,7 +29,32 @@
       "Bash(awk '{print $1, $9}')",
       "Bash(curl -s http://localhost:5063/training/api/metrics)",
       "Bash(curl -s http://localhost:5063/training/api/learning_stats)",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:5063/training/)"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:5063/training/)",
+      "Bash(curl -s http://localhost:5063/training/api/gate_history)",
+      "Bash(python3 -c \"import ai.evaluator\")",
+      "Bash(venv/bin/python -c \"import ai.evaluator\")",
+      "Bash(venv/bin/python -c \"import typing,ai.evaluator as e; print\\(e.Callable\\)\")",
+      "Bash(cp -r models/champion/games /private/tmp/claude-501/-Users-perewodchik-Documents-projects-go-ai/4ab0a959-ffb0-44cf-b48f-82ea583cdedd/scratchpad/games)",
+      "Bash(curl -s localhost:3003/training/api/games)",
+      "Bash(curl -s -i localhost:3003/training/api/games)",
+      "Bash(curl -s localhost:3003/training/api/status)",
+      "Bash(grep -vE \"^\\\\s*$\")",
+      "Bash(curl -s -X POST localhost:5052/models/api/create -H 'Content-Type: application/json' -d '{\"name\":\"ztest gate probe\",\"board_size\":9,\"gate_games\":40,\"gate_threshold\":0.62,\"gate_simulations\":300,\"gate_workers\":8,\"gate_stall_warning\":9,\"gate_enabled\":false,\"num_simulations\":9999}')",
+      "Bash(venv/bin/python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d['id']\\); print\\({k:v for k,v in d['training'].items\\(\\) if 'gate' in k or k=='num_simulations'}\\)\")",
+      "Bash(curl -s -X POST localhost:5052/models/api/ztest-gate-probe/update -H 'Content-Type: application/json' -d '{\"gate_games\":6,\"gate_enabled\":true,\"gate_threshold\":0.99}')",
+      "Bash(venv/bin/python -c \"import sys,json;d=json.load\\(sys.stdin\\);print\\({k:v for k,v in d['model']['training'].items\\(\\) if 'gate' in k}\\)\")",
+      "Bash(curl -s -X POST localhost:5052/training/api/apply_params -H 'Content-Type: application/json' -d '{\"gate_games\":12,\"gate_workers\":6,\"gate_threshold\":0.60,\"gate_enabled\":true,\"num_self_play_games\":7}')",
+      "Bash(curl -s -X DELETE localhost:5052/models/api/ztest-gate-probe/delete)",
+      "Bash(curl -s localhost:5052/info)",
+      "Bash(venv/bin/python -c 'import ast,sys *)",
+      "Bash(sysctl -n machdep.cpu.brand_string hw.ncpu hw.physicalcpu hw.logicalcpu hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu)",
+      "Bash(venv/bin/python -c \"import os,torch; print\\('os.cpu_count\\(\\):',os.cpu_count\\(\\)\\); print\\('torch threads:',torch.get_num_threads\\(\\)\\); print\\('mps:',torch.backends.mps.is_available\\(\\)\\)\")",
+      "Bash(sysctl -n hw.memsize)",
+      "Bash(awk '{print $1/1073741824\" GB\"}')",
+      "Bash(curl -s localhost:5052/models/api/param_bounds)",
+      "Bash(curl -s -X POST localhost:5052/training/api/apply_params -H 'Content-Type: application/json' -d '{\"num_parallel_workers\":6}')",
+      "Bash(curl -s localhost:5052/models/api/active)",
+      "Bash(venv/bin/python -c \"import sys,json;print\\('stored:',json.load\\(sys.stdin\\)['training']['num_parallel_workers']\\)\")"
     ]
   }
 }

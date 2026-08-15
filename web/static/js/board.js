@@ -17,12 +17,14 @@ class GoBoardRenderer {
      * @param {HTMLCanvasElement} canvas - The canvas element to draw on.
      * @param {number} boardSize - Board dimension (7, 9, 13, 15, or 19).
      * @param {function} onClickCallback - Called with (row, col) when user clicks.
+     * @param {object} options - Configuration options (e.g. { enableHover: false }).
      */
-    constructor(canvas, boardSize = 9, onClickCallback = null) {
+    constructor(canvas, boardSize = 9, onClickCallback = null, options = {}) {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
         this.boardSize = boardSize;
         this.onClick = onClickCallback;
+        this.enableHover = options.enableHover !== undefined ? options.enableHover : (onClickCallback !== null);
 
         // Layout constants
         this.padding = 48;          // Space for labels (kept clear of edge stones)
@@ -92,6 +94,7 @@ class GoBoardRenderer {
 
     _bindEvents() {
         this.canvas.addEventListener('mousemove', (e) => {
+            if (!this.enableHover) return;
             const pos = this._canvasToBoard(e.clientX, e.clientY);
             if (pos && (this.hoverPos?.row !== pos.row || this.hoverPos?.col !== pos.col)) {
                 this.hoverPos = pos;
@@ -100,13 +103,17 @@ class GoBoardRenderer {
         });
 
         this.canvas.addEventListener('mouseleave', () => {
-            this.hoverPos = null;
-            this.draw();
+            if (!this.enableHover) return;
+            if (this.hoverPos !== null) {
+                this.hoverPos = null;
+                this.draw();
+            }
         });
 
         this.canvas.addEventListener('click', (e) => {
+            if (!this.onClick) return;
             const pos = this._canvasToBoard(e.clientX, e.clientY);
-            if (pos && this.onClick) {
+            if (pos) {
                 this.onClick(pos.row, pos.col);
             }
         });
@@ -229,51 +236,6 @@ class GoBoardRenderer {
             }
         }
 
-        // Detect groups in Atari (1 liberty)
-        const groupVisited = Array.from({ length: s }, () => Array(s).fill(false));
-        let atariStonesBlack = 0;
-        let atariStonesWhite = 0;
-
-        for (let r = 0; r < s; r++) {
-            for (let c = 0; c < s; c++) {
-                const color = this.grid[r]?.[c] || 0;
-                if (color !== 0 && !groupVisited[r][c]) {
-                    const groupStones = [];
-                    const groupLiberties = new Set();
-                    const q = [[r, c]];
-                    groupVisited[r][c] = true;
-                    groupStones.push([r, c]);
-
-                    while (q.length > 0) {
-                        const [cr, cc] = q.pop();
-                        const neighbors = [
-                            [cr - 1, cc], [cr + 1, cc],
-                            [cr, cc - 1], [cr, cc + 1]
-                        ];
-                        for (const [nr, nc] of neighbors) {
-                            if (nr >= 0 && nr < s && nc >= 0 && nc < s) {
-                                const nVal = this.grid[nr]?.[nc] || 0;
-                                if (nVal === color) {
-                                    if (!groupVisited[nr][nc]) {
-                                        groupVisited[nr][nc] = true;
-                                        groupStones.push([nr, nc]);
-                                        q.push([nr, nc]);
-                                    }
-                                } else if (nVal === 0) {
-                                    groupLiberties.add(`${nr},${nc}`);
-                                }
-                            }
-                        }
-                    }
-
-                    if (groupLiberties.size === 1) {
-                        if (color === 1) atariStonesBlack += groupStones.length;
-                        else if (color === 2) atariStonesWhite += groupStones.length;
-                    }
-                }
-            }
-        }
-
         this.ownershipMap = ownershipMap;
         const blackScore = blackStones + blackTerritory;
         const whiteScore = whiteStones + whiteTerritory + komi;
@@ -287,8 +249,6 @@ class GoBoardRenderer {
             blackScore,
             whiteScore,
             komi,
-            atariStonesBlack,
-            atariStonesWhite,
             lead: diff > 0 ? `B+${diff.toFixed(1)}` : (diff < 0 ? `W+${Math.abs(diff).toFixed(1)}` : 'Tie')
         };
     }
@@ -370,7 +330,7 @@ class GoBoardRenderer {
         }
 
         // Hover preview
-        if (this.hoverPos && this.grid[this.hoverPos.row]?.[this.hoverPos.col] === 0) {
+        if (this.enableHover && this.hoverPos && this.grid[this.hoverPos.row]?.[this.hoverPos.col] === 0) {
             this._drawHoverPreview(ctx, this.hoverPos.row, this.hoverPos.col);
         }
     }

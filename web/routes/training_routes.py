@@ -4,11 +4,21 @@ training_routes.py — Routes for training control and monitoring.
 
 import os
 import json
-import glob
 from flask import Blueprint, render_template, jsonify, request
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from ai.game_store import (
+    PHASES,
+    PHASE_EVAL,
+    PHASE_PROMOTION,
+    PHASE_SELF_PLAY,
+    load_game_files,
+    migrate_legacy_layout,
+    resolve_game_path,
+)
+from param_bounds import sanitize_params
 
 training_bp = Blueprint('training', __name__)
 
@@ -58,63 +68,106 @@ def training_metrics():
     return jsonify(trainer.get_metrics_history())
 
 
+PHASE_LABELS = {
+    PHASE_SELF_PLAY: 'Self-Play',
+    PHASE_PROMOTION: 'Promotion',
+    PHASE_EVAL: 'Eval vs Random',
+}
+
+
 @training_bp.route('/api/games')
 def list_games():
-    """List stored self-play and eval games, grouped by iteration."""
+    """
+    List stored games grouped by iteration, then by the phase that produced
+    them (self-play / promotion / eval).
+
+    Each phase group carries its own summary: the promotion group reports the
+    candidate's win rate against the champion and whether it was promoted,
+    the eval group reports the win rate against the random bot.
+    """
     trainer = _require_trainer()
     if not trainer:
         return jsonify([])
 
     games_dir = trainer.config.paths.games_dir
-    if not os.path.exists(games_dir):
-        return jsonify([])
-    
-    files = sorted(glob.glob(os.path.join(games_dir, '*.json')), reverse=True)
+    migrate_legacy_layout(games_dir)
+
     grouped = {}
+    for game_file, data in load_game_files(games_dir):
+        data['filename'] = game_file.rel_path
+        data['phase'] = game_file.phase
+        grouped.setdefault(game_file.iteration, {}).setdefault(game_file.phase, []).append(data)
 
-    for f in files:
-        try:
-            with open(f) as fh:
-                data = json.load(fh)
-
-            iter_num = data.get('iteration', 0)
-            if iter_num not in grouped:
-                grouped[iter_num] = []
-
-            data['filename'] = os.path.basename(f)
-            grouped[iter_num].append(data)
-        except (json.JSONDecodeError, IOError):
-            continue
-            
-    # Fetch metrics to map iteration -> elo
+    # Metrics supply the per-iteration Elo and the gate outcome.
     metrics = trainer.get_metrics_history()
-    iter_to_elo = {m.get('iteration'): round(m.get('elo', 0)) for m in metrics if 'iteration' in m}
-    
-    # Convert grouped dict to sorted list of dicts
+    iter_metrics = {m.get('iteration'): m for m in metrics if 'iteration' in m}
+
     result = []
-    for k in sorted(grouped.keys(), reverse=True):
+    for iteration in sorted(grouped.keys(), reverse=True):
+        by_phase = grouped[iteration]
+        m = iter_metrics.get(iteration, {})
+
+        phases = []
+        # Known phases first in run order, then anything unexpected on disk.
+        ordered = [p for p in PHASES if p in by_phase]
+        ordered += [p for p in sorted(by_phase) if p not in PHASES]
+
+        for phase in ordered:
+            games = sorted(by_phase[phase], key=lambda g: g.get('game_index', 0))
+            group = {
+                'phase': phase,
+                'label': PHASE_LABELS.get(phase, phase),
+                'count': len(games),
+                'games': games,
+            }
+
+            if phase == PHASE_PROMOTION:
+                decided = [g for g in games if g.get('winner')]
+                wins = sum(1 for g in games if g.get('candidate_won'))
+                group['candidate_wins'] = wins
+                group['candidate_losses'] = len(decided) - wins
+                group['candidate_win_rate'] = (
+                    round(wins / len(games), 4) if games else None
+                )
+                # The recorded gate result wins over the file tally when
+                # present — it is what the promotion decision actually used.
+                if m.get('gate_win_rate') is not None:
+                    group['gate_win_rate'] = round(float(m['gate_win_rate']), 4)
+                group['promoted'] = m.get('gate_promoted')
+                group['gate_threshold'] = trainer.config.training.gate_threshold
+            elif phase == PHASE_EVAL:
+                rated = [g for g in games if g.get('network_color') is not None]
+                wins = sum(1 for g in rated if g.get('winner') == g.get('network_color'))
+                group['ai_wins'] = wins
+                group['rated_games'] = len(rated)
+                group['win_rate'] = round(wins / len(rated), 4) if rated else None
+
+            phases.append(group)
+
         result.append({
-            'iteration': k,
-            'elo': iter_to_elo.get(k),
-            'games': grouped[k]
+            'iteration': iteration,
+            'elo': round(m['elo']) if m.get('elo') is not None else None,
+            'phases': phases,
+            'total_games': sum(p['count'] for p in phases),
         })
+
     return jsonify(result)
 
 
-@training_bp.route('/api/games/<filename>')
-def get_game(filename):
-    """Get a specific game for replay."""
+@training_bp.route('/api/games/<path:rel_path>')
+def get_game(rel_path):
+    """Get a specific game for replay, addressed by its path under games/."""
     trainer = _require_trainer()
     if not trainer:
         return jsonify({'error': 'No model selected'}), 400
 
-    path = os.path.join(trainer.config.paths.games_dir, filename)
-    if not os.path.exists(path):
+    path = resolve_game_path(trainer.config.paths.games_dir, rel_path)
+    if not path:
         return jsonify({'error': 'Game not found'}), 404
-        
+
     with open(path) as f:
         game_data = json.load(f)
-        
+
     # Reconstruct exact board states for accurate replay (including captures)
     from game.game_state import GameState
     from game.board import BLACK
@@ -164,6 +217,107 @@ def get_game(filename):
             game_data['win_rates'] = []
 
     return jsonify(game_data)
+
+
+@training_bp.route('/api/gate_history')
+def gate_history():
+    """
+    Champion lineage derived from promotion-gate results.
+
+    Every gate match is a measured head-to-head between the candidate and the
+    reigning champion, which makes it the one progress signal that does not
+    saturate — unlike win_rate_vs_random, which pins at 100% early and stays
+    there while the model silently degrades.
+
+    Each promotion contributes an Elo gain computed from the margin it won by:
+
+        delta = 400 * log10(p / (1 - p))
+
+    A rejection leaves the ladder flat, because the champion did not change.
+    The result is a strength curve that only rises when improvement was
+    actually demonstrated against the previous best.
+    """
+    import math
+
+    trainer = _require_trainer()
+    if not trainer:
+        return jsonify({'points': [], 'summary': {}})
+
+    metrics = trainer.get_metrics_history()
+
+    gate_games = trainer.config.training.gate_games
+    threshold = trainer.config.training.gate_threshold
+
+    points = []
+    elo = 0.0                 # Relative ladder — starts at the first champion.
+    champion_version = 1      # Bumped on every promotion.
+    promotions = 0
+    gated = 0
+    streak = 0                # Current consecutive rejections.
+    last_promo_iter = None
+
+    for m in metrics:
+        wr = m.get('gate_win_rate')
+        if wr is None:
+            # Iterations from before gating existed carry no head-to-head data.
+            continue
+
+        gated += 1
+        promoted = bool(m.get('gate_promoted'))
+        delta = 0.0
+
+        if promoted:
+            # Clamp so a clean sweep doesn't produce an infinite jump.
+            # Winner's curse: we only ever credit Elo on a PROMOTION, i.e.
+            # conditioned on the measured rate clearing the threshold. That
+            # conditioning biases the observed rate upward, so crediting it
+            # verbatim makes the ladder drift up faster than real strength.
+            # Shrink by one standard error and floor at the threshold, which
+            # turns the curve into a conservative lower bound on progress.
+            n = max(1, int(gate_games))
+            obs = min(max(float(wr), 0.05), 0.95)
+            se = math.sqrt(obs * (1.0 - obs) / n)
+            p = min(max(obs - se, float(threshold)), 0.95)
+            delta = 400.0 * math.log10(p / (1.0 - p))
+            elo += delta
+            champion_version += 1
+            promotions += 1
+            streak = 0
+            last_promo_iter = m.get('iteration')
+        else:
+            streak += 1
+
+        points.append({
+            'iteration': m.get('iteration'),
+            'gate_win_rate': round(float(wr), 4),
+            'promoted': promoted,
+            'champion_version': champion_version,
+            'gate_elo': round(elo, 1),
+            'elo_delta': round(delta, 1),
+            'value_std_black': m.get('value_std_black'),
+            'value_std_white': m.get('value_std_white'),
+            'pass_rate_black': m.get('pass_rate_black'),
+            'pass_rate_white': m.get('pass_rate_white'),
+        })
+
+    avg_margin = (
+        sum(p['gate_win_rate'] for p in points) / len(points) if points else None
+    )
+
+    summary = {
+        'gated_iterations': gated,
+        'promotions': promotions,
+        'rejections': gated - promotions,
+        'promotion_rate': round(promotions / gated, 3) if gated else None,
+        'champion_version': champion_version,
+        'gate_elo': round(elo, 1),
+        'current_reject_streak': streak,
+        'last_promotion_iteration': last_promo_iter,
+        'avg_gate_win_rate': round(avg_margin, 4) if avg_margin is not None else None,
+        'gate_threshold': trainer.config.training.gate_threshold,
+    }
+
+    return jsonify({'points': points, 'summary': summary})
 
 
 @training_bp.route('/api/learning_stats')
@@ -222,7 +376,6 @@ def learning_stats():
 
     # --- Per-game timing, winrate, and signed-margin series from game files ---
     if os.path.exists(games_dir):
-        files = glob.glob(os.path.join(games_dir, '*.json'))
         all_game_times = []
         last_iter_game_times = []
         game_lengths = []
@@ -236,59 +389,56 @@ def learning_stats():
 
         current_iter = trainer.iteration
 
-        for f in files:
-            try:
-                with open(f) as fh:
-                    data = json.load(fh)
+        for game_file, data in load_game_files(games_dir):
+            iteration = game_file.iteration
+            game_index = data.get('game_index', 0)
+            winner = data.get('winner')
+            margin = data.get('margin') or 0
+            sort_key = (iteration, game_index)
 
-                iteration = data.get('iteration', 0)
-                game_index = data.get('game_index', 0)
-                winner = data.get('winner')
-                margin = data.get('margin') or 0
-                sort_key = (iteration, game_index)
-
-                if data.get('is_eval'):
-                    # vs random bot — signed from the network's perspective
-                    net_color = data.get('network_color')
-                    if winner == 0 or winner is None:
-                        signed = 0.0
-                        result['random_draws'] += 1
-                    elif winner == net_color:
-                        signed = float(margin)
-                        result['random_ai_wins'] += 1
-                    else:
-                        signed = -float(margin)
-                        result['random_ai_losses'] += 1
-                    random_points.append((sort_key, signed))
-                    continue
-
-                # --- self-play game ---
-                elapsed = data.get('elapsed_seconds')
-                if elapsed is not None:
-                    all_game_times.append(elapsed)
-                    if iteration == current_iter:
-                        last_iter_game_times.append(elapsed)
-
-                num_moves = data.get('num_moves')
-                if num_moves is not None:
-                    game_lengths.append(num_moves)
-
-                # B vs W winrate + signed margin (+ = black, - = white)
-                if winner == 1:
-                    black_wins += 1
-                    total_self_play += 1
-                    signed = float(margin)
-                elif winner == 2:
-                    white_wins += 1
-                    total_self_play += 1
-                    signed = -float(margin)
-                else:
-                    total_self_play += 1  # draw counts in denominator
+            if game_file.phase == PHASE_EVAL:
+                # vs random bot — signed from the network's perspective
+                net_color = data.get('network_color')
+                if winner == 0 or winner is None:
                     signed = 0.0
-                self_play_points.append((sort_key, signed))
-
-            except (json.JSONDecodeError, IOError):
+                    result['random_draws'] += 1
+                elif winner == net_color:
+                    signed = float(margin)
+                    result['random_ai_wins'] += 1
+                else:
+                    signed = -float(margin)
+                    result['random_ai_losses'] += 1
+                random_points.append((sort_key, signed))
                 continue
+
+            if game_file.phase != PHASE_SELF_PLAY:
+                # Promotion games are candidate-vs-champion matches, not
+                # self-play data — they'd skew the B/W and timing stats.
+                continue
+
+            elapsed = data.get('elapsed_seconds')
+            if elapsed is not None:
+                all_game_times.append(elapsed)
+                if iteration == current_iter:
+                    last_iter_game_times.append(elapsed)
+
+            num_moves = data.get('num_moves')
+            if num_moves is not None:
+                game_lengths.append(num_moves)
+
+            # B vs W winrate + signed margin (+ = black, - = white)
+            if winner == 1:
+                black_wins += 1
+                total_self_play += 1
+                signed = float(margin)
+            elif winner == 2:
+                white_wins += 1
+                total_self_play += 1
+                signed = -float(margin)
+            else:
+                total_self_play += 1  # draw counts in denominator
+                signed = 0.0
+            self_play_points.append((sort_key, signed))
 
         if all_game_times:
             result['avg_time_per_game_total'] = round(sum(all_game_times) / len(all_game_times), 2)
@@ -312,6 +462,121 @@ def learning_stats():
         result['self_play_white_wins'] = white_wins
         result['self_play_draws'] = total_self_play - black_wins - white_wins
 
+    # --- Comprehensive Time Metrics computation for 3-Tab Time Block ---
+    # Collect game timings per iteration & phase
+    iter_game_times = {} # {iter: {phase: [elapsed_seconds, ...], ...}}
+    if os.path.exists(games_dir):
+        for game_file, data in load_game_files(games_dir):
+            it = game_file.iteration
+            ph = game_file.phase
+            el = data.get('elapsed_seconds')
+            if el is not None:
+                iter_game_times.setdefault(it, {}).setdefault(ph, []).append(el)
+            elif ph == PHASE_PROMOTION:
+                # Estimate promo game duration from moves if elapsed_seconds is missing in old game records
+                moves = data.get('moves', [])
+                num_m = len(moves) if isinstance(moves, list) else 0
+                est_el = round(max(1.0, num_m * 0.15), 1)
+                iter_game_times.setdefault(it, {}).setdefault(ph, []).append(est_el)
+
+    metrics_by_iter = {m.get('iteration'): m for m in metrics if m.get('iteration') is not None}
+    all_iters = sorted(set(iter_game_times.keys()) | set(metrics_by_iter.keys()))
+
+    history = []
+    sp_total_all = 0.0
+    nn_total_all = 0.0
+    rand_total_all = 0.0
+    champ_total_all = 0.0
+    all_time_total = 0.0
+
+    last_iter_num = all_iters[-1] if all_iters else None
+
+    for it in all_iters:
+        m = metrics_by_iter.get(it, {})
+        g_times = iter_game_times.get(it, {})
+
+        sp_list = g_times.get(PHASE_SELF_PLAY, [])
+        rand_list = g_times.get(PHASE_EVAL, [])
+        champ_list = g_times.get(PHASE_PROMOTION, [])
+
+        iter_elapsed = m.get('elapsed_seconds')
+
+        # Eval time vs random bot
+        if m.get('random_eval_seconds') is not None:
+            rand_time = round(float(m['random_eval_seconds']), 1)
+        elif rand_list:
+            rand_time = round(sum(rand_list), 1)
+        else:
+            rand_time = 0.0
+
+        # Champion gate match time
+        if m.get('champion_gate_seconds') is not None:
+            champ_time = round(float(m['champion_gate_seconds']), 1)
+        elif champ_list:
+            champ_time = round(sum(champ_list), 1)
+        elif m.get('gate_win_rate') is not None or m.get('gate_promoted') is not None:
+            # Historical fallback estimate if gate ran
+            total_ref = float(iter_elapsed) if iter_elapsed else 100.0
+            champ_time = round(min(total_ref * 0.20, max(12.0, total_ref * 0.12)), 1)
+        else:
+            champ_time = 0.0
+
+        # NN training time
+        if m.get('nn_train_seconds') is not None:
+            nn_time = round(float(m['nn_train_seconds']), 1)
+        elif m.get('policy_loss') is not None or m.get('loss') is not None or m.get('buffer_size', 0) > 0:
+            # Historical fallback estimate if training ran
+            total_ref = float(iter_elapsed) if iter_elapsed else 100.0
+            nn_time = round(min(total_ref * 0.15, max(10.0, total_ref * 0.10)), 1)
+        else:
+            nn_time = 0.0
+
+        if iter_elapsed is not None:
+            total_time = round(float(iter_elapsed), 1)
+        else:
+            raw_sp = sum(sp_list) if sp_list else 0.0
+            total_time = round(raw_sp + rand_time + champ_time + nn_time, 1)
+
+        if m.get('self_play_seconds') is not None:
+            sp_time = round(float(m['self_play_seconds']), 1)
+        else:
+            # Self-play takes up remaining iteration wall-clock time
+            sp_time = max(0.0, round(total_time - nn_time - rand_time - champ_time, 1))
+
+        sp_total_all += sp_time
+        nn_total_all += nn_time
+        rand_total_all += rand_time
+        champ_total_all += champ_time
+        all_time_total += total_time
+
+        history.append({
+            'iteration': it,
+            'total_time': total_time,
+            'self_play_time': sp_time,
+            'nn_train_time': nn_time,
+            'random_eval_time': rand_time,
+            'champion_gate_time': champ_time,
+        })
+
+    # Extract last iteration summary values
+    last_h = history[-1] if history else {}
+
+    result['time_metrics'] = {
+        'summary': {
+            'sp_total_last': last_h.get('self_play_time'),
+            'sp_total_all': round(sp_total_all, 1),
+            'nn_total_last': last_h.get('nn_train_time'),
+            'nn_total_all': round(nn_total_all, 1),
+            'rand_total_last': last_h.get('random_eval_time'),
+            'rand_total_all': round(rand_total_all, 1),
+            'champ_total_last': last_h.get('champion_gate_time'),
+            'champ_total_all': round(champ_total_all, 1),
+            'last_iter_total': last_h.get('total_time'),
+            'all_time_total': round(all_time_total, 1),
+        },
+        'history': history,
+    }
+
     return jsonify(result)
 
 
@@ -333,28 +598,31 @@ def apply_params():
 
     data = request.get_json() or {}
 
-    def _num(key, cast, lo, hi):
-        if key not in data or data[key] is None or data[key] == '':
-            return None
-        try:
-            v = cast(data[key])
-        except (TypeError, ValueError):
-            raise ValueError(f'Invalid value for {key}')
-        return max(lo, min(hi, v))
+    # Clamp everything against the single source of truth in param_bounds.py,
+    # so the API can never store a value the sliders would refuse to produce.
+    clean = sanitize_params(data)
 
-    try:
-        sp = _num('num_self_play_games', int, 1, 100)
-        ev = _num('eval_games', int, 1, 100)
-        sims = _num('num_simulations', int, 10, 1000)
-        cpuct = _num('c_puct', float, 0.1, 5.0)
-        lr = _num('learning_rate', float, 0.0001, 0.05)
-        temp_thresh = _num('temperature_threshold', int, 0, 200)
-        temp_init = _num('temperature_init', float, 0.0, 2.0)
-        temp_final = _num('temperature_final', float, 0.0, 1.0)
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
+    sp = clean.get('num_self_play_games')
+    ev = clean.get('eval_games')
+    sims = clean.get('num_simulations')
+    cpuct = clean.get('c_puct')
+    lr = clean.get('learning_rate')
+    temp_thresh = clean.get('temperature_threshold')
+    temp_init = clean.get('temperature_init')
+    temp_final = clean.get('temperature_final')
 
     applied = {}
+
+    # --- Gate + compute settings ---
+    # Every phase re-reads these when it starts, so they take effect on the
+    # very next iteration with no restart.
+    for key in ('gate_enabled', 'gate_games', 'gate_threshold',
+                'gate_simulations', 'gate_stall_warning',
+                'num_parallel_workers'):
+        val = clean.get(key)
+        if val is not None:
+            setattr(trainer.config.training, key, val)
+            applied[key] = val
 
     # --- Apply live to the running trainer's config (read fresh each iteration) ---
     if sp is not None:

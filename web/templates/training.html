@@ -82,6 +82,107 @@
         </div>
     </div>
 
+    <!-- Time Metrics Block -->
+    <div class="time-metrics-block glass">
+        <div class="time-metrics-header">
+            <div class="time-title-row">
+                <h3>⏱️ Time Metrics</h3>
+                <div class="time-summary-badges">
+                    <span class="time-badge" title="Total duration of the last completed iteration">
+                        Last Iter: <strong id="tm-last-iter-total">—</strong>
+                    </span>
+                    <span class="time-badge time-badge-primary" title="Total time spent across all iterations">
+                        Total Runtime: <strong id="tm-all-time-total">—</strong>
+                    </span>
+                </div>
+            </div>
+            <div class="time-tabs" id="time-metrics-tabs">
+                <button class="time-tab-btn active" data-tab="summary">Overview</button>
+                <button class="time-tab-btn" data-tab="graphs">Time Graphs</button>
+                <button class="time-tab-btn" data-tab="history">Time History</button>
+            </div>
+        </div>
+
+        <!-- TAB 1: Overview Matrix Table -->
+        <div class="time-tab-content active" id="time-tab-summary">
+            <div class="time-matrix-table-wrap">
+                <table class="time-matrix-table">
+                    <thead>
+                        <tr>
+                            <th>Phase / Activity</th>
+                            <th>Share <small>(Last Iter)</small></th>
+                            <th>Last Iteration</th>
+                            <th>Total Time <small>(All Time)</small></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="phase-cell"><span class="phase-dot dot-sp"></span> Self-Play</td>
+                            <td class="share-cell"><div class="phase-share-bar"><div class="share-fill fill-sp" id="tm-sp-bar" style="width:0%"></div><span class="share-txt" id="tm-sp-pct">0%</span></div></td>
+                            <td><span class="time-val-badge badge-sp" id="tm-sp-total-last">—</span></td>
+                            <td><span class="time-val-muted" id="tm-sp-total-all">—</span></td>
+                        </tr>
+                        <tr>
+                            <td class="phase-cell"><span class="phase-dot dot-nn"></span> NN Training</td>
+                            <td class="share-cell"><div class="phase-share-bar"><div class="share-fill fill-nn" id="tm-nn-bar" style="width:0%"></div><span class="share-txt" id="tm-nn-pct">0%</span></div></td>
+                            <td><span class="time-val-badge badge-nn" id="tm-nn-total-last">—</span></td>
+                            <td><span class="time-val-muted" id="tm-nn-total-all">—</span></td>
+                        </tr>
+                        <tr>
+                            <td class="phase-cell"><span class="phase-dot dot-rand"></span> vs Random Bot</td>
+                            <td class="share-cell"><div class="phase-share-bar"><div class="share-fill fill-rand" id="tm-rand-bar" style="width:0%"></div><span class="share-txt" id="tm-rand-pct">0%</span></div></td>
+                            <td><span class="time-val-badge badge-rand" id="tm-rand-total-last">—</span></td>
+                            <td><span class="time-val-muted" id="tm-rand-total-all">—</span></td>
+                        </tr>
+                        <tr>
+                            <td class="phase-cell"><span class="phase-dot dot-champ"></span> vs Champion Gate</td>
+                            <td class="share-cell"><div class="phase-share-bar"><div class="share-fill fill-champ" id="tm-champ-bar" style="width:0%"></div><span class="share-txt" id="tm-champ-pct">0%</span></div></td>
+                            <td><span class="time-val-badge badge-champ" id="tm-champ-total-last">—</span></td>
+                            <td><span class="time-val-muted" id="tm-champ-total-all">—</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- TAB 2: Interactive Graphs -->
+        <div class="time-tab-content" id="time-tab-graphs" style="display: none;">
+            <div class="graph-toolbar">
+                <span class="toolbar-label">Component Filter:</span>
+                <div class="graph-filter-buttons" id="time-graph-toggles">
+                    <button class="filter-btn active" data-series="self_play">Self</button>
+                    <button class="filter-btn active" data-series="nn_train">Training</button>
+                    <button class="filter-btn active" data-series="random_eval">Random</button>
+                    <button class="filter-btn active" data-series="champion_gate">Champion</button>
+                    <button class="filter-btn active" data-series="total">Total</button>
+                </div>
+            </div>
+            <div class="time-chart-wrap">
+                <canvas id="time-breakdown-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- TAB 3: Time History Table -->
+        <div class="time-tab-content" id="time-tab-history" style="display: none;">
+            <div class="time-history-table-wrap">
+                <table class="time-history-table">
+                    <thead>
+                        <tr>
+                            <th>Iter</th>
+                            <th>Total</th>
+                            <th>Self</th>
+                            <th>Training</th>
+                            <th>Random</th>
+                            <th>Champion</th>
+                        </tr>
+                    </thead>
+                    <tbody id="time-history-table-body"></tbody>
+                </table>
+            </div>
+            <p class="time-history-empty" id="time-history-empty" style="display: none;">No iteration time history recorded yet.</p>
+        </div>
+    </div>
+
     <!-- Self-Play Balance -->
     <div class="selfplay-balance glass">
         <div class="section-header-row">
@@ -146,6 +247,51 @@
             <div class="margin-axis-label margin-axis-bottom">❌ AI losing →</div>
         </div>
         <p class="margin-caption">Each bar is one game vs the random bot (oldest → newest). Height = margin in points.</p>
+    </div>
+
+    <!-- Champion lineage / promotion gate -->
+    <div class="selfplay-balance glass" id="gate-panel">
+        <div class="section-header-row">
+            <h3>🛡 Champion Progress <small>(promotion gate)</small></h3>
+            <span class="gate-champ-pill" id="gate-champ-version">v1</span>
+        </div>
+
+        <div class="gate-stats" id="gate-stats">
+            <div class="gate-stat">
+                <span class="gate-stat-label">Strength gain</span>
+                <strong class="gate-stat-val gate-stat-accent" id="gate-elo">—</strong>
+                <small>Elo vs first champion</small>
+            </div>
+            <div class="gate-stat">
+                <span class="gate-stat-label">Promotions</span>
+                <strong class="gate-stat-val" id="gate-promotions">—</strong>
+                <small id="gate-promo-rate">—</small>
+            </div>
+            <div class="gate-stat">
+                <span class="gate-stat-label">Avg gate score</span>
+                <strong class="gate-stat-val" id="gate-avg">—</strong>
+                <small>vs previous champion</small>
+            </div>
+            <div class="gate-stat">
+                <span class="gate-stat-label">Since last promotion</span>
+                <strong class="gate-stat-val" id="gate-streak">—</strong>
+                <small id="gate-last-promo">—</small>
+            </div>
+        </div>
+
+        <div class="gate-chart-wrap">
+            <canvas id="gate-chart"></canvas>
+        </div>
+        <p class="margin-caption">
+            Bars = the candidate's score against the reigning champion each iteration
+            (<span style="color:#81c784">green</span> promoted, <span style="color:#ff6b6b">red</span> rejected);
+            the dashed line is the 55% promotion threshold. The gold line is the champion's
+            cumulative strength — it only rises when a candidate actually proved it was better,
+            so a flat stretch means genuine stagnation, not noise.
+        </p>
+        <p class="margin-caption" id="gate-empty" style="display:none;">
+            No gate data yet — the champion ladder starts building from the next completed iteration.
+        </p>
     </div>
 
     <!-- Charts / Table -->
@@ -222,40 +368,7 @@
                 <span class="tune-title">⚙ Tune Parameters</span>
                 <span class="tune-hint">Applies from the next iteration — no restart needed.</span>
             </div>
-            <div class="tune-grid">
-                <div class="tune-field">
-                    <label for="tune-sp" title="Games the bot plays against itself per iteration">Self-Play Games</label>
-                    <input type="number" id="tune-sp" min="1" max="100" step="1">
-                </div>
-                <div class="tune-field">
-                    <label for="tune-eval" title="Games vs the random bot per iteration to estimate Elo">Eval Games</label>
-                    <input type="number" id="tune-eval" min="1" max="100" step="1">
-                </div>
-                <div class="tune-field">
-                    <label for="tune-mcts" title="Look-ahead simulations per move — the main quality/speed lever">MCTS Sims</label>
-                    <input type="number" id="tune-mcts" min="10" max="1000" step="10">
-                </div>
-                <div class="tune-field">
-                    <label for="tune-cpuct" title="Exploration vs exploitation in the search">c_puct</label>
-                    <input type="number" id="tune-cpuct" min="0.1" max="5" step="0.1">
-                </div>
-                <div class="tune-field">
-                    <label for="tune-lr" title="Gradient step size — lower if training is unstable">Learning Rate</label>
-                    <input type="number" id="tune-lr" min="0.0001" max="0.05" step="0.0001">
-                </div>
-                <div class="tune-field">
-                    <label for="tune-temp-thresh" title="Moves over which temperature smoothly decays">Temp Decay Moves</label>
-                    <input type="number" id="tune-temp-thresh" min="0" max="200" step="1">
-                </div>
-                <div class="tune-field">
-                    <label for="tune-temp-init" title="Early-game move randomness temperature">Temp Init (Early)</label>
-                    <input type="number" id="tune-temp-init" min="0.0" max="2.0" step="0.1">
-                </div>
-                <div class="tune-field">
-                    <label for="tune-temp-final" title="Late-game move randomness temperature">Temp Final (Late)</label>
-                    <input type="number" id="tune-temp-final" min="0.0" max="1.0" step="0.05">
-                </div>
-            </div>
+            <div id="tuner-param-categories" class="param-categories-container"></div>
             <div class="tune-panel-actions">
                 <button id="btn-tune-cancel" class="cmd-btn cmd-btn-save">Cancel</button>
                 <button id="btn-tune-apply" class="cmd-btn cmd-btn-apply">✓ Apply</button>
@@ -266,7 +379,7 @@
     <div class="command-bar-inner">
         <div class="cmd-actions">
             <button id="btn-tune-toggle" class="cmd-btn cmd-btn-tune">⚙ <span class="cmd-btn-label">Tune</span></button>
-            <button id="btn-start-training" class="cmd-btn cmd-btn-start">▶ <span class="cmd-btn-label">Start Training</span></button>
+            <button id="btn-start-training" class="cmd-btn cmd-btn-start" style="display:none;">▶ <span class="cmd-btn-label">Start Training</span></button>
             <button id="btn-stop-training" class="cmd-btn cmd-btn-stop" style="display:none;" title="Graceful stop after current iteration finishes">⏹ <span class="cmd-btn-label">Stop Training</span></button>
             <button id="btn-force-stop" class="cmd-btn cmd-btn-force-stop" style="display:none;" title="Immediately abort training & restore last clean checkpoint">⚡ <span class="cmd-btn-label">Force Stop</span></button>
         </div>

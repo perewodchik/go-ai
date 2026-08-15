@@ -40,6 +40,7 @@
         <a href="#network-size">Network Size</a>
         <a href="#self-play-games">Self-Play Games</a>
         <a href="#eval-games">Eval Games</a>
+        <a href="#parallel-workers">Parallel Workers</a>
         <a href="#mcts">MCTS Simulations</a>
         <a href="#cpuct">c_puct</a>
         <a href="#learning-rate">Learning Rate</a>
@@ -50,6 +51,7 @@
         <a href="#training-lifecycle">Step-by-Step Lifecycle</a>
         <a href="#training-health">Training Health & Timeline</a>
         <a href="#gate">Champion vs Candidate</a>
+        <a href="#gate-games">Gate Settings</a>
         <a href="#collapse-guard">Collapse Guard</a>
         <a href="#diagnostics">Diagnostics & Troubleshooting</a>
     </nav>
@@ -213,6 +215,66 @@
             </div>
         </div>
         <div class="param-meta">Range 1–100 &nbsp;·&nbsp; Default: 4</div>
+    </section>
+
+    <!-- Parallel Workers -->
+    <section id="parallel-workers" class="param-card glass">
+        <div class="param-head">
+            <h3 class="param-name">Parallel Workers <span class="param-sub">all game-playing phases</span></h3>
+            <span class="rec-pill">Recommended: 4–6</span>
+        </div>
+        <p class="param-desc">
+            Every phase that plays games plays them across a pool of worker processes, because
+            games are independent of one another. One setting governs all three:
+        </p>
+        <div class="table-scroll">
+            <table class="preset-table">
+                <thead>
+                    <tr><th>Phase</th><th>Games</th><th>Cost per move</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Self-play</strong></td>
+                        <td>Self-Play Games</td>
+                        <td>One MCTS search — generates the training data.</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Promotion gate</strong></td>
+                        <td>Gate Games</td>
+                        <td><strong>Two</strong> MCTS searches (one per network) — the most expensive phase.</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Random eval</strong></td>
+                        <td>Eval Games</td>
+                        <td>One MCTS search; the random bot's moves are free.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <p class="param-desc">
+            All three run on <strong>CPU</strong>, so none of them is affected by the MPS
+            single-process constraint — the trainer hands them its CPU-resident champion, not
+            the MPS training network. The effective count is
+            $\min(\text{workers},\ \text{games in that phase},\ \text{CPU cores})$, so raising
+            it past your game count does nothing.
+        </p>
+        <div class="tradeoff-grid">
+            <div class="tradeoff-col tradeoff-up">
+                <span class="tradeoff-tag">More (6–8)</span>
+                A phase finishes only when its <em>slowest</em> game does, so leaving cores idle
+                costs more than it looks. Measured on an 8-core M2 (4P + 4E), 8 gate games:
+                126s at 4 workers, 83s at 6, 78s at 8.
+            </div>
+            <div class="tradeoff-col tradeoff-down">
+                <span class="tradeoff-tag">Fewer (1–3)</span>
+                Leaves headroom for the web server and anything else you are running, and runs
+                cooler on a fanless laptop. 1 is the safe fallback if process pools misbehave.
+            </div>
+        </div>
+        <div class="param-meta">
+            Range 1–8 &nbsp;·&nbsp; Default: 4 &nbsp;·&nbsp; Each worker is a separate process
+            holding its own copy of the network (~300–400 MB), so 8 workers costs a few GB of RAM.
+        </div>
     </section>
 
     <!-- MCTS Simulations -->
@@ -691,14 +753,154 @@
         </div>
         <p class="param-desc">
             Each iteration the candidate is trained on the replay buffer, then plays
-            <strong>10 games against the champion</strong> with colours alternating. If it
-            scores <strong>≥ 55%</strong> it is promoted and becomes the new champion. If not,
-            the candidate is discarded as a generator and the champion keeps its job.
+            <strong>Gate Games</strong> against the champion with colours alternating. If it
+            scores at least the <strong>Promotion Threshold</strong> it is promoted and becomes
+            the new champion. If not, the candidate is discarded as a generator and the
+            champion keeps its job.
         </p>
         <div class="param-meta">
             Colours alternate deliberately — a network that only wins as Black scores ~50% and cannot pass.
         </div>
     </section>
+
+    <!-- Promotion Gate — configurable parameters -->
+    <section id="gate-enabled" class="param-card glass">
+        <div class="param-head">
+            <h3 class="param-name">Promotion Gate <span class="param-sub">on / off</span></h3>
+            <span class="rec-pill">Recommended: On</span>
+        </div>
+        <p class="param-desc">
+            Master switch for the whole mechanism. With the gate <strong>off</strong>, every
+            trained candidate is copied straight into the champion slot, so a bad gradient
+            step immediately starts generating the self-play data that all future iterations
+            learn from — and nothing in the loop can detect or undo it.
+        </p>
+        <div class="tradeoff-grid">
+            <div class="tradeoff-col tradeoff-up">
+                <span class="tradeoff-tag">On</span>
+                Strength can only ever ratchet upward. Costs one extra match per iteration.
+            </div>
+            <div class="tradeoff-col tradeoff-down">
+                <span class="tradeoff-tag">Off</span>
+                Iterations run faster, but regressions are permanent and compound. Only useful
+                for quick throwaway experiments.
+            </div>
+        </div>
+        <div class="param-meta">Default: On &nbsp;·&nbsp; Skipping the gate also blanks the Champion Progress chart.</div>
+    </section>
+
+    <section id="gate-games" class="param-card glass">
+        <div class="param-head">
+            <h3 class="param-name">Gate Games <span class="param-sub">candidate vs champion</span></h3>
+            <span class="rec-pill">Recommended: 20–30</span>
+        </div>
+        <p class="param-desc">
+            How many head-to-head games decide a promotion. This is a <strong>statistical
+            measurement</strong>, and its reliability comes almost entirely from the number of
+            games, not from how well each game is played. With only 10 games, a candidate that
+            is genuinely 65% strength still fails the gate about 25% of the time — real progress
+            gets thrown away as noise.
+        </p>
+        <div class="tradeoff-grid">
+            <div class="tradeoff-col tradeoff-up">
+                <span class="tradeoff-tag">More (20–40)</span>
+                Sharper verdicts at every effect size: a truly worse candidate ($p = 0.35$) is
+                blocked ~95% of the time instead of ~90%, and a truly better one ($p = 0.65$)
+                is accepted ~88% instead of ~75%.
+            </div>
+            <div class="tradeoff-col tradeoff-down">
+                <span class="tradeoff-tag">Fewer (2–10)</span>
+                Cheap gate, but the verdict is close to a coin flip — expect both lost progress
+                and promoted regressions.
+            </div>
+        </div>
+        <div class="param-meta">Range 2–60 &nbsp;·&nbsp; Default: 20 &nbsp;·&nbsp; Always even, so both colours are played equally.</div>
+    </section>
+
+    <section id="gate-threshold" class="param-card glass">
+        <div class="param-head">
+            <h3 class="param-name">Promotion Threshold <span class="param-sub">win share required</span></h3>
+            <span class="rec-pill">Recommended: 0.55</span>
+        </div>
+        <p class="param-desc">
+            The win rate the candidate must reach to take the champion's job. 0.50 would promote
+            on a coin flip; the margin above 50% is what stops sampling noise from installing a
+            network that is merely <em>equal</em>.
+        </p>
+        <div class="tradeoff-grid">
+            <div class="tradeoff-col tradeoff-up">
+                <span class="tradeoff-tag">Higher (0.60–0.80)</span>
+                Only clearly-better networks get promoted. Late in training, when gains per
+                iteration are small, this can stall the ladder completely.
+            </div>
+            <div class="tradeoff-col tradeoff-down">
+                <span class="tradeoff-tag">Lower (0.50–0.53)</span>
+                Promotes readily and keeps the ladder moving, but lets sideways or slightly
+                worse networks through, which drifts the self-play data quality downward.
+            </div>
+        </div>
+        <div class="param-meta">Range 0.50–0.80 &nbsp;·&nbsp; Default: 0.55 &nbsp;·&nbsp; Shown as the dashed rule on the Champion Progress chart.</div>
+    </section>
+
+    <section id="gate-simulations" class="param-card glass">
+        <div class="param-head">
+            <h3 class="param-name">Gate Simulations <span class="param-sub">per move in gate games</span></h3>
+            <span class="rec-pill">Recommended: 50</span>
+        </div>
+        <p class="param-desc">
+            MCTS budget per move during the gate match, kept separate from the self-play
+            setting because the gate has a different job: it only needs to <em>rank</em> two
+            networks, not produce training targets. Cost is roughly
+            $\text{games} \times \text{sims}$, so for a fixed budget, buying more games
+            beats buying more sims per game.
+        </p>
+        <div class="tradeoff-grid">
+            <div class="tradeoff-col tradeoff-up">
+                <span class="tradeoff-tag">Higher (100–400)</span>
+                Each game is played closer to the networks' true strength, but the gate starts
+                dominating iteration time — and search increasingly masks the difference
+                between the two networks you are trying to tell apart.
+            </div>
+            <div class="tradeoff-col tradeoff-down">
+                <span class="tradeoff-tag">Lower (10–30)</span>
+                Very fast matches that lean more heavily on the raw policy head — noisier per
+                game, but affordable enough to play many of them.
+            </div>
+        </div>
+        <div class="param-meta">Range 10–400 &nbsp;·&nbsp; Default: 50 &nbsp;·&nbsp; ~35s/game at 100 sims vs ~18s at 50 (9×9, M2).</div>
+    </section>
+
+    <section id="gate-stall" class="param-card glass">
+        <div class="param-head">
+            <h3 class="param-name">Stall Breaker <span class="param-sub">rejections before reset</span></h3>
+            <span class="rec-pill">Recommended: 5</span>
+        </div>
+        <p class="param-desc">
+            After this many <em>consecutive</em> rejections, the candidate is assumed to have
+            drifted somewhere it cannot recover from, and its weights are reset back to the
+            champion's so it retrains from a known-good point instead of deadlocking. Three
+            such resets escalate to a collapse warning, because a loop that keeps needing them
+            has a data problem the reset cannot fix.
+        </p>
+        <div class="tradeoff-grid">
+            <div class="tradeoff-col tradeoff-up">
+                <span class="tradeoff-tag">Higher (8–20)</span>
+                Gives a candidate more room to work through a rough patch on its own — worth it
+                with a low learning rate, where progress is genuinely slow.
+            </div>
+            <div class="tradeoff-col tradeoff-down">
+                <span class="tradeoff-tag">Lower (2–3)</span>
+                Snaps back quickly, but a reset also discards whatever partial progress the
+                candidate had made, so an over-eager setting can itself prevent promotions.
+            </div>
+        </div>
+        <div class="param-meta">Range 2–20 &nbsp;·&nbsp; Default: 5 &nbsp;·&nbsp; The counter resets to 0 on any promotion.</div>
+    </section>
+
+    <div class="param-meta" style="margin-bottom: 1.5rem;">
+        Gate matches are played in parallel like every other phase — see
+        <a href="#parallel-workers">Parallel Workers</a>.
+    </div>
 
     <section class="param-card glass">
         <div class="param-head">
@@ -759,6 +961,44 @@
         <div class="param-meta">
             Checkpoints saved before gating existed have no <code>champion_state_dict</code>; those
             fall back to using the training weights as the champion, so old models still load.
+        </div>
+    </section>
+
+    <section class="param-card glass">
+        <div class="param-head">
+            <h3 class="param-name">Reading the Champion Progress chart</h3>
+            <span class="rec-pill">Training page</span>
+        </div>
+        <p class="param-desc">
+            The <strong>Champion Progress</strong> panel on the Training page is the honest
+            progress curve. <code>Win rate vs random</code> pins at 100% within ~12 iterations and
+            stays there even while the model degrades — it cannot show you anything after that.
+            Every gate match, by contrast, is a fresh head-to-head against the previous best,
+            so the ladder never saturates.
+        </p>
+        <div class="table-scroll">
+            <table class="preset-table">
+                <thead>
+                    <tr><th>Element</th><th>Meaning</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><span style="color:#81c784">Green bar</span></td><td>Candidate beat the champion and was promoted.</td></tr>
+                    <tr><td><span style="color:#ff6b6b">Red bar</span></td><td>Candidate fell short; the champion kept its job.</td></tr>
+                    <tr><td>Dashed rule</td><td>The 55% promotion threshold.</td></tr>
+                    <tr><td>Gold line</td><td>Champion strength in Elo — a step function that only rises on a promotion.</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <p class="param-desc">
+            Each promotion's Elo gain is derived from the margin it won by,
+            $\Delta = 400\log_{10}\!\left(\frac{p}{1-p}\right)$, so a narrow 55% win adds ~35 Elo
+            while a 70% win adds ~147. Because the ladder is flat on rejection,
+            <strong>a long flat stretch is real stagnation, not noise</strong> — the model has genuinely
+            failed to out-play its own previous best.
+        </p>
+        <div class="param-meta">
+            Healthy: most iterations promote, gold line climbing steadily. &nbsp;·&nbsp;
+            Stalled: 5+ red bars in a row — lower the learning rate or add self-play games.
         </div>
     </section>
 

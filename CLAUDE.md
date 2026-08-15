@@ -40,11 +40,15 @@ Three independent layers, each importable without the others pulling in unrelate
 
 ### Multi-model architecture
 
-`model_manager.py`'s `ModelManager` owns everything under `models/`: each model is a directory (`models/<slug>/`) with its own `config.json` (board size/komi/ruleset/training hyperparams/live Elo & iteration state), `weights.pt`, `games/`, and `logs/`. The currently active model id is stored in `models/.active`. `web/app.py`'s `switch_model(model_id)` builds a `Config` from the model's `ModelInfo` and creates a new `Trainer` bound to that model's directory — so switching models swaps the entire training context (weights, replay data, hyperparameters) at once.
+`model_manager.py`'s `ModelManager` owns everything under `models/`: each model is a directory (`models/<slug>/`) with its own `config.json` (board size/komi/ruleset/training hyperparams/live Elo & iteration state), `weights.pt`, `games/`, and `logs/`.
 
-### Self-play concurrency
+Recorded games live under `games/iter_<NNNNNN>/<phase>/`, where phase is `self-play`, `promotion` (candidate vs champion gate matches), or `eval` (champion vs random bot). `ai/game_store.py` owns that layout — writing (`save_game`), listing (`iter_game_files` / `load_game_files`), resolving a client-supplied id (`resolve_game_path`, which rejects paths escaping `games/`), and migrating the old flat `iter_000001_game_0000.json` naming (`migrate_legacy_layout`, run from `Trainer.__init__` and the games API). A game's id everywhere — API, review URLs — is its path relative to `games/`. The currently active model id is stored in `models/.active`. `web/app.py`'s `switch_model(model_id)` builds a `Config` from the model's `ModelInfo` and creates a new `Trainer` bound to that model's directory — so switching models swaps the entire training context (weights, replay data, hyperparameters) at once.
 
-Self-play intentionally runs single-process on the target hardware (M2 MacBook Air) because MPS (Apple GPU) doesn't share well across processes and sequential MPS inference is already fast enough (~5-10 games/min on 9×9). A `ProcessPoolExecutor`-based parallel path exists in `self_play.py` but is meant for CPU-only setups — don't assume it's the active path without checking how it's invoked.
+### Concurrency
+
+All three game-playing phases run their games across a `ProcessPoolExecutor`, sized by the single `config.training.num_parallel_workers` setting (capped at the CPU count and at that phase's game count): self-play (`run_self_play_batch`), the promotion gate (`evaluate_against_checkpoint`), and the random-bot eval (`evaluate_against_random`). There is no sequential branch in any of them — `num_workers=1` just means a pool of one.
+
+MPS is not a constraint here despite the Apple-Silicon target: `Trainer` keeps a separate CPU-resident `eval_network` (the gated champion) and hands *that* to all three phases with `device="cpu"`, so the MPS training network is never pickled into a worker. Only `_train_network` uses the MPS device.
 
 ### Data flow for a training iteration
 
