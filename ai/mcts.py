@@ -124,7 +124,8 @@ class MCTS:
     def __init__(self, network, num_simulations: int = 200,
                  c_puct: float = 1.5, dirichlet_alpha: float = 0.3,
                  dirichlet_epsilon: float = 0.25, device: str = "cpu",
-                 fpu_reduction: float = 0.35):
+                 fpu_reduction: float = 0.35,
+                 restrict_eye_fill: bool = False):
         self.network = network
         self.num_simulations = num_simulations
         self.c_puct = c_puct
@@ -132,6 +133,12 @@ class MCTS:
         self.dirichlet_epsilon = dirichlet_epsilon
         self.device = device
         self.fpu_reduction = fpu_reduction
+        # Optional playing restriction: hide moves that fill one of the mover's
+        # own two eyes. Stamped onto the root copy in search(), from where every
+        # node in the tree inherits it via GameState.copy() — so a restricted
+        # move is never expanded, never given a prior, never visited, and never
+        # appears in the policy target. See game/eyes.py.
+        self.restrict_eye_fill = restrict_eye_fill
         # Root evaluation from the most recent search(), expressed from the
         # perspective of the player to move at the root (∈ [-1, +1]). Used for
         # win-rate tracking. Updated by every search() call.
@@ -156,8 +163,15 @@ class MCTS:
                 policy_vector: Visit count distribution over all actions
                               (used as training target for the policy head).
         """
-        root = MCTSNode(state.copy())
-        
+        root_state = state.copy()
+        # Applied to our own copy rather than to the caller's state: the same
+        # GameState object is shared with opponents (the random bot in the Elo
+        # eval, the other network in the gate match, the human in a web game),
+        # and the restriction is a property of THIS searcher, not of the game.
+        if self.restrict_eye_fill:
+            root_state.restrict_eye_fill = True
+        root = MCTSNode(root_state)
+
         # Expand root node
         self._expand(root, allow_pass=allow_pass)
         

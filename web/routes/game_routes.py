@@ -9,15 +9,17 @@ Board size and komi are locked to the active model's configuration.
 """
 
 import uuid
+from datetime import datetime
 from flask import Blueprint, render_template, request, jsonify, session
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from game.game_state import GameState, MOVE_PASS
+from game.game_state import GameState, MOVE_PASS, MOVE_RESIGN
 from game.board import BLACK, WHITE
 from game.scoring.base import get_scorer
 from game.scoring.estimator import ScoreEstimator
+from ai.game_store import save_human_game
 from ai.mcts import MCTS
 
 game_bp = Blueprint('game', __name__)
@@ -40,6 +42,21 @@ def _get_active_model():
     """Get active model info."""
     from web.app import model_manager
     return model_manager.get_active_model()
+
+
+def _restrict_eye_fill() -> bool:
+    """
+    Whether the active model's own-two-eye-fill restriction is on.
+
+    Read from the live trainer config (the same object the training loop uses)
+    so a bot playing a human here is subject to exactly the restriction it was
+    trained under. Never applies to the human's own moves — those go through
+    play_move(), which the restriction deliberately does not touch.
+    """
+    from web.app import trainer
+    if trainer is None:
+        return False
+    return bool(getattr(trainer.config.training, 'restrict_eye_fill', False))
 
 
 @game_bp.route('/play')
@@ -85,6 +102,8 @@ def new_game():
         'player_color': player_color,
         'board_size': board_size,
         'komi': komi,
+        # Names the game in the Play launcher's in-progress list.
+        'model_name': model.name,
     }
 
     # If player is white, bot plays first (as black)
@@ -262,7 +281,8 @@ def suggest_move():
     if network is None:
         return jsonify({'error': 'Model not loaded'}), 400
 
-    mcts = MCTS(network=network, num_simulations=sess['num_simulations'], device=device)
+    mcts = MCTS(network=network, num_simulations=sess['num_simulations'], device=device,
+                restrict_eye_fill=_restrict_eye_fill())
     action, policy = mcts.search(sess['state'], temperature=0.1, add_noise=False)
 
     suggestion = list(action) if action != MOVE_PASS else 'pass'
@@ -293,6 +313,155 @@ def estimate_score():
     return jsonify(estimation)
 
 
+def _replay_positions(state: GameState):
+    """
+    Walk a session's move history, rebuilding it move by move.
+
+    Returns (move_list, encoded_states, movers):
+        move_list: replay entries in the same shape self-play records them
+                   (`{'color', 'move', 'move_num'}`), resignation excluded —
+                   it is not a board move and the replay viewer can't apply it.
+        encoded_states: NN input for the position BEFORE each move, plus the
+                   current position when the game is still running, so the
+                   win-rate curve has a point for every position the reviewer
+                   can step to.
+        movers: player to move at each of those positions.
+    """
+    move_list, encoded, movers = [], [], []
+
+    replay = GameState(board_size=state.board_size, komi=state.komi)
+    for color, move in state.move_history:
+        if tuple(move) == MOVE_RESIGN:
+            break
+        encoded.append(replay.encode_for_nn())
+        movers.append(replay.current_player)
+        move_list.append({
+            'color': int(color),
+            'move': list(move),
+            'move_num': len(move_list),
+        })
+        if tuple(move) == MOVE_PASS:
+            replay.play_pass()
+        else:
+            replay.play_move(move[0], move[1])
+
+    if not replay.is_over:
+        encoded.append(replay.encode_for_nn())
+        movers.append(replay.current_player)
+
+    return move_list, encoded, movers
+
+
+def _win_rate_curve(state: GameState) -> list:
+    """
+    Black's win probability (%) at every position of a session's game.
+
+    Evaluated in one batch with the network's value head — the same quantity
+    the review page charts, so a recorded game's curve matches what the
+    reviewer would recompute for it. Returns [] if no usable network.
+    """
+    network, device = _get_network()
+    if network is None:
+        return []
+
+    _, encoded, movers = _replay_positions(state)
+    if not encoded:
+        return []
+
+    try:
+        import torch
+        _, values = network.predict_batch(torch.stack(encoded), device)
+    except Exception:
+        # Board-size mismatch or a network that failed to load — the curve is
+        # an extra, never a reason to fail the move the user just played.
+        return []
+
+    curve = []
+    for value, player in zip(values.tolist(), movers):
+        value_black = value if player == BLACK else -value
+        curve.append(round(50.0 + 50.0 * value_black, 1))
+    return curve
+
+
+@game_bp.route('/api/game/winrate', methods=['POST'])
+def game_win_rate():
+    """Live win-rate curve for the running game (easy mode only)."""
+    data = request.get_json() or {}
+    game_id = data.get('game_id')
+
+    if game_id not in game_sessions:
+        return jsonify({'error': 'Game not found'}), 404
+
+    sess = game_sessions[game_id]
+    if sess['mode'] != 'easy':
+        return jsonify({'error': 'Win rate only available in easy mode'}), 403
+
+    curve = _win_rate_curve(sess['state'])
+    return jsonify({
+        'win_rates': curve,
+        'move_number': sess['state'].move_number,
+    })
+
+
+@game_bp.route('/api/game/record', methods=['POST'])
+def record_game():
+    """
+    Save the session's game to the model's games/human/ directory, so it shows
+    up in Review Games alongside the training games.
+    """
+    data = request.get_json() or {}
+    game_id = data.get('game_id')
+
+    if game_id not in game_sessions:
+        return jsonify({'error': 'Game not found'}), 404
+
+    from web.app import trainer
+    if trainer is None:
+        return jsonify({'error': 'No model selected'}), 400
+
+    sess = game_sessions[game_id]
+    state = sess['state']
+
+    move_list, _, _ = _replay_positions(state)
+    if not move_list:
+        return jsonify({'error': 'Nothing to record — play a move first'}), 400
+
+    scorer = get_scorer(sess.get('scoring_method', 'chinese'))
+    black_score, white_score = scorer.score(state)
+    winner, margin = (scorer.determine_winner(state) if state.is_over else (None, 0.0))
+
+    player_color = sess['player_color']
+    model = _get_active_model()
+    name = (data.get('name') or '').strip()
+
+    record = {
+        'board_size': state.board_size,
+        'komi': state.komi,
+        'moves': move_list,
+        'num_moves': len(move_list),
+        'win_rates': _win_rate_curve(state),
+        'winner': int(winner) if winner else 0,
+        'black_score': black_score,
+        'white_score': white_score,
+        'margin': margin,
+        'timestamp': datetime.now().isoformat(),
+        # Human-game specifics — the review UI needs these to say who was who.
+        'name': name,
+        'human_color': int(player_color),
+        'bot_color': int(WHITE if player_color == BLACK else BLACK),
+        'mode': sess.get('mode'),
+        'num_simulations': sess.get('num_simulations'),
+        'resigned_by': int(state.resign_color) if state.resign_color else None,
+        'unfinished': not state.is_over,
+        'model_name': model.name if model else None,
+        # Which trained version of the bot this was played against.
+        'model_iteration': getattr(trainer, 'iteration', None),
+    }
+
+    rel_path = save_human_game(trainer.config.paths.games_dir, record)
+    return jsonify({'saved': True, 'game_id': rel_path}), 201
+
+
 def _bot_move(game_id: str) -> dict:
     """Have the bot make a move in the given game session."""
     sess = game_sessions[game_id]
@@ -304,7 +473,8 @@ def _bot_move(game_id: str) -> dict:
         state.play_pass()
         return {'type': 'pass'}
 
-    mcts = MCTS(network=network, num_simulations=sess['num_simulations'], device=device)
+    mcts = MCTS(network=network, num_simulations=sess['num_simulations'], device=device,
+                restrict_eye_fill=_restrict_eye_fill())
     action, _ = mcts.search(state, temperature=0.1, add_noise=False)
 
     move_info = {}

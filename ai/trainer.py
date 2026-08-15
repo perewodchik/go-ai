@@ -206,6 +206,29 @@ class Trainer:
         # Per-iteration pass tallies, refreshed each self-play phase and read
         # by the collapse guard. {colour: [passes, total_moves]}
         self._pass_stats = {1: [0, 0], 2: [0, 0]}
+        # Per-iteration mercy-rule tallies, refreshed each self-play phase.
+        self._resign_stats = self._empty_resign_stats()
+        # Set by the collapse guard each iteration. While it is True the mercy
+        # rule is suppressed: a collapsed value head reports ±1 from the turn
+        # colour alone, so its "I have lost" verdict carries no information and
+        # would end every game on sight.
+        self._collapse_active = False
+
+        # Comprehensive live stage state for real-time tracking & refresh persistence
+        self.current_stage = {
+            'stage': 'idle',
+            'stage_name': 'Idle',
+            'stage_index': 0,
+            'total_stages': 5,
+            'iteration': self.iteration,
+            'completed_items': 0,
+            'total_items': 0,
+            'percent': 0,
+            'active_games': [],
+            'num_workers': 0,
+            'detail': 'Waiting to start training',
+            'stages_overview': self._build_stages_overview('idle'),
+        }
         
         # Fold any pre-existing flat game files into the per-iteration layout
         # so old and new games show up in the same history tree.
@@ -219,6 +242,118 @@ class Trainer:
         # Load weights if available
         self._try_load_weights()
     
+    @staticmethod
+    def _empty_resign_stats() -> dict:
+        return {
+            'games': 0,          # Self-play games completed this iteration
+            'resigned': 0,       # Games actually stopped by the mercy rule
+            'moves_total': 0,    # Moves played across all games
+            'playout_games': 0,  # Games that ignored the rule to measure it
+            'would_resign': 0,   # ...of those, ones where it would have fired
+            'false_resigns': 0,  # ...of those, ones where it would have been WRONG
+        }
+
+    def _resign_metrics(self) -> dict:
+        """
+        Mercy-rule summary for the metrics log.
+
+        `false_resign_rate` is the number that matters: it is measured on the
+        games that overruled the rule and played on, so it is the only evidence
+        that the threshold is not throwing away winnable games. None means the
+        rule never fired on a playout game this iteration — no evidence either
+        way, not a clean bill of health.
+        """
+        s = self._resign_stats
+        if not self.config.training.resign_enabled:
+            return {'resign_rate': None, 'false_resign_rate': None,
+                    'resign_playout_games': 0}
+        return {
+            'resign_rate': (round(s['resigned'] / s['games'], 4)
+                            if s['games'] else None),
+            'false_resign_rate': (round(s['false_resigns'] / s['would_resign'], 4)
+                                  if s['would_resign'] else None),
+            'resign_playout_games': s['playout_games'],
+            'resign_checked_games': s['would_resign'],
+            'resign_suppressed': self._collapse_active,
+        }
+
+    def _build_stages_overview(self, current_stage_key: str) -> list:
+        """Build metadata for the 5-stage learning pipeline."""
+        gate_enabled = bool(getattr(self.config.training, 'gate_enabled', True) and getattr(self.config.training, 'gate_games', 0) > 0)
+        eval_enabled = bool(getattr(self.config.training, 'eval_games', 0) > 0)
+        
+        stage_order = [
+            ('self_play', 'Self-Play', '🎲', 'Generate MCTS training games'),
+            ('training', 'NN Training', '🧠', 'Optimize Policy & Value Loss'),
+            ('gate', 'Champion Gate', '🛡️', 'Candidate vs Champion Match' if gate_enabled else 'Gate Disabled'),
+            ('eval', 'Eval vs Random', '🎯', 'Measure Elo vs Random Bot' if eval_enabled else 'Eval Skipped'),
+            ('saving', 'Checkpoint', '💾', 'Save Weights & Collapse Guard'),
+        ]
+        
+        keys = [s[0] for s in stage_order]
+        current_idx = keys.index(current_stage_key) if current_stage_key in keys else (-1 if current_stage_key == 'idle' else 99)
+        
+        stages = []
+        for idx, (key, label, icon, desc) in enumerate(stage_order):
+            is_skipped = (key == 'gate' and not gate_enabled) or (key == 'eval' and not eval_enabled)
+            
+            if is_skipped:
+                status = 'skipped'
+            elif current_stage_key == 'idle':
+                status = 'idle'
+            elif current_stage_key == 'completed':
+                status = 'completed'
+            elif idx < current_idx:
+                status = 'completed'
+            elif idx == current_idx:
+                status = 'active'
+            else:
+                status = 'pending'
+                
+            stages.append({
+                'key': key,
+                'label': label,
+                'icon': icon,
+                'description': desc,
+                'status': status,
+                'index': idx + 1,
+            })
+        return stages
+
+    def _set_stage(
+        self,
+        stage: str,
+        stage_name: str,
+        stage_index: int,
+        completed_items: int = 0,
+        total_items: int = 0,
+        active_games: list = None,
+        num_workers: int = 0,
+        detail: str = "",
+        extra_data: dict = None,
+    ) -> None:
+        """Update current stage status atomically."""
+        if active_games is None:
+            active_games = []
+        percent = round((completed_items / total_items * 100)) if total_items > 0 else 0
+        state = {
+            'stage': stage,
+            'stage_name': stage_name,
+            'stage_index': stage_index,
+            'total_stages': 5,
+            'iteration': self.iteration,
+            'completed_items': completed_items,
+            'total_items': total_items,
+            'percent': percent,
+            'active_games': active_games,
+            'num_workers': num_workers,
+            'detail': detail,
+            'stages_overview': self._build_stages_overview(stage),
+        }
+        if extra_data:
+            state.update(extra_data)
+        self.current_stage = state
+
     def _try_load_weights(self) -> None:
         """Try to resume from saved weights."""
         weights_path = self.config.paths.weights_path
@@ -229,6 +364,7 @@ class Trainer:
                     self.iteration = meta.get('iteration', 0)
                     self.elo = meta.get('elo', 500)
                     self.total_games = meta.get('total_games', 0)
+                    self.current_stage['iteration'] = self.iteration
                     # Restore the gated champion as the self-play generator.
                     # Checkpoints written before gating existed have no champion
                     # entry, so fall back to the training weights.
@@ -255,6 +391,7 @@ class Trainer:
                 'total_games': self.total_games,
                 'elo': self.elo,
                 'kyu_rank': elo_to_rank(self.elo),
+                'current_stage': self.current_stage,
                 'timestamp': datetime.now().isoformat(),
             }
             if data:
@@ -265,6 +402,7 @@ class Trainer:
                 self.recent_logs.append(event)
                 
             self.progress_callback(event)
+
     
     def _check_force_stop(self) -> bool:
         """Helper callback passed to workers to check if force stop requested."""
@@ -291,6 +429,7 @@ class Trainer:
         self.is_running = True
         self._stop_requested = False
         
+        self._set_stage('self_play', 'Starting Training', 1, 0, 0, [], 0, 'Initializing iteration')
         self._emit('training_started', 'Training started')
         
         try:
@@ -304,11 +443,35 @@ class Trainer:
                 self._emit('iteration_start', f'Starting iteration {self.iteration}')
                 
                 # --- Phase 1: Self-play ---
-                self._emit('self_play_start', f'Self-play: generating {self.config.training.num_self_play_games} games')
+                num_sp = self.config.training.num_self_play_games
+                sp_workers = max(1, min(num_sp, self.config.training.num_parallel_workers, os.cpu_count() or 4))
+                self._set_stage(
+                    'self_play', 'Self-Play Data Generation', 1,
+                    completed_items=0, total_items=num_sp,
+                    active_games=[], num_workers=sp_workers,
+                    detail=f'Generating {num_sp} self-play games'
+                )
+                self._emit('self_play_start', f'Self-play: generating {num_sp} games')
 
                 # Reset per-iteration pass tallies for the collapse guard.
                 self._pass_stats = {1: [0, 0], 2: [0, 0]}
-                
+                self._resign_stats = self._empty_resign_stats()
+
+                # Mercy rule is suppressed while the collapse guard is tripped.
+                # A flat value head emits ±1 from the turn-colour plane alone,
+                # so every game would "resign" almost immediately — and because
+                # the games would then be a handful of moves long, the guard's
+                # own pass-rate tripwire would go quiet and hide the collapse
+                # that caused it.
+                resign_on = bool(self.config.training.resign_enabled
+                                 and not self._collapse_active)
+                if self.config.training.resign_enabled and self._collapse_active:
+                    self._emit('warning',
+                               '⚠️ Mercy rule suppressed this iteration — the collapse '
+                               'guard is tripped, so the value head\'s resignation '
+                               'verdicts cannot be trusted.')
+
+
                 # Effective sim count scales with board area so policy targets
                 # stay sharp on larger boards (see config.simulations_for_board).
                 effective_sims = simulations_for_board(
@@ -333,6 +496,13 @@ class Trainer:
                     value_target_outcome_weight=self.config.training.value_target_outcome_weight,
                     stop_checker=self._check_force_stop,
                     num_workers=self.config.training.num_parallel_workers,
+                    restrict_eye_fill=self.config.training.restrict_eye_fill,
+                    resign_enabled=resign_on,
+                    resign_threshold=self.config.training.resign_threshold,
+                    resign_consecutive=self.config.training.resign_consecutive,
+                    resign_min_move_factor=self.config.training.resign_min_move_factor,
+                    resign_both_sides=self.config.training.resign_both_sides,
+                    resign_playout_fraction=self.config.training.resign_playout_fraction,
                 )
                 sp_seconds = round(time.time() - sp_start, 2)
                 
@@ -342,13 +512,41 @@ class Trainer:
                 self.total_games += self.config.training.num_self_play_games
                 self.replay_buffer.add(samples)
                 
+                self._set_stage(
+                    'self_play', 'Self-Play Done', 1,
+                    completed_items=num_sp, total_items=num_sp,
+                    active_games=[], num_workers=sp_workers,
+                    detail=f'Generated {len(samples)} samples, replay buffer: {len(self.replay_buffer)}'
+                )
                 self._emit('self_play_done',
                            f'Self-play done: {len(samples)} samples, buffer size: {len(self.replay_buffer)}')
+
+                # Mercy-rule report. The false-resign rate is the tuning signal:
+                # if it climbs above ~5% the threshold is ending games that the
+                # "hopeless" side would have gone on to win, and every such game
+                # trains ~board_size² samples on a label that was never true.
+                rs = self._resign_stats
+                if resign_on and rs['resigned']:
+                    fr = self._resign_metrics()['false_resign_rate']
+                    fr_txt = ('no playout games triggered it — no evidence yet'
+                              if fr is None else f'{fr:.0%} of checked games')
+                    self._emit('resign_summary',
+                               f'🏳️ Mercy rule: {rs["resigned"]}/{rs["games"]} games '
+                               f'resigned · wrong-resignation rate: {fr_txt}',
+                               data=self._resign_metrics())
                 
                 # --- Phase 2: Training ---
                 train_metrics = {}
                 gate_seconds = 0.0
                 if len(self.replay_buffer) >= self.config.training.batch_size:
+                    steps_per_epoch = max(1, min(200, len(self.replay_buffer) // self.config.training.batch_size))
+                    total_train_steps = steps_per_epoch * self.config.training.num_epochs_per_iteration
+                    self._set_stage(
+                        'training', 'Neural Network Training', 2,
+                        completed_items=0, total_items=total_train_steps,
+                        active_games=[], num_workers=0,
+                        detail='Optimizing policy & value loss on replay buffer samples'
+                    )
                     self._emit('training_start', 'Training network...')
 
                     train_metrics = self._train_network()
@@ -374,6 +572,12 @@ class Trainer:
 
                 # --- Phase 3: Evaluation ---
                 if self.config.training.eval_games <= 0:
+                    self._set_stage(
+                        'eval', 'Evaluation vs Random Bot (Skipped)', 4,
+                        completed_items=0, total_items=0,
+                        active_games=[], num_workers=0,
+                        detail='eval_games=0 (Evaluation skipped)'
+                    )
                     self._emit('eval_start', 'Skipping evaluation (eval_games=0)...')
                     eval_seconds = 0.0
                     win_rate = None
@@ -385,8 +589,25 @@ class Trainer:
                     self._emit('eval_done', f'Evaluation skipped, Elo: {self.elo:.0f} ({kyu})',
                                data=eval_data)
                 else:
+                    eval_g = self.config.training.eval_games
+                    eval_workers = max(1, min(eval_g, self.config.training.num_parallel_workers, os.cpu_count() or 4))
+                    self._set_stage(
+                        'eval', 'Evaluation vs Random Bot', 4,
+                        completed_items=0, total_items=eval_g,
+                        active_games=[], num_workers=eval_workers,
+                        detail=f'Evaluating strength against random bot ({eval_g} games, {eval_workers} workers)'
+                    )
                     self._emit('eval_start', 'Evaluating against random bot...')
                     
+                    def _on_eval_game_progress(completed, total, active_games=None, num_workers=None):
+                        self._set_stage(
+                            'eval', 'Evaluation vs Random Bot', 4,
+                            completed_items=completed, total_items=total,
+                            active_games=active_games or [], num_workers=num_workers or eval_workers,
+                            detail=f'Evaluating vs random bot: {completed}/{total} games ({len(active_games or [])} parallel)'
+                        )
+                        self._emit('eval_progress', f'Eval progress: {completed}/{total}', data={'current_stage': self.current_stage})
+
                     eval_start = time.time()
                     win_rate = evaluate_against_random(
                         network=self.eval_network,
@@ -399,6 +620,8 @@ class Trainer:
                         games_dir=self.config.paths.games_dir,
                         stop_checker=self._check_force_stop,
                         num_workers=self.config.training.num_parallel_workers,
+                        progress_callback=_on_eval_game_progress,
+                        restrict_eye_fill=self.config.training.restrict_eye_fill,
                     )
                     eval_seconds = round(time.time() - eval_start, 2)
 
@@ -417,10 +640,22 @@ class Trainer:
                         'win_rate_vs_random': win_rate,
                         'elo_delta': self.elo - old_elo,
                     }
+                    self._set_stage(
+                        'eval', 'Evaluation Complete', 4,
+                        completed_items=eval_g, total_items=eval_g,
+                        active_games=[], num_workers=eval_workers,
+                        detail=f'Win rate vs random: {win_rate:.1%} | Elo: {self.elo:.0f} ({kyu})'
+                    )
                     self._emit('eval_done', f'Win rate vs random: {win_rate:.1%}, Elo: {self.elo:.0f} ({kyu})',
                                data=eval_data)
                 
                 # --- Phase 4: Save weights (EVERY iteration to prevent data loss) ---
+                self._set_stage(
+                    'saving', 'Saving Checkpoint & Diagnostics', 5,
+                    completed_items=0, total_items=1,
+                    active_games=[], num_workers=0,
+                    detail=f'Saving iteration {self.iteration} weights & evaluating collapse guard'
+                )
                 self._save_weights()
                 
                 # --- Collapse guard ---
@@ -445,6 +680,7 @@ class Trainer:
                     'gate_win_rate': self.last_gate_win_rate,
                     'gate_rejections': self.gate_rejections,
                     **diagnostics,
+                    **self._resign_metrics(),
                 }
                 if train_metrics:
                     metrics.update(train_metrics)
@@ -457,6 +693,12 @@ class Trainer:
                    self.config.training.num_self_play_games:
                     self._emit_reflection()
                 
+                self._set_stage(
+                    'completed', f'Iteration {self.iteration} Completed', 5,
+                    completed_items=1, total_items=1,
+                    active_games=[], num_workers=0,
+                    detail=f'Iteration {self.iteration} finished in {elapsed:.1f}s | Elo {self.elo:.0f} ({kyu})'
+                )
                 self._emit('iteration_done',
                            f'Iteration {self.iteration} done in {elapsed:.1f}s | '
                            f'Elo: {self.elo:.0f} ({kyu})',
@@ -466,6 +708,7 @@ class Trainer:
                 self._update_model_state()
         
         except Exception as e:
+            self._set_stage('idle', 'Training Error', 0, 0, 0, [], 0, f'Error: {str(e)}')
             self._emit('error', f'Training error: {str(e)}')
             raise
         finally:
@@ -474,11 +717,13 @@ class Trainer:
                 # Reload clean weights from disk from last saved completed iteration
                 self._try_load_weights()
                 self._update_model_state()
+                self._set_stage('idle', 'Force Stopped', 0, 0, 0, [], 0, f'Restored weights from iteration {self.iteration}')
                 self._emit('training_stopped', f'⚡ Force stopped! Restored weights from iteration {self.iteration} (Elo {self.elo:.0f}).')
                 self._force_stop_requested = False
             else:
                 # Always save weights on normal stop
                 self._save_weights()
+                self._set_stage('idle', 'Idle', 0, 0, 0, [], 0, f'Ready · Iteration {self.iteration} · Elo {self.elo:.0f}')
                 self._emit('training_stopped', 'Training stopped')
     
     def _cpu_copy(self, source: GoNetwork) -> GoNetwork:
@@ -511,9 +756,21 @@ class Trainer:
         if not cfg.gate_enabled or cfg.gate_games <= 0:
             # Legacy behaviour: accept every update unconditionally.
             self.eval_network.load_state_dict(self.network.state_dict())
+            self._set_stage(
+                'gate', 'Promotion Gate (Disabled)', 3,
+                completed_items=0, total_items=0,
+                active_games=[], num_workers=0,
+                detail='Gating disabled — candidate accepted automatically'
+            )
             return True, None
 
-        workers = max(1, min(cfg.num_parallel_workers, cfg.gate_games))
+        workers = max(1, min(cfg.num_parallel_workers, cfg.gate_games, os.cpu_count() or 4))
+        self._set_stage(
+            'gate', 'Promotion Gate (Candidate vs Champion)', 3,
+            completed_items=0, total_items=cfg.gate_games,
+            active_games=[], num_workers=workers,
+            detail=f'Playing candidate vs champion ({cfg.gate_games} games @ {cfg.gate_simulations} sims, {workers} workers)'
+        )
         self._emit('gate_start',
                    f'Promotion gate: candidate vs champion '
                    f'({cfg.gate_games} games @ {cfg.gate_simulations} sims, '
@@ -521,6 +778,15 @@ class Trainer:
 
         candidate = self._cpu_copy(self.network)
         champion = self._cpu_copy(self.eval_network)
+
+        def _on_gate_game_progress(completed, total, active_games=None, num_workers=None, candidate_wins=0):
+            self._set_stage(
+                'gate', 'Promotion Gate (Candidate vs Champion)', 3,
+                completed_items=completed, total_items=total,
+                active_games=active_games or [], num_workers=num_workers or workers,
+                detail=f'Gate match: {completed}/{total} games completed ({candidate_wins} candidate wins)'
+            )
+            self._emit('gate_progress', f'Gate match: {completed}/{total} ({len(active_games or [])} parallel)', data={'current_stage': self.current_stage})
 
         try:
             win_rate = evaluate_against_checkpoint(
@@ -535,6 +801,8 @@ class Trainer:
                 games_dir=self.config.paths.games_dir,
                 num_workers=cfg.num_parallel_workers,
                 stop_checker=self._check_force_stop,
+                progress_callback=_on_gate_game_progress,
+                restrict_eye_fill=cfg.restrict_eye_fill,
             )
         except Exception as e:
             # Never let a gate failure take down training — fall back to
@@ -554,6 +822,12 @@ class Trainer:
                 {k: v.detach().cpu() for k, v in self.network.state_dict().items()}
             )
             self.gate_rejections = 0
+            self._set_stage(
+                'gate', 'Promotion Gate (Promoted)', 3,
+                completed_items=cfg.gate_games, total_items=cfg.gate_games,
+                active_games=[], num_workers=workers,
+                detail=f'✅ Candidate promoted (beat champion {win_rate:.0%} ≥ {cfg.gate_threshold:.0%})'
+            )
             self._emit('gate_promoted',
                        f'✅ Candidate promoted (beat champion {win_rate:.0%} '
                        f'≥ {cfg.gate_threshold:.0%})',
@@ -562,11 +836,18 @@ class Trainer:
 
         # Rejected: the champion keeps generating self-play data.
         self.gate_rejections += 1
+        self._set_stage(
+            'gate', 'Promotion Gate (Rejected)', 3,
+            completed_items=cfg.gate_games, total_items=cfg.gate_games,
+            active_games=[], num_workers=workers,
+            detail=f'⛔ Candidate rejected ({win_rate:.0%} < {cfg.gate_threshold:.0%}) — champion retained'
+        )
         self._emit('gate_rejected',
                    f'⛔ Candidate rejected ({win_rate:.0%} < {cfg.gate_threshold:.0%}) — '
                    f'champion retained [{self.gate_rejections} in a row]',
                    data={'gate_win_rate': win_rate,
                          'gate_rejections': self.gate_rejections})
+
 
         # A long rejection streak means the training network has drifted
         # somewhere it cannot recover from on its own. Snap it back to the
@@ -641,6 +922,10 @@ class Trainer:
                 out[key] = round(passes / total, 4)
 
         if not cfg.collapse_guard_enabled:
+            # Guard off means no verdict, not a standing one — otherwise a
+            # trip recorded before it was disabled would suppress the mercy
+            # rule forever.
+            self._collapse_active = False
             return out
 
         # --- Evaluate tripwires ---
@@ -661,6 +946,10 @@ class Trainer:
                     f"(> {cfg.collapse_pass_rate_max:.0%}) — under area scoring that "
                     f"donates points every move"
                 )
+
+        # Read by the next iteration's self-play phase to suppress the mercy
+        # rule while the value head cannot be trusted to judge a lost game.
+        self._collapse_active = bool(problems)
 
         if problems:
             out['collapse_warning'] = '; '.join(problems)
@@ -744,8 +1033,10 @@ class Trainer:
         # but is large enough to actually learn (previously it was taking exactly 1 step per epoch!)
         steps_per_epoch = max(1, len(self.replay_buffer) // self.config.training.batch_size)
         steps_per_epoch = min(steps_per_epoch, 200)
+        num_epochs = self.config.training.num_epochs_per_iteration
+        total_train_steps = steps_per_epoch * num_epochs
         
-        for epoch in range(self.config.training.num_epochs_per_iteration):
+        for epoch in range(num_epochs):
             for step in range(steps_per_epoch):
                 if self._force_stop_requested:
                     return {}
@@ -783,6 +1074,18 @@ class Trainer:
                 total_policy_loss += policy_loss.item()
                 total_value_loss += value_loss.item()
                 num_batches += 1
+
+                completed_steps = epoch * steps_per_epoch + step + 1
+                if completed_steps % 5 == 0 or completed_steps == total_train_steps:
+                    self._set_stage(
+                        'training', 'Neural Network Training', 2,
+                        completed_items=completed_steps, total_items=total_train_steps,
+                        active_games=[], num_workers=0,
+                        detail=f'Epoch {epoch+1}/{num_epochs} · Step {step+1}/{steps_per_epoch} · Policy: {policy_loss.item():.4f} · Value: {value_loss.item():.4f}'
+                    )
+                    self._emit('training_step',
+                               f'Training: step {completed_steps}/{total_train_steps} (Loss {loss.item():.4f})',
+                               data={'current_stage': self.current_stage})
         
         # Step the learning rate scheduler
         self.scheduler.step()
@@ -790,16 +1093,48 @@ class Trainer:
         avg_policy_loss = total_policy_loss / max(num_batches, 1)
         avg_value_loss = total_value_loss / max(num_batches, 1)
         
-        return {
+        train_res = {
             'policy_loss': round(avg_policy_loss, 4),
             'value_loss': round(avg_value_loss, 4),
             'total_loss': round(avg_policy_loss + avg_value_loss, 4),
             'learning_rate': self.optimizer.param_groups[0]['lr'],
             'nn_train_seconds': round(time.time() - train_start, 2),
         }
+        self._set_stage(
+            'training', 'Neural Network Training Done', 2,
+            completed_items=total_train_steps, total_items=total_train_steps,
+            active_games=[], num_workers=0,
+            detail=f"Trained {total_train_steps} steps · Loss: {train_res['total_loss']:.4f} (P: {train_res['policy_loss']:.4f}, V: {train_res['value_loss']:.4f})"
+        )
+        return train_res
     
-    def _on_game_complete(self, game_num: int, total: int, record: dict) -> None:
-        """Callback for each completed self-play game."""
+    def _on_game_complete(
+        self,
+        game_num: int,
+        total: int,
+        record: dict = None,
+        active_games: list = None,
+        num_workers: int = None,
+    ) -> None:
+        """Callback for self-play game progress and completions."""
+        active_list = active_games or []
+        w_count = num_workers or self.config.training.num_parallel_workers
+
+        if record is None:
+            # Initial batch launch notification
+            self._set_stage(
+                'self_play', 'Self-Play Data Generation', 1,
+                completed_items=0, total_items=total,
+                active_games=active_list, num_workers=w_count,
+                detail=f'Starting self-play ({total} games)'
+            )
+            self._emit('game_progress', f'Self-play launched with {len(active_list)} parallel workers', data={
+                'current_stage': self.current_stage,
+                'active_games': active_list,
+                'num_workers': w_count,
+            })
+            return
+
         # Tally passes per colour for the collapse guard. A colour that starts
         # passing heavily is handing away points under area scoring.
         for m in record.get('moves', []):
@@ -809,6 +1144,28 @@ class Trainer:
                 if m.get('move', [0, 0])[0] < 0:
                     self._pass_stats[colour][0] += 1
 
+        # Tally mercy-rule outcomes. `would_resign_color` is only ever set on
+        # playout games, which are the ones that can tell us whether the rule
+        # would have been wrong.
+        rs = self._resign_stats
+        rs['games'] += 1
+        rs['moves_total'] += record.get('num_moves', 0)
+        if record.get('resigned'):
+            rs['resigned'] += 1
+        if record.get('resign_playout'):
+            rs['playout_games'] += 1
+            if record.get('would_resign_color') is not None:
+                rs['would_resign'] += 1
+                if record.get('false_resign'):
+                    rs['false_resigns'] += 1
+
+        self._set_stage(
+            'self_play', 'Self-Play Data Generation', 1,
+            completed_items=game_num, total_items=total,
+            active_games=active_list, num_workers=w_count,
+            detail=f'Generated {game_num}/{total} games'
+        )
+
         self._emit('game_complete', f'Game {game_num}/{total}', data={
             'game_num': game_num,
             'total': total,
@@ -817,6 +1174,9 @@ class Trainer:
             'elapsed': record.get('elapsed_seconds', 0),
             'total_games': self.total_games + game_num,
             'buffer_size': len(self.replay_buffer),
+            'active_games': active_list,
+            'num_workers': w_count,
+            'current_stage': self.current_stage,
         })
     
     def _save_metrics_log(self, metrics: dict) -> None:
@@ -853,11 +1213,21 @@ class Trainer:
             'latest_value_loss': recent.get('value_loss', 0),
         }
         
-        # Check for rank milestones
+        # Check for rank milestones (only when rank genuinely changes and improves from the previous iteration/milestone)
         milestone = None
-        if oldest.get('kyu_rank') != recent.get('kyu_rank'):
-            milestone = f"Rank improved from {oldest.get('kyu_rank')} to {recent.get('kyu_rank')}!"
-            report['milestone'] = milestone
+        current_rank = recent.get('kyu_rank')
+        last_rank = getattr(self, '_last_milestone_rank', None)
+        if last_rank is None and len(self.metrics_history) >= 2:
+            last_rank = self.metrics_history[-2].get('kyu_rank')
+
+        if last_rank and current_rank and current_rank != last_rank:
+            # Verify that Elo actually increased
+            if recent.get('elo', 0) > oldest.get('elo', 0):
+                milestone = f"Rank improved from {last_rank} to {current_rank}!"
+                report['milestone'] = milestone
+            self._last_milestone_rank = current_rank
+        elif not hasattr(self, '_last_milestone_rank') and current_rank:
+            self._last_milestone_rank = current_rank
         
         msg = f"📊 Progress: {self.total_games} games | Elo {recent['elo']:.0f} ({recent.get('kyu_rank', '?')}) | Gain: {elo_gain:+.0f}"
         self._emit('reflection', msg, data=report)
@@ -873,9 +1243,11 @@ class Trainer:
             'kyu_rank': elo_to_rank(self.elo),
             'buffer_size': len(self.replay_buffer),
             'device': self.device,
+            'current_stage': self.current_stage,
             'recent_logs': list(self.recent_logs),
             'metrics_history': self.metrics_history[-50:],  # Last 50 entries
         }
+
     
     def get_metrics_history(self) -> List[dict]:
         """

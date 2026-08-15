@@ -1,0 +1,9 @@
+{
+  "id": "1",
+  "subject": "Network size presets in config.py",
+  "description": "Add NETWORK_PRESETS + resolver and param-count helper.",
+  "activeForm": "Adding network presets to config",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

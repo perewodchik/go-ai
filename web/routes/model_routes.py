@@ -95,6 +95,9 @@ def get_param_bounds():
     return jsonify({
         'bounds': PARAM_BOUNDS,
         'categories': CATEGORIES,
+        # The pools cap workers at the core count, so the UI needs it to work
+        # out how games actually get dealt out.
+        'cpu_count': os.cpu_count() or 4,
     })
 
 

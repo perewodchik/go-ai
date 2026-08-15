@@ -1,0 +1,9 @@
+{
+  "id": "2",
+  "subject": "Store network arch per-model",
+  "description": "Add NetworkParams to ModelInfo, thread through create/update and from_model.",
+  "activeForm": "Threading network params through model_manager/config",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

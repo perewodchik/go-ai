@@ -1,0 +1,9 @@
+{
+  "id": "3",
+  "subject": "Checkpoint arch safety",
+  "description": "Save arch metadata in weights.pt; validate on load to avoid silent corruption.",
+  "activeForm": "Adding checkpoint arch metadata + validation",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

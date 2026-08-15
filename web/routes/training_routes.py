@@ -12,9 +12,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from ai.game_store import (
     PHASES,
     PHASE_EVAL,
+    PHASE_HUMAN,
+    PHASE_MATCH,
     PHASE_PROMOTION,
     PHASE_SELF_PLAY,
+    delete_saved_game,
     load_game_files,
+    load_human_game_files,
+    load_match_game_files,
     migrate_legacy_layout,
     resolve_game_path,
 )
@@ -45,6 +50,24 @@ def training_page():
     return render_template('training.html', status=status, active_model=active_model)
 
 
+@training_bp.route('/new')
+def training_new_subroute():
+    from web.app import model_manager
+    active_model = model_manager.get_active_model()
+    trainer = _get_trainer()
+    status = trainer.get_status() if trainer else {}
+    return render_template('training.html', status=status, active_model=active_model)
+
+
+@training_bp.route('/old')
+def training_old_subroute():
+    from web.app import model_manager
+    active_model = model_manager.get_active_model()
+    trainer = _get_trainer()
+    status = trainer.get_status() if trainer else {}
+    return render_template('training_old.html', status=status, active_model=active_model)
+
+
 @training_bp.route('/review')
 def review_page():
     from web.app import model_manager
@@ -72,6 +95,7 @@ PHASE_LABELS = {
     PHASE_SELF_PLAY: 'Self-Play',
     PHASE_PROMOTION: 'Promotion',
     PHASE_EVAL: 'Eval vs Random',
+    PHASE_MATCH: 'Bot vs Bot',
 }
 
 
@@ -84,6 +108,12 @@ def list_games():
     Each phase group carries its own summary: the promotion group reports the
     candidate's win rate against the champion and whether it was promoted,
     the eval group reports the win rate against the random bot.
+
+    Games the user recorded on the Play page come first, in a group of their
+    own — they belong to no iteration, and they're what the user is most
+    likely looking for when they open the review page.
+
+    Every group carries a `kind` so the client can tell the two shapes apart.
     """
     trainer = _require_trainer()
     if not trainer:
@@ -91,6 +121,65 @@ def list_games():
 
     games_dir = trainer.config.paths.games_dir
     migrate_legacy_layout(games_dir)
+
+    result = []
+
+    include_recorded_param = request.args.get('include_recorded')
+    include_human_param = request.args.get('include_human')
+    param_val = include_recorded_param if include_recorded_param is not None else include_human_param
+    if param_val is None:
+        include_recorded = True
+    else:
+        include_recorded = param_val.lower() not in ('0', 'false', 'no', 'off')
+
+    if include_recorded:
+        recorded = []
+        for game_file, data in load_human_game_files(games_dir):
+            data['filename'] = game_file.rel_path
+            data['phase'] = PHASE_HUMAN
+            recorded.append(data)
+
+        if recorded:
+            result.append({
+                'kind': 'recorded',
+                'label': 'My Recorded Games',
+                'games': recorded,
+                'total_games': len(recorded),
+            })
+
+        # Bot vs bot matches — also user-created, also outside the iteration
+        # tree, and grouped by the match they belong to so a series reads as
+        # one thing instead of N loose games.
+        matches = []
+        for game_file, data in load_match_game_files(games_dir):
+            data['filename'] = game_file.rel_path
+            data['phase'] = PHASE_MATCH
+            matches.append(data)
+
+        if matches:
+            by_match = {}
+            for data in matches:
+                by_match.setdefault(data.get('match_id') or 'unknown', []).append(data)
+
+            series = []
+            for match_id, games in by_match.items():
+                games.sort(key=lambda g: g.get('game_index', 0))
+                first = games[0]
+                series.append({
+                    'match_id': match_id,
+                    'name': first.get('match_name') or 'Bot vs Bot match',
+                    'games': games,
+                    'count': len(games),
+                    'timestamp': max((g.get('timestamp') or '') for g in games),
+                })
+            series.sort(key=lambda s: s['timestamp'], reverse=True)
+
+            result.append({
+                'kind': 'match',
+                'label': 'Bot vs Bot Matches',
+                'series': series,
+                'total_games': len(matches),
+            })
 
     grouped = {}
     for game_file, data in load_game_files(games_dir):
@@ -102,7 +191,6 @@ def list_games():
     metrics = trainer.get_metrics_history()
     iter_metrics = {m.get('iteration'): m for m in metrics if 'iteration' in m}
 
-    result = []
     for iteration in sorted(grouped.keys(), reverse=True):
         by_phase = grouped[iteration]
         m = iter_metrics.get(iteration, {})
@@ -145,6 +233,7 @@ def list_games():
             phases.append(group)
 
         result.append({
+            'kind': 'iteration',
             'iteration': iteration,
             'elo': round(m['elo']) if m.get('elo') is not None else None,
             'phases': phases,
@@ -152,6 +241,23 @@ def list_games():
         })
 
     return jsonify(result)
+
+
+@training_bp.route('/api/games/<path:rel_path>', methods=['DELETE'])
+def delete_game(rel_path):
+    """
+    Delete a user-created game. Only games under games/human/ and games/match/
+    can be deleted — training output is produced by the pipeline, not
+    disposable from the UI.
+    """
+    trainer = _require_trainer()
+    if not trainer:
+        return jsonify({'error': 'No model selected'}), 400
+
+    if not delete_saved_game(trainer.config.paths.games_dir, rel_path):
+        return jsonify({'error': 'Only recorded games can be deleted'}), 403
+
+    return jsonify({'deleted': True})
 
 
 @training_bp.route('/api/games/<path:rel_path>')
@@ -387,7 +493,9 @@ def learning_stats():
         self_play_points = []
         random_points = []
 
-        current_iter = trainer.iteration
+        last_completed_iter = metrics[-1].get('iteration') if metrics else None
+        if last_completed_iter is None:
+            last_completed_iter = trainer.iteration
 
         for game_file, data in load_game_files(games_dir):
             iteration = game_file.iteration
@@ -419,7 +527,7 @@ def learning_stats():
             elapsed = data.get('elapsed_seconds')
             if elapsed is not None:
                 all_game_times.append(elapsed)
-                if iteration == current_iter:
+                if iteration == last_completed_iter:
                     last_iter_game_times.append(elapsed)
 
             num_moves = data.get('num_moves')
@@ -463,25 +571,8 @@ def learning_stats():
         result['self_play_draws'] = total_self_play - black_wins - white_wins
 
     # --- Comprehensive Time Metrics computation for 3-Tab Time Block ---
-    # Collect game timings per iteration & phase
-    iter_game_times = {} # {iter: {phase: [elapsed_seconds, ...], ...}}
-    if os.path.exists(games_dir):
-        for game_file, data in load_game_files(games_dir):
-            it = game_file.iteration
-            ph = game_file.phase
-            el = data.get('elapsed_seconds')
-            if el is not None:
-                iter_game_times.setdefault(it, {}).setdefault(ph, []).append(el)
-            elif ph == PHASE_PROMOTION:
-                # Estimate promo game duration from moves if elapsed_seconds is missing in old game records
-                moves = data.get('moves', [])
-                num_m = len(moves) if isinstance(moves, list) else 0
-                est_el = round(max(1.0, num_m * 0.15), 1)
-                iter_game_times.setdefault(it, {}).setdefault(ph, []).append(est_el)
-
-    metrics_by_iter = {m.get('iteration'): m for m in metrics if m.get('iteration') is not None}
-    all_iters = sorted(set(iter_game_times.keys()) | set(metrics_by_iter.keys()))
-
+    # Derive timing strictly from authoritative recorded metrics history (wall-clock time),
+    # avoiding summing individual parallel game durations which inflates time by worker count.
     history = []
     sp_total_all = 0.0
     nn_total_all = 0.0
@@ -489,58 +580,44 @@ def learning_stats():
     champ_total_all = 0.0
     all_time_total = 0.0
 
-    last_iter_num = all_iters[-1] if all_iters else None
-
-    for it in all_iters:
-        m = metrics_by_iter.get(it, {})
-        g_times = iter_game_times.get(it, {})
-
-        sp_list = g_times.get(PHASE_SELF_PLAY, [])
-        rand_list = g_times.get(PHASE_EVAL, [])
-        champ_list = g_times.get(PHASE_PROMOTION, [])
-
+    for m in metrics:
+        it = m.get('iteration')
+        if it is None:
+            continue
         iter_elapsed = m.get('elapsed_seconds')
+        if iter_elapsed is None:
+            continue
+
+        total_time = round(float(iter_elapsed), 1)
 
         # Eval time vs random bot
         if m.get('random_eval_seconds') is not None:
             rand_time = round(float(m['random_eval_seconds']), 1)
-        elif rand_list:
-            rand_time = round(sum(rand_list), 1)
         else:
             rand_time = 0.0
 
         # Champion gate match time
         if m.get('champion_gate_seconds') is not None:
             champ_time = round(float(m['champion_gate_seconds']), 1)
-        elif champ_list:
-            champ_time = round(sum(champ_list), 1)
         elif m.get('gate_win_rate') is not None or m.get('gate_promoted') is not None:
-            # Historical fallback estimate if gate ran
-            total_ref = float(iter_elapsed) if iter_elapsed else 100.0
-            champ_time = round(min(total_ref * 0.20, max(12.0, total_ref * 0.12)), 1)
+            # Historical fallback estimate if gate ran before explicit time recording
+            champ_time = round(min(total_time * 0.20, max(12.0, total_time * 0.12)), 1)
         else:
             champ_time = 0.0
 
         # NN training time
         if m.get('nn_train_seconds') is not None:
             nn_time = round(float(m['nn_train_seconds']), 1)
-        elif m.get('policy_loss') is not None or m.get('loss') is not None or m.get('buffer_size', 0) > 0:
-            # Historical fallback estimate if training ran
-            total_ref = float(iter_elapsed) if iter_elapsed else 100.0
-            nn_time = round(min(total_ref * 0.15, max(10.0, total_ref * 0.10)), 1)
+        elif m.get('policy_loss') is not None or m.get('loss') is not None:
+            # Historical fallback estimate if training ran before explicit time recording
+            nn_time = round(min(total_time * 0.15, max(10.0, total_time * 0.10)), 1)
         else:
             nn_time = 0.0
 
-        if iter_elapsed is not None:
-            total_time = round(float(iter_elapsed), 1)
-        else:
-            raw_sp = sum(sp_list) if sp_list else 0.0
-            total_time = round(raw_sp + rand_time + champ_time + nn_time, 1)
-
+        # Self-play wall-clock time
         if m.get('self_play_seconds') is not None:
             sp_time = round(float(m['self_play_seconds']), 1)
         else:
-            # Self-play takes up remaining iteration wall-clock time
             sp_time = max(0.0, round(total_time - nn_time - rand_time - champ_time, 1))
 
         sp_total_all += sp_time
@@ -558,7 +635,7 @@ def learning_stats():
             'champion_gate_time': champ_time,
         })
 
-    # Extract last iteration summary values
+    # Extract last completed iteration summary values
     last_h = history[-1] if history else {}
 
     result['time_metrics'] = {
@@ -578,6 +655,198 @@ def learning_stats():
     }
 
     return jsonify(result)
+
+
+# The share of checked resignations that may be wrong before the mercy rule is
+# costing more than it saves. A wrong resignation mislabels a whole game's worth
+# of training samples, so this is deliberately a low bar.
+RESIGN_DANGER_RATE = 0.05
+# Below this many checked resignations, a rate is noise rather than evidence.
+RESIGN_MIN_CHECKS = 10
+
+
+def _wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple:
+    """
+    Wilson score interval for a binomial proportion.
+
+    Used instead of the naive p ± 1.96·√(p(1-p)/n) because the sample here is
+    tiny — a handful of playout games per iteration — and the naive interval is
+    badly wrong (and can leave [0, 1]) exactly in that regime. It also behaves
+    at 0 successes, which is the common case when the rule is working.
+    """
+    import math
+    if n <= 0:
+        return None, None
+    p = successes / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return max(0.0, centre - margin), min(1.0, centre + margin)
+
+
+@training_bp.route('/api/resign_stats')
+def resign_stats():
+    """
+    Mercy-rule report: is resignation paying for itself, or throwing games away?
+
+    Two quantities decide that, and both come out of the same mechanism — the
+    playout games, which ignore the resignation and play on:
+
+      * **wrong-resignation rate** — of the games where the rule WOULD have
+        fired but was overruled, how many did the "hopeless" side go on to win?
+        Each one of those, had it counted, would have mislabelled a whole
+        game's worth of training samples. This is the cost.
+      * **moves saved** — in those same games, how many moves were played after
+        the point where the rule would have stopped them. This is the benefit,
+        measured rather than assumed.
+
+    Everything is computed from stored self-play games, so it survives a
+    restart and covers the model's whole history rather than the current
+    session. Note it counts *stored* games: with game_store_every_n > 1 the
+    rates stay valid but the counts are a sample.
+    """
+    trainer = _require_trainer()
+    if not trainer:
+        return jsonify({'enabled': False, 'has_data': False,
+                        'points': [], 'summary': {}})
+
+    cfg = trainer.config.training
+    games_dir = trainer.config.paths.games_dir
+    enabled = bool(getattr(cfg, 'resign_enabled', False))
+
+    per_iter = {}
+    for game_file, data in load_game_files(games_dir):
+        if game_file.phase != PHASE_SELF_PLAY:
+            continue
+        row = per_iter.setdefault(game_file.iteration, {
+            'iteration': game_file.iteration,
+            'games': 0, 'resigned': 0,
+            'checked': 0, 'false_resigns': 0,
+            'moves_saved': 0, 'saved_samples': 0,
+        })
+        row['games'] += 1
+        if data.get('resigned'):
+            row['resigned'] += 1
+        # Playout games are the only ones that carry evidence: the rule's
+        # verdict was recorded but not acted on, so the game played out and we
+        # know both whether the verdict was right and what it would have cut.
+        if data.get('would_resign_move') is not None:
+            row['checked'] += 1
+            if data.get('false_resign'):
+                row['false_resigns'] += 1
+            tail = (data.get('num_moves') or 0) - data['would_resign_move']
+            if tail > 0:
+                row['moves_saved'] += tail
+                row['saved_samples'] += 1
+
+    points = []
+    cum_checked = cum_false = 0
+    total_games = total_resigned = 0
+    total_tail = total_tail_games = 0
+
+    for iteration in sorted(per_iter):
+        row = per_iter[iteration]
+        cum_checked += row['checked']
+        cum_false += row['false_resigns']
+        total_games += row['games']
+        total_resigned += row['resigned']
+        total_tail += row['moves_saved']
+        total_tail_games += row['saved_samples']
+
+        # The per-iteration rate is 0/1 noise on a handful of games, so the
+        # line the user reads is the CUMULATIVE rate with its interval.
+        lo, hi = _wilson_interval(cum_false, cum_checked)
+        points.append({
+            'iteration': iteration,
+            'games': row['games'],
+            'resigned': row['resigned'],
+            'resign_rate': round(row['resigned'] / row['games'], 4) if row['games'] else 0.0,
+            'checked': row['checked'],
+            'false_resigns': row['false_resigns'],
+            'cum_checked': cum_checked,
+            'cum_false_rate': round(cum_false / cum_checked, 4) if cum_checked else None,
+            'cum_ci_low': round(lo, 4) if lo is not None else None,
+            'cum_ci_high': round(hi, 4) if hi is not None else None,
+        })
+
+    false_rate = (cum_false / cum_checked) if cum_checked else None
+    ci_low, ci_high = _wilson_interval(cum_false, cum_checked)
+    avg_tail = (total_tail / total_tail_games) if total_tail_games else None
+
+    # --- Verdict -----------------------------------------------------------
+    # Deliberately conservative about claiming success: "no wrong resignations
+    # yet" on three checks is not evidence, and saying so would be worse than
+    # saying nothing. Only the upper bound of the interval clearing the danger
+    # line counts as a green light.
+    if not enabled and total_resigned == 0:
+        verdict, headline, detail = 'off', 'Mercy rule is off', (
+            'Turn it on to stop self-play games once a side is hopeless. '
+            'Nothing is being measured while it is off.')
+    elif total_resigned == 0:
+        verdict, headline, detail = 'inactive', 'On, but never fired', (
+            'No game has been resigned yet. An untrained value head rarely '
+            'reaches the confidence threshold — this is expected early on, and '
+            'means the rule is costing you nothing either way.')
+    elif cum_checked < RESIGN_MIN_CHECKS:
+        verdict, headline, detail = 'unproven', (
+            f'Saving time — not yet proven safe ({cum_checked}/{RESIGN_MIN_CHECKS} checks)'
+        ), (
+            f'{total_resigned} games ended early, but only {cum_checked} playout '
+            f'check{"" if cum_checked == 1 else "s"} have been collected so far. '
+            'Raise Playout Check to gather evidence faster.')
+    elif false_rate > RESIGN_DANGER_RATE:
+        verdict, headline, detail = 'bad', (
+            f'{false_rate:.0%} of resignations were wrong'
+        ), (
+            f'{cum_false} of {cum_checked} checked games were won by the side the '
+            f'rule called hopeless. Each one would have mislabelled a whole game '
+            f'of training data. Raise Resign Confidence or Confirming Moves.')
+    elif ci_high is not None and ci_high > RESIGN_DANGER_RATE:
+        verdict, headline, detail = 'caution', (
+            f'Looks safe so far ({false_rate:.0%} wrong)'
+        ), (
+            f'Consistent with a safe threshold, but with {cum_checked} checks the '
+            f'true rate could still be as high as {ci_high:.0%}. Keep collecting '
+            f'before trusting it.')
+    else:
+        verdict, headline, detail = 'good', (
+            f'Safe and saving time ({false_rate:.0%} wrong)'
+        ), (
+            f'Across {cum_checked} checks the wrong-resignation rate is below the '
+            f'{RESIGN_DANGER_RATE:.0%} danger line even at the top of its '
+            f'confidence interval.')
+
+    summary = {
+        'enabled': enabled,
+        'suppressed': bool(getattr(trainer, '_collapse_active', False)),
+        'total_games': total_games,
+        'total_resigned': total_resigned,
+        'resign_rate': round(total_resigned / total_games, 4) if total_games else None,
+        'checked_games': cum_checked,
+        'false_resigns': cum_false,
+        'false_resign_rate': round(false_rate, 4) if false_rate is not None else None,
+        'ci_low': round(ci_low, 4) if ci_low is not None else None,
+        'ci_high': round(ci_high, 4) if ci_high is not None else None,
+        'min_checks': RESIGN_MIN_CHECKS,
+        'avg_moves_saved': round(avg_tail, 1) if avg_tail is not None else None,
+        # Measured tail x games actually resigned. Explicitly an estimate: the
+        # tail length is sampled from playout games, not from the resigned ones
+        # (which by definition never played their tails).
+        'est_moves_saved': (round(avg_tail * total_resigned)
+                            if avg_tail is not None else None),
+        'threshold': getattr(cfg, 'resign_threshold', None),
+        'verdict': verdict,
+        'headline': headline,
+        'detail': detail,
+    }
+
+    return jsonify({
+        'enabled': enabled,
+        'has_data': bool(total_resigned or cum_checked),
+        'danger_rate': RESIGN_DANGER_RATE,
+        'points': points,
+        'summary': summary,
+    })
 
 
 @training_bp.route('/api/apply_params', methods=['POST'])
@@ -613,12 +882,15 @@ def apply_params():
 
     applied = {}
 
-    # --- Gate + compute settings ---
+    # --- Gate, compute and move-restriction settings ---
     # Every phase re-reads these when it starts, so they take effect on the
     # very next iteration with no restart.
     for key in ('gate_enabled', 'gate_games', 'gate_threshold',
                 'gate_simulations', 'gate_stall_warning',
-                'num_parallel_workers'):
+                'num_parallel_workers', 'restrict_eye_fill',
+                'resign_enabled', 'resign_threshold', 'resign_consecutive',
+                'resign_min_move_factor', 'resign_both_sides',
+                'resign_playout_fraction'):
         val = clean.get(key)
         if val is not None:
             setattr(trainer.config.training, key, val)

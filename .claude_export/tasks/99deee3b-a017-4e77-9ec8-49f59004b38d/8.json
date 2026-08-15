@@ -1,0 +1,9 @@
+{
+  "id": "8",
+  "subject": "Fix MCTS target quality",
+  "description": "Break argmax ties in temp->0 one-hot target; ensure temperature sharpening yields learnable targets; make diagnostic tests pass.",
+  "activeForm": "Fixing MCTS training-target sharpness",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

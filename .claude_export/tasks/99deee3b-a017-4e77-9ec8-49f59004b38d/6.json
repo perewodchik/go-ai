@@ -1,0 +1,9 @@
+{
+  "id": "6",
+  "subject": "Fix stale plane default + test",
+  "description": "GoNetwork default num_input_planes 9->10; fix test_game encoding assertions to expect 10 planes.",
+  "activeForm": "Fixing plane-count default and test",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

@@ -1,0 +1,9 @@
+{
+  "id": "5",
+  "subject": "Tests for network sizing",
+  "description": "Presets resolve, per-model roundtrip, from_model threading, param counts, checkpoint mismatch handling.",
+  "activeForm": "Writing network-size tests",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

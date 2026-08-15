@@ -188,20 +188,36 @@ def apply_move(board: Board, color: int, row: int, col: int,
 
 def get_legal_moves(board: Board, color: int,
                     ko_point: Optional[Tuple[int, int]] = None,
-                    board_history_hashes: Optional[Set[int]] = None) -> List[Tuple[int, int]]:
+                    board_history_hashes: Optional[Set[int]] = None,
+                    restrict_eye_fill: bool = False) -> List[Tuple[int, int]]:
     """
     Return all legal moves for a given color.
-    
+
     This is used by the AI to know which moves it can play.
     Pass is always legal but not included here (it's handled separately).
-    
+
     NOTE: This is O(n²) in board size × move validation cost. For 9x9 that's
     fine (~81 checks). For 19x19 you might want to optimize with incremental
     liberty tracking, but for this project simplicity wins.
+
+    Args:
+        restrict_eye_fill: Optional playing restriction (NOT a rule of Go). When
+            True, moves that would fill one of the mover's own two eyes — taking
+            a provably-alive chain down to one eye — are left out. See
+            game/eyes.py for the exact definition and why it is safe. Rule
+            legality (is_legal_move / apply_move) is deliberately untouched, so
+            a human, a stored game record or a replay is never affected by it.
     """
+    forbidden = set()
+    if restrict_eye_fill:
+        from game.eyes import forbidden_eye_fills
+        forbidden = forbidden_eye_fills(board, color)
+
     moves = []
     for r in range(board.size):
         for c in range(board.size):
+            if (r, c) in forbidden:
+                continue
             legal, _ = is_legal_move(board, color, r, c, ko_point, board_history_hashes)
             if legal:
                 moves.append((r, c))

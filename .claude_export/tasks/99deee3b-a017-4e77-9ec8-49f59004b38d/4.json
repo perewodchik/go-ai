@@ -1,0 +1,9 @@
+{
+  "id": "4",
+  "subject": "Creation UI: network size selector",
+  "description": "Add slider/preset selector to create-model modal + wire dashboard.js + route.",
+  "activeForm": "Building network size UI",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

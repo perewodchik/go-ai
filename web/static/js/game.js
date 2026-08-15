@@ -12,6 +12,9 @@ let playerColor = 'black';
 // True while a human move is being processed and the bot is replying. Blocks
 // further board/pass input so a fast double-click can't play the bot's move.
 let inputLocked = false;
+// Live win-rate readout: easy mode only, and off until the user asks for it.
+let showWinRate = false;
+let winrateChart = null;
 
 // ---- Setup ----
 document.querySelectorAll('.color-btn').forEach(btn => {
@@ -67,11 +70,23 @@ async function startGame() {
     });
 
     // Switch panels
-    document.getElementById('setup-panel').style.display = 'none';
-    document.getElementById('game-area').style.display = 'grid';
+    PlayViews.show('human-game');
     document.getElementById('btn-new-game').style.display = 'none';
+    // Let the launcher offer to resume this game if the user navigates away.
+    PlayViews.setHumanGame({
+        label: `Your game vs ${data.model_name || 'the bot'}`,
+        over: false,
+    });
+
+    // Fresh game — drop the previous game's curve rather than extending it.
+    if (winrateChart) {
+        winrateChart.destroy();
+        winrateChart = null;
+    }
+    syncWinRatePanel();
 
     updateBoard(data.state);
+    await refreshAnalysis();
 }
 
 // ---- Gameplay ----
@@ -97,7 +112,7 @@ async function onBoardClick(row, col) {
 
         updateBoard(data.state);
         if (data.scores) updateScores(data.scores);
-        await refreshEstimateIfEnabled();
+        await refreshAnalysis();
 
         if (data.state.is_over) {
             showGameOver(data);
@@ -122,7 +137,7 @@ async function fetchBotMove() {
 
     if (data.state) updateBoard(data.state);
     if (data.scores) updateScores(data.scores);
-    await refreshEstimateIfEnabled();
+    await refreshAnalysis();
     if (data.state && data.state.is_over) showGameOver(data);
 }
 
@@ -138,7 +153,7 @@ document.getElementById('btn-pass').addEventListener('click', async () => {
         const data = await res.json();
         updateBoard(data.state);
         if (data.scores) updateScores(data.scores);
-        await refreshEstimateIfEnabled();
+        await refreshAnalysis();
 
         if (data.result || (data.state && data.state.is_over)) {
             showGameOver(data);
@@ -171,7 +186,7 @@ document.getElementById('btn-undo').addEventListener('click', async () => {
     const data = await res.json();
     if (data.error) return;
     updateBoard(data.state);
-    await refreshEstimateIfEnabled();
+    await refreshAnalysis();
 });
 
 document.getElementById('btn-suggest').addEventListener('click', async () => {
@@ -219,10 +234,167 @@ async function refreshEstimateIfEnabled() {
     document.getElementById('white-score').textContent = data.white_estimate?.toFixed(1) || '0';
 }
 
+/** Refresh every post-move analysis overlay that is currently switched on. */
+async function refreshAnalysis() {
+    await refreshEstimateIfEnabled();
+    await refreshWinRateIfEnabled();
+}
+
+// ---- Live win rate (easy mode only, off by default) ----
+document.getElementById('toggle-winrate')?.addEventListener('change', async (e) => {
+    showWinRate = e.target.checked;
+    syncWinRatePanel();
+    if (showWinRate) await refreshWinRateIfEnabled();
+});
+
+/** Show the win-rate panel only while it's both enabled and available. */
+function syncWinRatePanel() {
+    const panel = document.getElementById('play-winrate-panel');
+    if (!panel) return;
+    const visible = showWinRate && gameMode === 'easy' && !!gameId;
+    panel.style.display = visible ? '' : 'none';
+}
+
+async function refreshWinRateIfEnabled() {
+    // Hard mode gets no evaluation at all — that's the point of hard mode.
+    if (!showWinRate || gameMode !== 'easy' || !gameId) return;
+
+    const res = await fetch('/api/game/winrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ game_id: gameId }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    renderWinRate(data.win_rates || []);
+}
+
+/**
+ * Draw the win-rate curve from the human's point of view.
+ *
+ * The server returns Black's win probability per position (the same series the
+ * review page charts), so playing White is a straight 100 − x flip.
+ */
+function renderWinRate(blackRates) {
+    const canvas = document.getElementById('play-winrate-chart');
+    const label = document.getElementById('play-winrate-current');
+    if (!canvas || typeof Chart === 'undefined') return;
+
+    const series = playerColor === 'white'
+        ? blackRates.map(v => Math.round((100 - v) * 10) / 10)
+        : blackRates.slice();
+
+    if (label) {
+        label.textContent = series.length
+            ? `You ${Number(series[series.length - 1]).toFixed(1)}%`
+            : '';
+    }
+
+    if (winrateChart) {
+        winrateChart.data.labels = series.map((_, i) => i);
+        winrateChart.data.datasets[0].data = series;
+        winrateChart.update('none');
+        return;
+    }
+
+    const style = playerColor === 'white'
+        ? { line: '#cdd3dd', fill: 'rgba(205, 211, 221, 0.12)' }
+        : { line: '#c8956c', fill: 'rgba(200, 149, 108, 0.12)' };
+    const tickColor = '#9a9a9a';
+    const gridColor = 'rgba(255, 255, 255, 0.06)';
+
+    winrateChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: series.map((_, i) => i),
+            datasets: [{
+                label: 'Your Win %',
+                data: series,
+                borderColor: style.line,
+                backgroundColor: style.fill,
+                borderWidth: 2,
+                fill: true,
+                tension: 0.35,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        title: (items) => `Move ${items[0].label}`,
+                        label: (item) => `You: ${Number(item.raw).toFixed(1)}%`,
+                    },
+                },
+            },
+            scales: {
+                x: { grid: { color: gridColor }, ticks: { color: tickColor, maxTicksLimit: 8 } },
+                y: {
+                    min: 0,
+                    max: 100,
+                    grid: { color: gridColor },
+                    ticks: { color: tickColor, stepSize: 25, callback: (v) => `${v}%` },
+                },
+            },
+        },
+    });
+}
+
+// ---- Recording ----
+document.getElementById('btn-record')?.addEventListener('click', async () => {
+    if (!gameId) return;
+
+    const name = prompt('Name for this recorded game (optional):', defaultRecordName());
+    if (name === null) return;  // cancelled
+
+    const btn = document.getElementById('btn-record');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+
+    try {
+        const res = await fetch('/api/game/record', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ game_id: gameId, name }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showToast(data.error || 'Failed to record game');
+            return;
+        }
+        showToast('Game recorded — find it in Review Games');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+    }
+});
+
+function defaultRecordName() {
+    const when = new Date().toLocaleString();
+    return `${playerColor === 'black' ? '⚫' : '⚪'} vs Bot — ${when}`;
+}
+
+function showToast(text) {
+    const toast = document.getElementById('play-toast');
+    if (!toast) return;
+    toast.textContent = text;
+    toast.style.display = '';
+    clearTimeout(showToast._timer);
+    showToast._timer = setTimeout(() => { toast.style.display = 'none'; }, 3500);
+}
+
 document.getElementById('btn-new-game')?.addEventListener('click', () => {
-    document.getElementById('game-area').style.display = 'none';
-    document.getElementById('setup-panel').style.display = '';
     gameId = null;
+    PlayViews.setHumanGame(null);
+    PlayViews.show('human-setup');
+    syncWinRatePanel();
 });
 
 // ---- Helpers ----
@@ -235,6 +407,9 @@ function updateBoard(state) {
     if (state.is_over) {
         document.getElementById('game-status').textContent = 'Game Over';
         document.getElementById('btn-new-game').style.display = '';
+        if (window.PlayViews && gameId) {
+            PlayViews.setHumanGame({ label: 'Your game', over: true });
+        }
     } else {
         const isMyTurn = (state.current_player === 1 && playerColor === 'black') ||
                          (state.current_player === 2 && playerColor === 'white');

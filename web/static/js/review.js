@@ -57,7 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
 async function loadGamesList() {
     const list = document.getElementById('review-games-list');
     try {
-        const res = await fetch('/training/api/games');
+        const res = await fetch('/training/api/games?include_recorded=1');
         const groupedGames = await res.json();
         list.innerHTML = '';
 
@@ -67,17 +67,25 @@ async function loadGamesList() {
         }
 
         groupedGames.forEach((group, groupIdx) => {
+            // Recorded human games are a flat list, not an iteration of phases.
+            if (group.kind === 'recorded') {
+                list.appendChild(buildRecordedGroup(group, groupIdx === 0));
+                return;
+            }
+
+            // Bot vs bot matches: one collapsible section per series.
+            if (group.kind === 'match') {
+                list.appendChild(buildMatchGroup(group, groupIdx === 0));
+                return;
+            }
+
             const details = document.createElement('details');
             details.className = 'iteration-group';
             if (groupIdx === 0) details.open = true;
 
-            const eloText = group.elo
-                ? `<span class="group-note">~${group.elo} Elo</span>`
-                : '';
-
             const summary = document.createElement('summary');
             summary.innerHTML = `
-                <span>Iteration ${group.iteration}${eloText}</span>
+                <span>Iteration ${group.iteration}</span>
                 <span class="group-note">${group.total_games} games</span>
             `;
             details.appendChild(summary);
@@ -145,6 +153,200 @@ function phaseSummaryBadge(phase) {
     return '';
 }
 
+/** The "My Recorded Games" section — games saved from the Play page. */
+function buildRecordedGroup(group, open) {
+    const details = document.createElement('details');
+    details.className = 'iteration-group recorded-group';
+    details.open = open;
+
+    const summary = document.createElement('summary');
+    summary.innerHTML = `
+        <span>🎮 ${group.label}</span>
+        <span class="group-note">${group.total_games} games</span>
+    `;
+    details.appendChild(summary);
+
+    group.games.forEach(game => details.appendChild(buildRecordedGameItem(game)));
+    return details;
+}
+
+/** The "Bot vs Bot Matches" section — one sub-section per match series. */
+function buildMatchGroup(group, open) {
+    const details = document.createElement('details');
+    details.className = 'iteration-group match-group';
+    details.open = open;
+
+    const summary = document.createElement('summary');
+    summary.innerHTML = `
+        <span>🤖 ${group.label}</span>
+        <span class="group-note">${group.total_games} games</span>
+    `;
+    details.appendChild(summary);
+
+    (group.series || []).forEach((series, idx) => {
+        const seriesEl = document.createElement('details');
+        seriesEl.className = 'phase-group match-series-group';
+        if (open && idx === 0) seriesEl.open = true;
+
+        const seriesSummary = document.createElement('summary');
+        seriesSummary.innerHTML = `
+            <span>${escapeHtml(series.name)} <span class="group-note">${series.count}</span></span>
+            <span class="group-note">${matchSeriesScore(series)}</span>
+        `;
+        seriesEl.appendChild(seriesSummary);
+
+        series.games.forEach(game => seriesEl.appendChild(buildMatchGameItem(game)));
+        details.appendChild(seriesEl);
+    });
+
+    return details;
+}
+
+/**
+ * Series score as "3–1", counted per PLAYER (colours alternate between games,
+ * so a per-colour tally would be meaningless).
+ */
+function matchSeriesScore(series) {
+    const names = [];
+    const wins = {};
+    series.games.forEach(game => {
+        const black = (game.black_player || {}).name || 'Black';
+        const white = (game.white_player || {}).name || 'White';
+        [black, white].forEach(name => {
+            if (!names.includes(name)) names.push(name);
+            if (wins[name] === undefined) wins[name] = 0;
+        });
+        if (game.winner === 1) wins[black] += 1;
+        else if (game.winner === 2) wins[white] += 1;
+    });
+
+    if (names.length < 2) return '';
+    return `${wins[names[0]]}–${wins[names[1]]}`;
+}
+
+/** One match game row: who played which colour, and who won. */
+function buildMatchGameItem(game) {
+    const item = document.createElement('div');
+    item.className = 'game-item review-list-item match-game-item';
+    if (currentGameData && currentGameData.filename === game.filename) {
+        item.classList.add('active');
+    }
+
+    const black = (game.black_player || {}).name || 'Black';
+    const white = (game.white_player || {}).name || 'White';
+
+    let resultText = 'Draw';
+    let resultColor = 'var(--text-muted)';
+    if (game.winner === 1 || game.winner === 2) {
+        const winnerName = game.winner === 1 ? black : white;
+        const how = game.resigned_by
+            ? 'by resignation'
+            : `+${game.margin !== undefined ? Number(game.margin).toFixed(1) : '?'}`;
+        resultText = `${game.winner === 1 ? '⚫' : '⚪'} ${winnerName} won ${how}`;
+        resultColor = 'var(--text-primary)';
+    }
+
+    item.innerHTML = `
+        <div style="font-weight: 600; margin-bottom: 0.15rem;">Game ${(game.game_index || 0) + 1}</div>
+        <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(resultText)}</div>
+        <div class="match-game-line">⚫ ${escapeHtml(black)} vs ⚪ ${escapeHtml(white)} &middot; ${game.num_moves} moves</div>
+    `;
+    item.addEventListener('click', () => selectGame(item, game.filename));
+
+    return item;
+}
+
+/** One recorded game row: result from the human's point of view, plus delete. */
+function buildRecordedGameItem(game) {
+    const item = document.createElement('div');
+    item.className = 'game-item review-list-item';
+    if (currentGameData && currentGameData.filename === game.filename) {
+        item.classList.add('active');
+    }
+
+    const humanColor = game.human_color === 2 ? 2 : 1;
+    let resultText = 'Draw';
+    let resultColor = 'var(--text-muted)';
+    if (game.unfinished) {
+        resultText = 'Unfinished';
+    } else if (game.winner === 1 || game.winner === 2) {
+        const won = game.winner === humanColor;
+        const margin = game.resigned_by
+            ? 'by resignation'
+            : `by ${game.margin !== undefined ? Number(game.margin).toFixed(1) : '?'}`;
+        resultText = `${won ? 'You won' : 'Bot won'} ${margin}`;
+        resultColor = won ? 'var(--success)' : 'var(--danger)';
+    }
+
+    const title = game.name && game.name.length
+        ? game.name
+        : `${humanColor === 1 ? '⚫' : '⚪'} You vs Bot`;
+    const when = game.timestamp ? new Date(game.timestamp).toLocaleString() : '';
+
+    const body = document.createElement('div');
+    body.className = 'recorded-item-body';
+    body.innerHTML = `
+        <div style="font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(title)}</div>
+        <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${resultText}</div>
+        <div style="font-size: 0.8rem; color: var(--text-muted);">${game.num_moves} moves${when ? ` &middot; ${when}` : ''}</div>
+    `;
+    body.addEventListener('click', () => selectGame(item, game.filename));
+    item.appendChild(body);
+
+    const del = document.createElement('button');
+    del.className = 'btn-small recorded-delete';
+    del.title = 'Delete this recorded game';
+    del.textContent = '🗑';
+    del.addEventListener('click', async (e) => {
+        // The row itself opens the game — don't do both on a delete click.
+        e.stopPropagation();
+        if (!confirm(`Delete "${title}"? This cannot be undone.`)) return;
+        await deleteRecordedGame(game.filename);
+    });
+    item.appendChild(del);
+
+    return item;
+}
+
+async function deleteRecordedGame(filename) {
+    const encodedPath = filename.split('/').map(encodeURIComponent).join('/');
+    const res = await fetch(`/training/api/games/${encodedPath}`, { method: 'DELETE' });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || 'Failed to delete game.');
+        return;
+    }
+
+    // If the deleted game was open, clear the viewer — its data is gone.
+    if (currentGameData && currentGameData.filename === filename) {
+        currentGameData = null;
+        document.getElementById('review-viewer').style.display = 'none';
+        document.getElementById('empty-state').style.display = '';
+        const url = new URL(window.location);
+        url.searchParams.delete('game');
+        window.history.replaceState({}, '', url);
+    }
+    loadGamesList();
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+/** Open a game and mark its row active. */
+function selectGame(item, filename) {
+    document.querySelectorAll('.game-item').forEach(el => el.classList.remove('active'));
+    item.classList.add('active');
+
+    const url = new URL(window.location);
+    url.searchParams.set('game', filename);
+    window.history.pushState({}, '', url);
+
+    loadGame(filename);
+}
+
 /** One clickable game row inside a phase section. */
 function buildGameItem(game, phase) {
     const item = document.createElement('div');
@@ -198,16 +400,7 @@ function buildGameItem(game, phase) {
         `;
     }
 
-    item.addEventListener('click', () => {
-        document.querySelectorAll('.game-item').forEach(el => el.classList.remove('active'));
-        item.classList.add('active');
-
-        const url = new URL(window.location);
-        url.searchParams.set('game', game.filename);
-        window.history.pushState({}, '', url);
-
-        loadGame(game.filename);
-    });
+    item.addEventListener('click', () => selectGame(item, game.filename));
 
     return item;
 }
@@ -247,7 +440,56 @@ async function loadGame(filename) {
             winnerIcon = '⚪';
         }
 
-        if (data.phase === 'promotion') {
+        if (data.phase === 'human') {
+            const humanColor = data.human_color === 2 ? 2 : 1;
+            const humanIcon = humanColor === 1 ? '⚫' : '⚪';
+            const botIcon = humanColor === 1 ? '⚪' : '⚫';
+            const humanWon = data.winner === humanColor;
+
+            let outcomeStr, outcomeClass;
+            if (data.unfinished) {
+                outcomeStr = '⏸ Unfinished';
+                outcomeClass = 'outcome-neutral';
+            } else if (data.winner === 0) {
+                outcomeStr = '🤝 Draw';
+                outcomeClass = 'outcome-draw';
+            } else {
+                const how = data.resigned_by ? 'by resignation' : `(${resultText})`;
+                outcomeStr = humanWon ? `🎉 You Won ${how}` : `❌ Bot Won ${how}`;
+                outcomeClass = humanWon ? 'outcome-win' : 'outcome-loss';
+            }
+
+            const when = data.timestamp ? new Date(data.timestamp).toLocaleString() : '';
+            titleText = data.name && data.name.length ? data.name : 'Recorded Game · You vs Bot';
+            document.getElementById('review-meta').innerHTML = `
+                <span class="review-meta-pill ${outcomeClass}">${outcomeStr}</span>
+                <span class="review-meta-pill">You ${humanIcon} vs Bot ${botIcon}</span>
+                <span class="review-meta-pill">♟️ ${data.moves.length} moves</span>
+                <span class="review-meta-pill">⚖️ Komi ${komi}</span>
+                ${when ? `<span class="review-meta-pill">🕒 ${when}</span>` : ''}
+            `;
+        } else if (data.phase === 'match') {
+            const black = (data.black_player || {}).name || 'Black';
+            const white = (data.white_player || {}).name || 'White';
+            let outcomeStr = '🤝 Draw';
+            let outcomeClass = 'outcome-draw';
+            if (data.winner === 1 || data.winner === 2) {
+                const winnerName = data.winner === 1 ? black : white;
+                const how = data.resigned_by ? 'by resignation' : `(${resultText})`;
+                outcomeStr = `${winnerIcon} ${winnerName} won ${how}`;
+                outcomeClass = 'outcome-neutral';
+            }
+
+            const when = data.timestamp ? new Date(data.timestamp).toLocaleString() : '';
+            titleText = `${data.match_name || 'Bot vs Bot'} · Game ${(data.game_index || 0) + 1}`;
+            document.getElementById('review-meta').innerHTML = `
+                <span class="review-meta-pill ${outcomeClass}">${escapeHtml(outcomeStr)}</span>
+                <span class="review-meta-pill">⚫ ${escapeHtml(black)} vs ⚪ ${escapeHtml(white)}</span>
+                <span class="review-meta-pill">♟️ ${data.moves.length} moves</span>
+                <span class="review-meta-pill">⚖️ Komi ${komi}</span>
+                ${when ? `<span class="review-meta-pill">🕒 ${when}</span>` : ''}
+            `;
+        } else if (data.phase === 'promotion') {
             const candIcon = data.candidate_color === 1 ? '⚫' : '⚪';
             const champIcon = data.champion_color === 1 ? '⚫' : '⚪';
             const outcomeStr = data.winner === 0
@@ -333,7 +575,9 @@ function initWinrateChart(data) {
 
     // Default perspective: show the side whose strength is being judged — the
     // AI in eval games, the candidate in promotion matches; else Black.
-    if (data.phase === 'promotion' && (data.candidate_color === 1 || data.candidate_color === 2)) {
+    if (data.phase === 'human' && (data.human_color === 1 || data.human_color === 2)) {
+        winrateSide = data.human_color;
+    } else if (data.phase === 'promotion' && (data.candidate_color === 1 || data.candidate_color === 2)) {
         winrateSide = data.candidate_color;
     } else if (data.is_eval && (data.network_color === 1 || data.network_color === 2)) {
         winrateSide = data.network_color;

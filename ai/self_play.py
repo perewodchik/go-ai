@@ -31,7 +31,7 @@ from typing import List, Tuple, Dict, Optional, Callable
 from datetime import datetime
 
 from game.game_state import GameState, MOVE_PASS
-from game.board import BLACK, WHITE
+from game.board import BLACK, WHITE, opponent
 from game.scoring.base import get_scorer
 from ai.mcts import MCTS
 from ai.network import GoNetwork
@@ -55,6 +55,13 @@ def play_self_play_game(
     max_moves: int = 200,
     fpu_reduction: float = 0.35,
     value_target_outcome_weight: float = 0.6,
+    restrict_eye_fill: bool = False,
+    resign_enabled: bool = False,
+    resign_threshold: float = 0.90,
+    resign_consecutive: int = 4,
+    resign_min_move_factor: float = 1.0,
+    resign_both_sides: bool = True,
+    resign_playout_fraction: float = 0.1,
 ) -> Tuple[List[TrainingSample], dict]:
     """
     Play one complete self-play game and collect training data.
@@ -74,7 +81,24 @@ def play_self_play_game(
         temperature_final: Late-game temperature (greedy).
         device: Torch device.
         max_moves: Safety cap on game length.
-    
+        restrict_eye_fill: Hide own-two-eye-filling moves from the search (see
+            game/eyes.py). Both colours are the same network here, so this
+            applies to every move of the game.
+        resign_enabled: Stop the game early once one side's own search says it
+            is hopeless (the mercy rule — see the block comment below).
+        resign_threshold: Root value at or below -threshold counts as hopeless.
+            0.90 ≈ a 5% self-assessed win probability.
+        resign_consecutive: Consecutive own moves that must agree before the
+            game is stopped. Filters single-move value spikes.
+        resign_min_move_factor: Earliest resignation move, as a multiple of the
+            board area. 1.0 (the default) means no training sample can ever be
+            lost to a resignation — see below.
+        resign_both_sides: Also require the opponent's own last search to agree
+            that it is winning. Guards against one side's value head being
+            broken in a way that makes it resign won games.
+        resign_playout_fraction: Share of games that ignore the resignation and
+            play on, purely to measure how often it would have been wrong.
+
     Returns:
         (samples, game_record):
             samples: List of (state_tensor, mcts_policy, outcome) tuples.
@@ -88,8 +112,9 @@ def play_self_play_game(
         c_puct=c_puct,
         device=device,
         fpu_reduction=fpu_reduction,
+        restrict_eye_fill=restrict_eye_fill,
     )
-    
+
     # Collect training data as we play
     # Each entry: (state_tensor, mcts_policy, player_color)
     history = []
@@ -108,7 +133,46 @@ def play_self_play_game(
     # the network was latching onto.
     base_min_pass = int(board_size * 3.3)  # 29 moves on 9x9
     min_pass_move = max(1, base_min_pass + random.randint(-4, 6))
-    
+
+    # ------------------------------------------------------------------
+    # MERCY RULE (resignation)
+    #
+    # Once a side's own search has said it is lost for several moves running,
+    # the rest of the game is a foregone conclusion that still costs a full
+    # MCTS search per move. Stopping there is the cheapest way to buy more
+    # iterations per hour.
+    #
+    # WHY THE DEFAULT CANNOT COST TRAINING DATA: samples are only kept for the
+    # first `board_size²` moves (see max_training_moves below), so with
+    # resign_min_move_factor = 1.0 every sample-producing position has already
+    # been recorded before a resignation can fire. It also lands well past
+    # base_min_pass, so the short-game discard below still passes. The tail
+    # that gets cut was contributing nothing but wall-clock. Lower the factor
+    # and that stops being true — you start trading data for speed.
+    #
+    # WHAT IT CAN STILL COST: the outcome label. A game that ends by
+    # resignation is labelled from a PREDICTION, not from a played-out result,
+    # and that label is what every retained sample of the game trains on. A
+    # value head that wrongly despairs therefore gets to confirm its own
+    # mistake. Three defences, in increasing order of cost:
+    #   1. resign_consecutive  — ignore single-move value spikes.
+    #   2. resign_both_sides   — the winner must agree that it is winning, so
+    #      one broken value head is not enough to end a game.
+    #   3. resign_playout_fraction — play a share of games out anyway and
+    #      record whether the resignation would have been WRONG. That number
+    #      (false_resign_rate) is the only real evidence that the threshold is
+    #      set sanely; keep it under ~5%.
+    # ------------------------------------------------------------------
+    min_resign_move = int(round(resign_min_move_factor * board_size * board_size))
+    # Chosen per game so the measurement sample is unbiased.
+    resign_playout = resign_enabled and random.random() < resign_playout_fraction
+    resign_streak = {BLACK: 0, WHITE: 0}
+    last_root_value = {BLACK: None, WHITE: None}
+    resigned_color = None        # Colour that actually resigned (game stopped)
+    resign_move_num = None
+    would_resign_color = None    # First trigger in a playout game (game continued)
+    would_resign_move = None
+
     for move_num in range(max_moves):
         if state.is_over:
             break
@@ -130,7 +194,47 @@ def play_self_play_game(
             add_noise=True,  # Always add noise during training
             allow_pass=allow_pass,
         )
-        
+
+        # --- Mercy rule check (before the move is recorded or applied) ---
+        # Running it here means a resigning side never contributes a move it
+        # was never going to play, and `state.current_player` is still the
+        # resigning colour when we break out.
+        if resign_enabled:
+            mover = state.current_player
+            root_value = mcts.root_value
+            last_root_value[mover] = root_value
+            # The streak runs from the start of the game, not from
+            # min_resign_move. A side that has been hopeless for forty moves
+            # gets no further grace period once the gate opens — the gate is
+            # there to protect training data, not to restart the evidence.
+            if root_value <= -resign_threshold:
+                resign_streak[mover] += 1
+            else:
+                resign_streak[mover] = 0
+
+            opponent_value = last_root_value[opponent(mover)]
+            triggered = (
+                move_num >= min_resign_move
+                and resign_streak[mover] >= resign_consecutive
+                # The opponent has to have searched at least once for its
+                # opinion to exist at all — on move 0 it never has.
+                and (not resign_both_sides
+                     or (opponent_value is not None
+                         and opponent_value >= resign_threshold))
+            )
+
+            if triggered:
+                if resign_playout:
+                    # Measurement game: note the verdict, then play on so we
+                    # can find out whether it was right.
+                    if would_resign_color is None:
+                        would_resign_color = mover
+                        would_resign_move = move_num
+                else:
+                    resigned_color = mover
+                    resign_move_num = move_num
+                    break
+
         # Store training data (before applying the move)
         state_tensor = state.encode_for_nn()
         # Store the MCTS root evaluation alongside the position. It is the
@@ -161,16 +265,28 @@ def play_self_play_game(
                 # But if it does, pass instead.
                 state.play_pass()
     
-    # If game didn't end naturally, force two passes
-    if not state.is_over:
+    if resigned_color is not None:
+        # We broke out before playing, so the resigning colour is still to
+        # move. play_resign() hands the win to the opponent, and
+        # determine_winner() already honours state.resign_color.
+        state.play_resign()
+    elif not state.is_over:
+        # Game didn't end naturally — force two passes
         state.play_pass()
         if not state.is_over:
             state.play_pass()
-    
+
     # Determine winner
     scorer = get_scorer("chinese")
     winner_color, margin = scorer.determine_winner(state)
     black_score, white_score = scorer.score(state)
+
+    if resigned_color is not None:
+        # determine_winner() reports margin 0 for a resignation because the
+        # margin is undefined. The dashboard reads `margin` as a signed score
+        # difference, so give it the board score instead of a flat zero that
+        # would render every resigned game as a draw.
+        margin = abs(black_score - white_score)
     
     # Convert history into training samples with outcomes
     # Outcome is +1 if the player at that position won, -1 if lost, 0 for draw
@@ -217,8 +333,22 @@ def play_self_play_game(
         'white_score': white_score,
         'margin': margin,
         'timestamp': datetime.now().isoformat(),
+        # --- Mercy rule bookkeeping ---
+        # `resigned` marks a game whose outcome label is a PREDICTION rather
+        # than a played-out result. `false_resign` is the payload: on playout
+        # games the rule was overruled, so we know whether it would have
+        # thrown away a game the "hopeless" side went on to win.
+        'resigned': resigned_color is not None,
+        'resign_color': int(resigned_color) if resigned_color is not None else None,
+        'resign_move': resign_move_num,
+        'resign_playout': resign_playout,
+        'would_resign_color': (int(would_resign_color)
+                               if would_resign_color is not None else None),
+        'would_resign_move': would_resign_move,
+        'false_resign': (would_resign_color is not None
+                         and winner_color == would_resign_color),
     }
-    
+
     return samples, game_record
 
 
@@ -253,6 +383,13 @@ def run_self_play_batch(
     value_target_outcome_weight: float = 0.6,
     stop_checker: Optional[Callable[[], bool]] = None,
     num_workers: int = 4,
+    restrict_eye_fill: bool = False,
+    resign_enabled: bool = False,
+    resign_threshold: float = 0.90,
+    resign_consecutive: int = 4,
+    resign_min_move_factor: float = 1.0,
+    resign_both_sides: bool = True,
+    resign_playout_fraction: float = 0.1,
 ) -> List[TrainingSample]:
     """
     Run a batch of self-play games and return all training samples.
@@ -275,6 +412,11 @@ def run_self_play_batch(
         progress_callback: Called after each game with (game_num, total, game_record).
         stop_checker: Function returning True if training loop wants immediate stop.
         num_workers: Games to play concurrently (capped by num_games and CPU count).
+        restrict_eye_fill: Forbid own-two-eye fills in every game of the batch.
+        resign_*: Mercy rule settings, applied per game — see
+            play_self_play_game. Deliberately NOT used by the promotion gate or
+            the random-bot eval, where a wrong resignation would corrupt a
+            measurement rather than just one training game.
     
     Returns:
         List of all training samples from all games.
@@ -300,31 +442,60 @@ def run_self_play_batch(
             'device': device,
             'fpu_reduction': fpu_reduction,
             'value_target_outcome_weight': value_target_outcome_weight,
+            'restrict_eye_fill': restrict_eye_fill,
+            'resign_enabled': resign_enabled,
+            'resign_threshold': resign_threshold,
+            'resign_consecutive': resign_consecutive,
+            'resign_min_move_factor': resign_min_move_factor,
+            'resign_both_sides': resign_both_sides,
+            'resign_playout_fraction': resign_playout_fraction,
         })
     
     completed_games = 0
+    active_futures = {}  # future -> game_index
+    next_task_idx = 0
+
+    def _notify_progress(rec=None):
+        if not progress_callback:
+            return
+        active_nums = sorted([idx + 1 for idx in active_futures.values()])
+        try:
+            progress_callback(completed_games, num_games, rec, active_games=active_nums, num_workers=num_workers)
+        except TypeError:
+            try:
+                progress_callback(completed_games, num_games, rec, active_nums, num_workers)
+            except TypeError:
+                if rec is not None:
+                    progress_callback(completed_games, num_games, rec)
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(_play_worker, task): i for i, task in enumerate(tasks)}
-        pending = set(futures.keys())
-        
-        while pending:
+        # Submit initial batch up to num_workers
+        while next_task_idx < min(num_workers, num_games):
+            f = executor.submit(_play_worker, tasks[next_task_idx])
+            active_futures[f] = next_task_idx
+            next_task_idx += 1
+
+        # Initial notification of active games
+        _notify_progress(None)
+
+        while active_futures:
             if stop_checker and stop_checker():
                 executor.shutdown(wait=False, cancel_futures=True)
                 break
-            
-            done, pending = concurrent.futures.wait(
-                pending, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
+
+            done, _ = concurrent.futures.wait(
+                set(active_futures.keys()), timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
             )
-            
+
             for future in done:
-                game_index = futures[future]
-                
+                game_index = active_futures.pop(future)
+
                 try:
                     samples, record = future.result()
                 except Exception as e:
                     print(f"Worker failed: {e}")
-                    continue
-                
+                    samples, record = [], {'moves': [], 'winner': 0, 'num_moves': 0, 'elapsed_seconds': 0}
+
                 record['iteration'] = iteration
                 record['game_index'] = game_index
 
@@ -333,11 +504,17 @@ def run_self_play_batch(
                 # Store every Nth game for replay in the web UI
                 if completed_games % game_store_every_n == 0:
                     save_game(games_dir, iteration, PHASE_SELF_PLAY, game_index, record)
-                
+
                 completed_games += 1
-                
-                # Report progress
-                if progress_callback:
-                    progress_callback(completed_games, num_games, record)
-    
+
+                # Submit next task if available
+                if next_task_idx < num_games and not (stop_checker and stop_checker()):
+                    new_f = executor.submit(_play_worker, tasks[next_task_idx])
+                    active_futures[new_f] = next_task_idx
+                    next_task_idx += 1
+
+                # Report progress after game completion
+                _notify_progress(record)
+
     return all_samples
+

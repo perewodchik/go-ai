@@ -39,7 +39,12 @@ function buildParamSlidersHTML(prefix, boundsData, values = {}) {
     const { categories, bounds } = boundsData;
 
     return categories.map(cat => {
-        const catBounds = Object.values(bounds).filter(b => b.category === cat.key);
+        // Sort by the explicit `order` field, never by key: the bounds arrive as
+        // a JSON object and Flask alphabetises its keys, which put Temp Final
+        // ahead of Temp Init.
+        const catBounds = Object.values(bounds)
+            .filter(b => b.category === cat.key)
+            .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
         if (!catBounds.length) return '';
 
         const slidersHTML = catBounds.map(spec => {
@@ -84,9 +89,10 @@ function buildParamSlidersHTML(prefix, boundsData, values = {}) {
                            value="${initVal}">
                     <div class="param-slider-meta">
                         <span>${spec.min}</span>
-                        <span class="param-hint" title="${spec.hint}">${spec.hint}</span>
                         <span>${spec.max}</span>
                     </div>
+                    <div class="param-hint" title="${spec.hint}">${spec.hint}</div>
+                    <div class="param-slider-warn" id="${prefix}-${spec.key}-warn" hidden></div>
                 </div>
             `;
         }).join('');
@@ -102,6 +108,52 @@ function buildParamSlidersHTML(prefix, boundsData, values = {}) {
     }).join('');
 }
 
+// Phases whose games are dealt out to the shared worker pool. A phase finishes
+// only when its slowest game does, so a game count that is not a multiple of
+// the worker count leaves workers idle through the final wave.
+const WORKER_POOL_PHASES = {
+    num_self_play_games: 'Self-play',
+    gate_games: 'Gate',
+    eval_games: 'Eval',
+};
+
+function updateWorkerBalance(prefix, boundsData) {
+    const workerInput = document.getElementById(`${prefix}-num_parallel_workers`);
+    if (!workerInput) return;
+
+    // The backend also caps workers at the host's core count, so mirror that
+    // here — otherwise we would report a wave layout that never happens.
+    const cpuCount = boundsData.cpu_count || 8;
+    const workers = Math.min(Math.round(parseFloat(workerInput.value)), cpuCount);
+    const gateOn = document.getElementById(`${prefix}-gate_enabled`);
+
+    Object.entries(WORKER_POOL_PHASES).forEach(([key, label]) => {
+        const warn = document.getElementById(`${prefix}-${key}-warn`);
+        const input = document.getElementById(`${prefix}-${key}`);
+        if (!warn || !input) return;
+
+        const games = Math.round(parseFloat(input.value));
+        const effective = Math.min(workers, games);
+        const phaseSkipped = (key === 'gate_games' && gateOn && !gateOn.checked)
+            || games <= 0;
+
+        if (phaseSkipped || effective <= 1 || games % effective === 0) {
+            warn.hidden = true;
+            warn.textContent = '';
+            return;
+        }
+
+        const waves = Math.ceil(games / effective);
+        const lastWave = games % effective;
+        const idle = effective - lastWave;
+        warn.hidden = false;
+        warn.textContent =
+            `⚠ ${games} games over ${effective} workers = ${waves} waves; ` +
+            `the last runs ${lastWave} game${lastWave === 1 ? '' : 's'} ` +
+            `with ${idle} worker${idle === 1 ? '' : 's'} idle.`;
+    });
+}
+
 function bindParamSliders(prefix, boundsData) {
     if (!boundsData || !boundsData.bounds) return;
     const { bounds } = boundsData;
@@ -113,9 +165,12 @@ function bindParamSliders(prefix, boundsData) {
             input.addEventListener('input', () => {
                 const raw = spec.type === 'bool' ? input.checked : input.value;
                 badge.textContent = formatParamValue(spec.key, raw, spec);
+                updateWorkerBalance(prefix, boundsData);
             });
         }
     });
+
+    updateWorkerBalance(prefix, boundsData);
 }
 
 function extractParamSliderValues(prefix, boundsData) {
@@ -154,4 +209,6 @@ function setParamSliderValues(prefix, boundsData, values = {}) {
         }
         if (badge) badge.textContent = formatParamValue(spec.key, val, spec);
     });
+
+    updateWorkerBalance(prefix, boundsData);
 }

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Go AI — Mathematical Guide & Training Diagnostics{% endblock %}
+{% block title %}Go AI — Architecture, Mathematics & Parameter Guide{% endblock %}
 
 {% block head %}
 <!-- KaTeX CDN for fast LaTeX formula rendering -->
@@ -11,1311 +11,1249 @@
 
 {% block content %}
 <div class="info-page">
-    <h1 class="page-title">Model Architecture, Mathematics & Diagnostic Guide</h1>
-    <p class="info-intro">
-        Understand how your Go AI learns from first principles. This guide details the 
-        <em>mathematical formulas</em> behind each step of the AlphaZero-style self-play loop, 
-        what happens during neural network updates, and <em>how to diagnose issues</em> when training stalls or behaves unexpectedly.
-    </p>
-
-    <!-- Quick recipe -->
-    <div class="info-callout glass">
-        <div class="info-callout-icon">🚀</div>
-        <div>
-            <h3>Quick Start Settings</h3>
-            <p>
-                For fast feedback on a standard laptop: select <strong>9×9 board</strong>, <strong>Chinese rules</strong>, 
-                <strong>Small network (4 blocks × 64 filters)</strong>, <strong>komi 6.5</strong>, 
-                <strong>MCTS Simulations 50–100</strong>, and <strong>Self-Play Games 5–10 per iteration</strong>. 
-                This setup demonstrates visible tactical learning within 1–2 hours.
+    <!-- Header -->
+    <header class="info-header">
+        <div class="info-header-content">
+            <h1 class="page-title">Knowledge Hub & Diagnostics</h1>
+            <p class="info-intro">
+                Deep dive into your Go AI's AlphaZero architecture, mathematical mechanics, 
+                hyperparameter tunings, and real-time training diagnostics.
             </p>
         </div>
-    </div>
+        <div class="info-quick-pill glass">
+            <span class="quick-pill-icon">🚀</span>
+            <div class="quick-pill-text">
+                <strong>Recommended Setup (9×9):</strong> Small Net (4×64) · MCTS 50–100 · Komi 6.5 · Chinese Rules · Gate ON (20 games, 55%).
+            </div>
+        </div>
+    </header>
 
-    <!-- Table of contents -->
-    <nav class="info-toc">
-        <a href="#board-size">Board Size</a>
-        <a href="#komi">Komi</a>
-        <a href="#ruleset">Ruleset</a>
-        <a href="#network-size">Network Size</a>
-        <a href="#self-play-games">Self-Play Games</a>
-        <a href="#eval-games">Eval Games</a>
-        <a href="#parallel-workers">Parallel Workers</a>
-        <a href="#mcts">MCTS Simulations</a>
-        <a href="#cpuct">c_puct</a>
-        <a href="#learning-rate">Learning Rate</a>
-        <a href="#temperature">Temperature & Decay</a>
-        <a href="#math-deep-dive">Mathematical Deep Dive</a>
-        <a href="#mcts-deep-dive">What is MCTS?</a>
-        <a href="#territory-algorithm">Territory Estimation</a>
-        <a href="#training-lifecycle">Step-by-Step Lifecycle</a>
-        <a href="#training-health">Training Health & Timeline</a>
-        <a href="#gate">Champion vs Candidate</a>
-        <a href="#gate-games">Gate Settings</a>
-        <a href="#collapse-guard">Collapse Guard</a>
-        <a href="#diagnostics">Diagnostics & Troubleshooting</a>
+    <!-- Tab Navigation Bar -->
+    <nav class="info-tab-bar glass">
+        <button class="info-tab-btn active" data-tab="params">
+            <span class="tab-icon">⚙️</span>
+            <span class="tab-label">Parameters & Tuning</span>
+        </button>
+        <button class="info-tab-btn" data-tab="math">
+            <span class="tab-icon">🔬</span>
+            <span class="tab-label">Math & Architecture</span>
+        </button>
+        <button class="info-tab-btn" data-tab="gate">
+            <span class="tab-icon">🛡️</span>
+            <span class="tab-label">Gate & Safeguards</span>
+        </button>
+        <button class="info-tab-btn" data-tab="diagnostics">
+            <span class="tab-icon">🩺</span>
+            <span class="tab-label">Diagnostics & Health</span>
+        </button>
     </nav>
 
     <!-- =================================================================== -->
-    <!-- SECTION 1: PARAMETER GUIDE                                          -->
+    <!-- TAB 1: PARAMETERS & TUNING REFERENCE                                -->
     <!-- =================================================================== -->
-    
-    <!-- Board Size -->
-    <section id="board-size" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Board Size</h3>
-            <span class="rec-pill">Recommended: 9×9</span>
-        </div>
-        <p class="param-desc">
-            The $N \times N$ grid the AI learns on. Game complexity grows exponentially with board area ($N^2$).
-            Smaller boards have vastly fewer possible positions ($\approx 10^{38}$ for 9×9 vs $\approx 10^{170}$ for 19×19),
-            allowing the model to reach high strength in hours instead of weeks.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Bigger (13–19)</span>
-                Full Go strategy with complex opening frameworks (Fuseki) — but self-play games get much longer and require a larger network with significantly more MCTS simulations.
+    <div id="tab-params" class="info-tab-pane active">
+        <!-- Search and Filter Toolbar -->
+        <div class="info-toolbar glass">
+            <div class="info-search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="param-search-input" placeholder="Search parameters (e.g. simulations, temperature, gate, workers)..." autocomplete="off">
+                <button id="param-search-clear" class="search-clear-btn" style="display: none;">✕</button>
             </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Smaller (7–9)</span>
-                Rapid training loop with tactical battles. 7×7 is ideal for instant verification; 9×9 is the sweet spot for watching full Go concepts emerge quickly.
+            <div class="info-cat-pills">
+                <button class="cat-pill active" data-cat="all">All</button>
+                <button class="cat-pill" data-cat="mcts">MCTS & Search</button>
+                <button class="cat-pill" data-cat="temperature">Temperature</button>
+                <button class="cat-pill" data-cat="volume">Volume</button>
+                <button class="cat-pill" data-cat="gate">Gate</button>
+                <button class="cat-pill" data-cat="compute">Compute</button>
+                <button class="cat-pill" data-cat="restrictions">Restrictions</button>
+                <button class="cat-pill" data-cat="resign">Mercy Rule</button>
+                <button class="cat-pill" data-cat="network">Network</button>
             </div>
         </div>
-        <div class="param-meta">Options 7 · 9 · 13 · 15 · 19 &nbsp;·&nbsp; ⚠ Immutable after model creation.</div>
-    </section>
 
-    <!-- Komi -->
-    <section id="komi" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Komi</h3>
-            <span class="rec-pill">Recommended: 6.5</span>
-        </div>
-        <p class="param-desc">
-            Bonus points awarded to White to offset Black's first-move initiative. The fractional $.5$ prevents ties (jigo).
-            Proper komi ensures both players have an equal expected value from the initial position ($v(s_0) \approx 0$).
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Too high (> 7.5 on 9×9)</span>
-                White becomes inherently favored; value head learns a positive bias toward White regardless of play quality.
+        <!-- Interactive Network Preset Visualizer -->
+        <section id="preset-explorer-sec" class="param-card glass" data-category="network" data-keywords="network architecture preset resnet filters blocks capacity size">
+            <div class="param-head">
+                <div>
+                    <h3 class="param-name">Network Architecture Presets</h3>
+                    <span class="param-sub">Residual body depth & width ($K \text{ blocks} \times C \text{ filters}$)</span>
+                </div>
+                <span class="rec-pill">Recommended: Small</span>
             </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Too low (< 5.5 on 9×9)</span>
-                Black wins almost every game; the network gets skewed feedback on opening moves.
+            <p class="param-desc">
+                Select a preset below to compare parameter counts, memory footprints, and hardware targets.
+            </p>
+            
+            <div class="preset-pill-selector">
+                {% for p in network_presets %}
+                <button type="button" class="preset-select-btn {% if p.key == 'small' %}active{% endif %}"
+                        data-preset="{{ p.key }}"
+                        data-label="{{ p.label }}"
+                        data-blocks="{{ p.num_res_blocks }}"
+                        data-filters="{{ p.num_filters }}"
+                        data-hidden="{{ p.value_head_hidden }}"
+                        data-params="{{ "{:,}".format(p.approx_params) }}"
+                        data-note="{{ p.note }}">
+                    <span class="preset-btn-name">{{ p.label }}</span>
+                    <span class="preset-btn-sub">{{ p.num_res_blocks }}B × {{ p.num_filters }}F</span>
+                </button>
+                {% endfor %}
             </div>
-        </div>
-        <div class="param-meta">Typical: 6.5 (9×9) or 7.5 (19×19) &nbsp;·&nbsp; Keep the .5 fractional value.</div>
-    </section>
 
-    <!-- Ruleset -->
-    <section id="ruleset" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Ruleset</h3>
-            <span class="rec-pill">Recommended: Chinese</span>
-        </div>
-        <p class="param-desc">
-            Scoring algorithm for game completion. <strong>Chinese rules (Area Scoring)</strong> count alive stones plus enclosed territory ($S = \text{Stones} + \text{Territory}$). 
-            <strong>Japanese rules (Territory Scoring)</strong> count territory plus captured stones.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Chinese</span>
-                Clean, mathematically deterministic scoring without requiring manual dead-stone agreement. Perfect for autonomous self-play.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Japanese</span>
-                Traditional counting style, but requires complex dead-stone resolution phases.
-            </div>
-        </div>
-        <div class="param-meta">
-            Note: Self-play training target always computes rewards using Chinese Area Scoring internally.
-        </div>
-    </section>
-
-    <!-- Network Size -->
-    <section id="network-size" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Network Size</h3>
-            <span class="rec-pill">Recommended: Small</span>
-        </div>
-        <p class="param-desc">
-            The depth and width of the residual body ($K \text{ residual blocks} \times C \text{ filters}$). 
-            Capacity dictates maximum policy representation and pattern recognition ability.
-        </p>
-        <div class="table-scroll">
-            <table class="preset-table">
-                <thead>
-                    <tr><th>Preset</th><th>Blocks × Filters</th><th>≈ Params</th><th>Best for</th></tr>
-                </thead>
-                <tbody>
-                    {% for p in network_presets %}
-                    <tr>
-                        <td><strong>{{ p.label }}</strong></td>
-                        <td>{{ p.num_res_blocks }} × {{ p.num_filters }}</td>
-                        <td>{{ "{:,}".format(p.approx_params) }}</td>
-                        <td>{{ p.note }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Larger (Medium/Large)</span>
-                Higher skill ceiling and sub-tactical depth — but requires exponentially more self-play data and GPU throughput.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Smaller (Tiny/Small)</span>
-                Fast inference during MCTS lookahead; enables quick iterations on consumer hardware.
-            </div>
-        </div>
-        <div class="param-meta">⚠ Immutable after creation — changing architecture requires initializing a new model.</div>
-    </section>
-
-    <!-- Self-Play Games -->
-    <section id="self-play-games" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Self-Play Games <span class="param-sub">per iteration</span></h3>
-            <span class="rec-pill">Recommended: 5–15</span>
-        </div>
-        <p class="param-desc">
-            The number of fresh games generated by MCTS self-play prior to network gradient updates. 
-            All positions are appended to a rolling Replay Buffer of up to 50,000 states.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">More (15–50)</span>
-                Prevents overfitting to recent moves, providing smooth, stable gradient steps — at the cost of longer iteration times.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Fewer (1–5)</span>
-                Fast iteration turnarounds, but higher variance in value targets and risk of policy oscillation.
-            </div>
-        </div>
-        <div class="param-meta">Range 1–100 &nbsp;·&nbsp; Default: 5</div>
-    </section>
-
-    <!-- Eval Games -->
-    <section id="eval-games" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Eval Games <span class="param-sub">vs random bot</span></h3>
-            <span class="rec-pill">Recommended: 4–10</span>
-        </div>
-        <p class="param-desc">
-            Benchmark games played against a uniform random bot after each training iteration to evaluate win rate $W$ and update Elo.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">More (10–20)</span>
-                Reduces variance in win-rate metrics and gives tight Elo confidence intervals.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Fewer (2–4)</span>
-                Saves time; slight statistical noise in benchmark metrics.
-            </div>
-        </div>
-        <div class="param-meta">Range 1–100 &nbsp;·&nbsp; Default: 4</div>
-    </section>
-
-    <!-- Parallel Workers -->
-    <section id="parallel-workers" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Parallel Workers <span class="param-sub">all game-playing phases</span></h3>
-            <span class="rec-pill">Recommended: 4–6</span>
-        </div>
-        <p class="param-desc">
-            Every phase that plays games plays them across a pool of worker processes, because
-            games are independent of one another. One setting governs all three:
-        </p>
-        <div class="table-scroll">
-            <table class="preset-table">
-                <thead>
-                    <tr><th>Phase</th><th>Games</th><th>Cost per move</th></tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><strong>Self-play</strong></td>
-                        <td>Self-Play Games</td>
-                        <td>One MCTS search — generates the training data.</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Promotion gate</strong></td>
-                        <td>Gate Games</td>
-                        <td><strong>Two</strong> MCTS searches (one per network) — the most expensive phase.</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Random eval</strong></td>
-                        <td>Eval Games</td>
-                        <td>One MCTS search; the random bot's moves are free.</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-        <p class="param-desc">
-            All three run on <strong>CPU</strong>, so none of them is affected by the MPS
-            single-process constraint — the trainer hands them its CPU-resident champion, not
-            the MPS training network. The effective count is
-            $\min(\text{workers},\ \text{games in that phase},\ \text{CPU cores})$, so raising
-            it past your game count does nothing.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">More (6–8)</span>
-                A phase finishes only when its <em>slowest</em> game does, so leaving cores idle
-                costs more than it looks. Measured on an 8-core M2 (4P + 4E), 8 gate games:
-                126s at 4 workers, 83s at 6, 78s at 8.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Fewer (1–3)</span>
-                Leaves headroom for the web server and anything else you are running, and runs
-                cooler on a fanless laptop. 1 is the safe fallback if process pools misbehave.
-            </div>
-        </div>
-        <div class="param-meta">
-            Range 1–8 &nbsp;·&nbsp; Default: 4 &nbsp;·&nbsp; Each worker is a separate process
-            holding its own copy of the network (~300–400 MB), so 8 workers costs a few GB of RAM.
-        </div>
-    </section>
-
-    <!-- MCTS Simulations -->
-    <section id="mcts" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">MCTS Simulations <span class="param-sub">per move</span></h3>
-            <span class="rec-pill">Recommended: 50–200</span>
-        </div>
-        <p class="param-desc">
-            Number of search tree expansion cycles ($M$) performed for every single move decision. 
-            <strong>This is the single most effective control parameter for move quality vs search time.</strong>
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Higher (100–400)</span>
-                MCTS creates sharp, highly accurate search target distributions $\boldsymbol{\pi}$, accelerating neural network learning per iteration.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Lower (< 30)</span>
-                Search tree is too shallow; move visit counts remain near-uniform, causing policy loss stagnation.
-            </div>
-        </div>
-        <div class="param-meta">Range 10–1000 &nbsp;·&nbsp; Default: 50 &nbsp;·&nbsp; Laptop sweet spot: 50–150</div>
-    </section>
-
-    <!-- c_puct -->
-    <section id="cpuct" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">c_puct <span class="param-sub">exploration constant</span></h3>
-            <span class="rec-pill">Recommended: 1.5</span>
-        </div>
-        <p class="param-desc">
-            Controls the balance between exploring unvisited candidate moves (prior $P(s,a)$) vs exploiting high-value lines ($Q(s,a)$) in the PUCT search formula.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Higher (2.0–3.0)</span>
-                Encourages wider exploration of alternative branches; helpful early in training to prevent premature convergence.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Lower (0.5–1.0)</span>
-                Focuses search compute strictly on the network's top-ranked candidate move.
-            </div>
-        </div>
-        <div class="param-meta">Normal range: 1.0–2.0 &nbsp;·&nbsp; Default: 1.5</div>
-    </section>
-
-    <!-- Learning Rate -->
-    <section id="learning-rate" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Learning Rate</h3>
-            <span class="rec-pill">Recommended: 0.002</span>
-        </div>
-        <p class="param-desc">
-            The gradient step magnitude $\eta$ for the Adam optimizer. Managed automatically via a Cosine Annealing learning rate schedule.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Too high (> 0.005)</span>
-                Gradient divergence, policy loss spikes, or NaN values in loss calculations.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Too low (< 0.0003)</span>
-                Excessively slow parameter updates; network struggles to overcome initial randomized state.
-            </div>
-        </div>
-        <div class="param-meta">Typical: 0.001–0.003 &nbsp;·&nbsp; Default: 0.002</div>
-    </section>
-
-    <!-- Temperature & Decay Schedule -->
-    <section id="temperature" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Temperature ($\tau$) & Smooth Decay Schedule</h3>
-            <span class="rec-pill">Recommended: Init 0.8 → Final 0.1 (30 moves)</span>
-        </div>
-        <p class="param-desc">
-            Temperature controls move randomness during self-play according to $\pi_a \propto N(s,a)^{1/\tau}$. 
-            Higher temperature ($\tau \approx 0.8–1.0$) promotes opening exploration, while lower temperature ($\tau \approx 0.1$) focuses search on peak visit actions in the mid/late-game.
-        </p>
-        <div class="formula-box">
-            $$\text{Smooth Decay: } \tau(t) = \tau_{\text{init}} + \min\left(1.0, \frac{t}{T_{\text{thresh}}}\right) \cdot (\tau_{\text{final}} - \tau_{\text{init}})$$
-        </div>
-        <p class="param-desc">
-            <strong>Why Smooth Decay Matters (Avoiding Early Collapses & Pass Locks):</strong><br>
-            If temperature drops off a cliff (a hard step threshold like dropping to $0.001$ at move 15), MCTS move selection becomes 100% rigid mid-fight. If the network hasn't yet learned tactical captures or if <code>MOVE_PASS</code> receives even 1 or 2 visits during search, both bots rigidly pick <code>PASS</code> in back-to-back turns — prematurely ending the game at move 50–60 with 1-liberty groups still uncaptured!
-            <br><br>
-        <p class="param-desc">
-            <strong>Board Size Scaling for Temp Threshold ($T_{\text{thresh}}$):</strong><br>
-            The threshold should scale to ~50% of average game length:
-            <ul>
-                <li><strong>9×9 Board (Avg ~50 moves total):</strong> $T_{\text{thresh}} = 30 \text{ moves}$. By move 35–40, the board is in endgame mode where precision is needed to close boundaries without blundering.</li>
-                <li><strong>13×13 Board (Avg ~110 moves total):</strong> $T_{\text{thresh}} = 50–60 \text{ moves}$.</li>
-                <li><strong>19×19 Board (Avg ~200 moves total):</strong> $T_{\text{thresh}} = 80–100 \text{ moves}$.</li>
-            </ul>
-        </p>
-        <div class="param-meta">Configurable per model in Advanced Settings &nbsp;·&nbsp; Defaults: Init 0.8, Final 0.1, Threshold 30 moves (9×9)</div>
-    </section>
-
-    <!-- =================================================================== -->
-    <!-- SECTION 2: MATHEMATICAL DEEP DIVE                                   -->
-    <!-- =================================================================== -->
-    <h2 id="math-deep-dive" class="section-divider-title">
-        <span>🔬</span> Under the Hood: Detailed Mathematical Workflow
-    </h2>
-    <p class="info-intro">
-        The AlphaZero architecture consists of a dual-head Residual Neural Network $f_\theta(s) = (\boldsymbol{p}, v)$ guided by Monte Carlo Tree Search (MCTS). Below is the exact step-by-step mathematical formulation implemented in the system.
-    </p>
-
-    <!-- Visual Stepper -->
-    <section id="training-lifecycle" class="param-card glass">
-        <h3 class="param-name" style="margin-bottom: 1rem;">Complete Iteration Lifecycle</h3>
-        <div class="lifecycle-grid">
-            <div class="lifecycle-step">
-                <div class="lifecycle-step-num">Step 1</div>
-                <div class="lifecycle-step-title">State Encoding</div>
-                <div class="lifecycle-step-desc">
-                    Board position $s_t$ converted into a multi-plane binary spatial tensor $X \in \mathbb{R}^{10 \times N \times N}$.
+            <!-- Dynamic Preset Card Details -->
+            <div id="preset-live-details" class="preset-preview-box">
+                <div class="preset-preview-grid">
+                    <div class="preview-stat">
+                        <span class="stat-label">Architecture</span>
+                        <strong id="prev-arch" class="stat-val">4 blocks × 64 filters</strong>
+                    </div>
+                    <div class="preview-stat">
+                        <span class="stat-label">Approx Parameters</span>
+                        <strong id="prev-params" class="stat-val" style="color: var(--accent-light);">320,701</strong>
+                    </div>
+                    <div class="preview-stat">
+                        <span class="stat-label">Hidden Value Layer</span>
+                        <strong id="prev-hidden" class="stat-val">64 units</strong>
+                    </div>
+                    <div class="preview-stat">
+                        <span class="stat-label">Target Hardware / Speed</span>
+                        <span id="prev-note" class="stat-val stat-badge">Default — fast 9×9 on Apple Silicon / GPU</span>
+                    </div>
                 </div>
             </div>
-            <div class="lifecycle-step">
-                <div class="lifecycle-step-num">Step 2</div>
-                <div class="lifecycle-step-title">Dual NN Forward Pass</div>
-                <div class="lifecycle-step-desc">
-                    ResNet computes prior move probabilities $\boldsymbol{p}_\theta(a|s)$ and position outcome prediction $v_\theta(s) \in [-1, 1]$.
-                </div>
-            </div>
-            <div class="lifecycle-step">
-                <div class="lifecycle-step-num">Step 3</div>
-                <div class="lifecycle-step-title">MCTS PUCT Search</div>
-                <div class="lifecycle-step-desc">
-                    Runs $M$ simulations using UCB selection, Dirichlet root noise, leaf evaluation, and value backpropagation.
-                </div>
-            </div>
-            <div class="lifecycle-step">
-                <div class="lifecycle-step-num">Step 4</div>
-                <div class="lifecycle-step-title">Action & Policy Target</div>
-                <div class="lifecycle-step-desc">
-                    Action $a_t$ sampled from temperature-scaled visit distribution $\boldsymbol{\pi}$. State triple $(s_t, \boldsymbol{\pi}_t, z_t)$ sent to buffer.
-                </div>
-            </div>
-            <div class="lifecycle-step">
-                <div class="lifecycle-step-num">Step 5</div>
-                <div class="lifecycle-step-title">Loss & Gradient Step</div>
-                <div class="lifecycle-step-desc">
-                    Network optimized on mini-batches via Adam on combined Loss $\mathcal{L} = (z - v)^2 - \boldsymbol{\pi}^T \log \boldsymbol{p} + c\|\boldsymbol{\theta}\|^2$.
-                </div>
-            </div>
-            <div class="lifecycle-step">
-                <div class="lifecycle-step-num">Step 6</div>
-                <div class="lifecycle-step-title">Eval & Elo Benchmark</div>
-                <div class="lifecycle-step-desc">
-                    Model benchmarked in $E$ evaluation games vs random bot to compute win rate $W$ and updated Elo rating.
-                </div>
-            </div>
-        </div>
-    </section>
 
-    <!-- Formula Card 1: Input Encoding -->
-    <div class="math-card">
-        <div class="math-card-header">
-            <div class="math-card-title">1. Spatial Input State Representation</div>
-            <span class="step-badge">Tensor $X \in \mathbb{R}^{10 \times N \times N}$</span>
-        </div>
-        <div class="formula-explanation">
-            At turn $t$, the game board state $s_t$ is encoded into a 10-plane binary feature tensor $X(s)$:
-        </div>
-        <div class="formula-box">
-            $$X(s) = \left[ X_{\text{player}}, X_{\text{opp}}, X_{\text{lib}_1}^P, X_{\text{lib}_2}^P, X_{\text{lib}_{\ge3}}^P, X_{\text{lib}_1}^O, X_{\text{lib}_2}^O, X_{\text{lib}_{\ge3}}^O, X_{\text{ko}}, X_{\text{turn}} \right]$$
-        </div>
-        <div class="formula-explanation">
-            <ul>
-                <li><strong>Planes 0–1 ($X_{\text{player}}, X_{\text{opp}}$):</strong> Binary stone positions for current player and opponent ($1$ if stone present, $0$ otherwise).</li>
-                <li><strong>Planes 2–4 ($X_{\text{lib}_k}^P$):</strong> Liberty count buckets for current player's stone chains (chains with 1, 2, or $\ge 3$ liberties).</li>
-                <li><strong>Planes 5–7 ($X_{\text{lib}_k}^O$):</strong> Liberty count buckets for opponent stone chains.</li>
-                <li><strong>Plane 8 ($X_{\text{ko}}$):</strong> Illegal Ko move mask (prevents infinite legal move loops).</li>
-                <li><strong>Plane 9 ($X_{\text{turn}}$):</strong> Player color plane ($1$ for Black, $0$ for White).</li>
-            </ul>
-        </div>
+            <details class="param-details">
+                <summary class="details-summary">View Capacity Tradeoffs & Preset Table</summary>
+                <div class="table-scroll" style="margin-top: 0.8rem;">
+                    <table class="preset-table">
+                        <thead>
+                            <tr><th>Preset</th><th>Blocks × Filters</th><th>Hidden Head</th><th>≈ Params</th><th>Best for</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for p in network_presets %}
+                            <tr>
+                                <td><strong>{{ p.label }}</strong></td>
+                                <td>{{ p.num_res_blocks }} × {{ p.num_filters }}</td>
+                                <td>{{ p.value_head_hidden }}</td>
+                                <td>{{ "{:,}".format(p.approx_params) }}</td>
+                                <td>{{ p.note }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <div class="tradeoff-grid">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">Larger (Medium/Large/Huge)</span>
+                        Higher skill ceiling and sub-tactical depth — requires exponentially more self-play data and compute.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Smaller (Tiny/Small)</span>
+                        Blazing fast MCTS forward passes; ideal for rapid iterations on consumer laptops.
+                    </div>
+                </div>
+            </details>
+            <div class="param-meta">⚠ Immutable after model creation — architecture cannot be resized mid-run.</div>
+        </section>
+
+        <!-- Board Size -->
+        <section id="board-size" class="param-card glass" data-category="mcts" data-keywords="board size grid 7x7 9x9 13x13 19x19 area dimension">
+            <div class="param-head">
+                <h3 class="param-name">Board Size</h3>
+                <span class="rec-pill">Recommended: 9×9</span>
+            </div>
+            <p class="param-desc">
+                The $N \times N$ grid the AI learns on. Game state complexity grows exponentially ($10^{38}$ for 9×9 vs $10^{170}$ for 19×19). 
+                Smaller boards reach high tactical strength in hours.
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Sizing Tradeoffs</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">Bigger (13–19)</span>
+                        Full strategic framework with Fuseki opening play — self-play games take longer and need larger network capacity.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Smaller (7–9)</span>
+                        Rapid iteration loops with sharp tactical fights. 7×7 verifies code instantly; 9×9 is the sweet spot for learning full Go concepts quickly.
+                    </div>
+                </div>
+            </details>
+            <div class="param-meta">Options: 7 · 9 · 13 · 15 · 19 &nbsp;·&nbsp; ⚠ Immutable after model creation.</div>
+        </section>
+
+        <!-- Komi -->
+        <section id="komi" class="param-card glass" data-category="mcts" data-keywords="komi handicap white balance compensation points">
+            <div class="param-head">
+                <h3 class="param-name">Komi</h3>
+                <span class="rec-pill">Recommended: 6.5 (9×9) / 7.5 (19×19)</span>
+            </div>
+            <p class="param-desc">
+                Compensation points given to White for moving second. The fractional $.5$ prevents ties (jigo) and maintains balanced initial position evaluation ($v(s_0) \approx 0$).
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Komi Tradeoffs</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">Too high (> 7.5 on 9×9)</span>
+                        White is structurally favored; value head learns positive White bias regardless of move quality.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Too low (< 5.5 on 9×9)</span>
+                        Black dominates almost every game; value head skews opening move evaluations toward Black.
+                    </div>
+                </div>
+            </details>
+            <div class="param-meta">Typical: 6.5 (9×9), 7.5 (19×19) &nbsp;·&nbsp; Always keep fractional .5.</div>
+        </section>
+
+        <!-- Ruleset -->
+        <section id="ruleset" class="param-card glass" data-category="mcts" data-keywords="ruleset scoring chinese japanese area territory">
+            <div class="param-head">
+                <h3 class="param-name">Ruleset & Scoring</h3>
+                <span class="rec-pill">Recommended: Chinese (Area)</span>
+            </div>
+            <p class="param-desc">
+                <strong>Chinese rules (Area Scoring)</strong> count alive stones plus enclosed territory ($S = \text{Stones} + \text{Territory}$). 
+                <strong>Japanese rules (Territory Scoring)</strong> count empty territory plus captured stones.
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Scoring Tradeoffs</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">Chinese Area Scoring</span>
+                        Deterministic and mathematically clean without requiring manual dead-stone agreement phases. Ideal for autonomous reinforcement learning.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Japanese Territory Scoring</span>
+                        Traditional human scoring style, but requires complex dispute resolution for unremoved dead stones.
+                    </div>
+                </div>
+            </details>
+            <div class="param-meta">Self-play training target always uses Chinese Area Scoring internally.</div>
+        </section>
+
+        <!-- MCTS Simulations -->
+        <section id="mcts" class="param-card glass" data-category="mcts" data-keywords="mcts simulations search depth lookahead puct fpu auto scale">
+            <div class="param-head">
+                <div>
+                    <h3 class="param-name">MCTS Simulations <span class="param-sub">per move</span></h3>
+                    <span class="param-badge-info">Includes Auto-Scaling & FPU</span>
+                </div>
+                <span class="rec-pill">Recommended: 50–150 · Default: 96</span>
+            </div>
+            <p class="param-desc">
+                Lookahead search tree expansion cycles ($M$) executed per move. 
+                <strong>This is the single highest-leverage control parameter for move quality vs search wall-clock time.</strong>
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Search Dynamics, FPU & Auto-Scaling</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">Higher (100–400)</span>
+                        Creates sharp, accurate visit distributions $\boldsymbol{\pi}$, accelerating policy learning per iteration.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Lower (< 30)</span>
+                        Visits remain near-uniform, producing noisy targets that cause policy loss to stagnate near entropy bounds.
+                    </div>
+                </div>
+                <div class="param-sub-info">
+                    <strong>Auto-Scaling (`auto_scale_simulations`):</strong> Scales search simulations by board area ($\text{sims} = M \times \frac{N^2}{81}$, clamped between 48 and 800) so large boards maintain sharp visit distributions without manual retuning.<br>
+                    <strong>First Play Urgency (`fpu_reduction = 0.35`):</strong> Initializes unvisited child node values slightly below parent value ($Q = -Q_{\text{parent}} - 0.35$), preventing MCTS from wasting budget exploring every legal move once before deepening.
+                </div>
+            </details>
+            <div class="param-meta">Range: 10–1000 &nbsp;·&nbsp; Live tunable during training.</div>
+        </section>
+
+        <!-- c_puct -->
+        <section id="cpuct" class="param-card glass" data-category="mcts" data-keywords="cpuct exploration exploitation puct constant ucb balance">
+            <div class="param-head">
+                <h3 class="param-name">Exploration Constant ($c_{\text{puct}}$)</h3>
+                <span class="rec-pill">Recommended: 1.5</span>
+            </div>
+            <p class="param-desc">
+                Weights exploration of unvisited candidate moves (prior $P(s,a)$) against exploitation of high-scoring subtree lines ($Q(s,a)$) in the PUCT formula.
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Exploration Tradeoffs</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">Higher (2.0–3.0)</span>
+                        Wider branch exploration; prevents premature convergence to suboptimal early variations.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Lower (0.5–1.0)</span>
+                        Focuses search strictly on the network's top-ranked move; may miss tactical alternatives.
+                    </div>
+                </div>
+            </details>
+            <div class="param-meta">Normal range: 1.0–2.0 &nbsp;·&nbsp; Default: 1.5 &nbsp;·&nbsp; Live tunable.</div>
+        </section>
+
+        <!-- Temperature & Smooth Decay -->
+        <section id="temperature" class="param-card glass" data-category="temperature" data-keywords="temperature decay randomness tau exploration opening endgame">
+            <div class="param-head">
+                <h3 class="param-name">Temperature ($\tau$) & Smooth Decay Schedule</h3>
+                <span class="rec-pill">Recommended: Init 0.8 → Final 0.1 (30 moves)</span>
+            </div>
+            <p class="param-desc">
+                Controls move sampling randomness via $\pi_a \propto N(s,a)^{1/\tau}$. High temperature ($\tau \approx 0.8$) explores opening variations; lower temperature ($\tau \approx 0.1$) focuses on the top move in mid/late-game.
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Smooth Decay Formula & Preventing Pass Locks</summary>
+                <div class="formula-box" style="margin: 0.8rem 0;">
+                    $$\tau(t) = \tau_{\text{init}} + \min\left(1.0, \frac{t}{T_{\text{thresh}}}\right) \cdot (\tau_{\text{final}} - \tau_{\text{init}})$$
+                </div>
+                <p class="param-desc" style="font-size: 0.88rem;">
+                    <strong>Why Smooth Linear Decay Prevents Pass Locks:</strong><br>
+                    Hard temperature cliff drops (e.g. dropping to 0.001 instantly at move 15) freeze MCTS choices mid-fight. If `PASS` receives even 1–2 visits, both bots rigidly pick pass in back-to-back turns, prematurely ending games with 1-liberty groups uncaptured! Smooth decay down to `0.1` maintains tactical vigilance through the endgame.
+                </p>
+            </details>
+            <div class="param-meta">Tunables: `temperature_init` (0.8), `temperature_final` (0.1), `temperature_threshold` (30 moves).</div>
+        </section>
+
+        <!-- Self-Play Games -->
+        <section id="self-play-games" class="param-card glass" data-category="volume" data-keywords="self play games volume batch iteration replay buffer">
+            <div class="param-head">
+                <h3 class="param-name">Self-Play Games <span class="param-sub">per iteration</span></h3>
+                <span class="rec-pill">Recommended: 5–15</span>
+            </div>
+            <p class="param-desc">
+                Fresh games generated by the champion network each iteration. All positions are appended to a rolling 50,000-state Replay Buffer with $D_4$ dihedral symmetry augmentation.
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Volume Tradeoffs</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">More (15–50)</span>
+                        Stabilizes value loss targets and prevents overfitting to a single game's outcome; iteration time increases proportionally.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Fewer (1–5)</span>
+                        Fast iteration loops, but higher target variance and risk of policy oscillation.
+                    </div>
+                </div>
+            </details>
+            <div class="param-meta">Range: 1–100 &nbsp;·&nbsp; Default: 5 &nbsp;·&nbsp; Live tunable.</div>
+        </section>
+
+        <!-- Eval Games -->
+        <section id="eval-games" class="param-card glass" data-category="volume" data-keywords="eval games random bot benchmark elo anchor">
+            <div class="param-head">
+                <h3 class="param-name">Eval Games <span class="param-sub">vs random bot baseline</span></h3>
+                <span class="rec-pill">Recommended: 4–10</span>
+            </div>
+            <p class="param-desc">
+                Benchmark games played against an anchor random bot (500 Elo) after each iteration to evaluate baseline win rate $W$ and update absolute Elo rating.
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Evaluation Tradeoffs</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">More (10–20)</span>
+                        Tighter confidence intervals on benchmark win rate; reduces Elo curve noise.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Fewer (2–4)</span>
+                        Minimizes iteration overhead. Setting to 0 skips the random eval phase entirely.
+                    </div>
+                </div>
+            </details>
+            <div class="param-meta">Range: 0–50 &nbsp;·&nbsp; Default: 4 &nbsp;·&nbsp; Live tunable.</div>
+        </section>
+
+        <!-- Parallel Workers -->
+        <section id="parallel-workers" class="param-card glass" data-category="compute" data-keywords="parallel workers compute cpu multiprocessing cores process pool">
+            <div class="param-head">
+                <h3 class="param-name">Parallel Workers <span class="param-sub">all game-playing phases</span></h3>
+                <span class="rec-pill">Recommended: 4–6</span>
+            </div>
+            <p class="param-desc">
+                Governs the CPU `ProcessPoolExecutor` size used across all three game-playing phases: 
+                <strong>Self-play</strong>, <strong>Promotion Gate</strong>, and <strong>Random Bot Eval</strong>.
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Concurrency Mechanics & Core Scaling</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">More (6–8)</span>
+                        A batch finishes only when its slowest game completes; utilizing all cores (Performance + Efficiency) significantly shortens wall-clock time.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Fewer (1–3)</span>
+                        Leaves CPU headroom for desktop use and runs cooler on fanless laptops. Safe fallback if process pools encounter memory constraints.
+                    </div>
+                </div>
+                <div class="param-sub-info">
+                    <strong>MPS GPU Isolation:</strong> Workers run on CPU using the CPU-resident champion model. The PyTorch MPS/CUDA training network is never pickled into worker processes, avoiding MPS concurrency limits.
+                </div>
+            </details>
+            <div class="param-meta">Range: 1–8 &nbsp;·&nbsp; Default: 4 &nbsp;·&nbsp; Memory: ~350 MB per active worker process.</div>
+        </section>
+
+        <!-- Promotion Gate Parameters Summary -->
+        <section id="gate-summary-param" class="param-card glass" data-category="gate" data-keywords="promotion gate champion candidate threshold stall breaker">
+            <div class="param-head">
+                <h3 class="param-name">Promotion Gate Parameters</h3>
+                <span class="rec-pill">Recommended: On · 20 games · 55% threshold</span>
+            </div>
+            <p class="param-desc">
+                Protects self-play data quality by requiring newly trained candidate networks to defeat the reigning champion in head-to-head matches before taking over game generation.
+            </p>
+            <div class="table-scroll">
+                <table class="preset-table">
+                    <thead>
+                        <tr><th>Parameter</th><th>Default</th><th>Recommended</th><th>Function</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>gate_enabled</code></td><td>True</td><td>True (On)</td><td>Master switch. Off = candidate automatically replaces champion unchecked.</td></tr>
+                        <tr><td><code>gate_games</code></td><td>20</td><td>20–30</td><td>Head-to-head games (alternating colors). More games = fewer false verdicts.</td></tr>
+                        <tr><td><code>gate_threshold</code></td><td>0.55</td><td>0.55</td><td>Win share required for promotion (0.55 stops equal coin-flip promotions).</td></tr>
+                        <tr><td><code>gate_simulations</code></td><td>50</td><td>50</td><td>MCTS search sims per move during gate games.</td></tr>
+                        <tr><td><code>gate_stall_warning</code></td><td>5</td><td>5</td><td>Consecutive rejections before candidate resets back to champion weights.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="param-meta">
+                For detailed gating mathematics and Elo step formulas, see the <a href="#tab-gate" class="tab-link" data-target="gate">Gate & Safeguards tab</a>.
+            </div>
+        </section>
+
+        <!-- Move Restrictions Summary -->
+        <section id="restrictions-summary-param" class="param-card glass" data-category="restrictions" data-keywords="move restrictions eye filling self atari heuristics">
+            <div class="param-head">
+                <h3 class="param-name">Move Restrictions (`restrict_eye_fill`)</h3>
+                <span class="rec-pill">Default: Off (Pure RL)</span>
+            </div>
+            <p class="param-desc">
+                <strong>No Own-Eye Filling:</strong> Forbids playing into one of a chain's <em>only two eyes</em>. Two eyes make a group unconditionally immortal; filling one blunders life away.
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Theorem & Heuristics Scope</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">On (Filter Active)</span>
+                        Prunes suicide blunders from MCTS tree search, focusing the simulation budget on productive tactical lines.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Off (Pure AlphaZero)</span>
+                        Network learns life-and-death purely from self-play outcomes. Completely comparable with legacy runs.
+                    </div>
+                </div>
+            </details>
+            <div class="param-meta">Applied to self-play and both sides of gate matches &nbsp;·&nbsp; Never applied to random eval bot anchor.</div>
+        </section>
+
+        <!-- Mercy Rule / Resignation -->
+        <section id="mercy-rule-param" class="param-card glass" data-category="resign" data-keywords="mercy rule resign resignation threshold playout false resign throughput speed hopeless">
+            <div class="param-head">
+                <h3 class="param-name">Mercy Rule (`resign_enabled`)</h3>
+                <span class="rec-pill">Default: Off</span>
+            </div>
+            <p class="param-desc">
+                Ends a self-play game once a side's own search has said it is lost for
+                several moves running, instead of paying a full MCTS search per move for an
+                endgame nobody can lose. <strong>Self-play only</strong> — the gate and the
+                random-bot eval never resign, because there a wrong verdict corrupts a
+                measurement rather than a single training game.
+            </p>
+            <p class="param-desc">
+                <strong>It cannot cost you training data at the default settings.</strong>
+                Samples stop being collected at move $N^2$, and <em>Earliest Resign</em>
+                defaults to exactly that, so every sample-producing position is already
+                recorded before a resignation can fire. What it does risk is the outcome
+                <em>label</em>: a resigned game is labelled from a prediction, so a value head
+                that wrongly despairs gets to confirm its own mistake across all $N^2$
+                retained samples. That is what <em>Playout Check</em> measures.
+            </p>
+            <div class="tradeoff-grid">
+                <div class="tradeoff-col tradeoff-up">
+                    <span class="tradeoff-tag">Watch: wrong-resignation rate</span>
+                    Reported after every self-play phase. Keep it under ~5%; if it climbs,
+                    raise <em>Resign Confidence</em> or <em>Confirming Moves</em>.
+                </div>
+                <div class="tradeoff-col tradeoff-down">
+                    <span class="tradeoff-tag">Playout Check = 0</span>
+                    You are flying blind — the rule may be discarding winnable games and
+                    nothing will ever tell you.
+                </div>
+            </div>
+            <details class="param-details">
+                <summary class="details-summary">View safeguards &amp; when it actually starts firing</summary>
+                <div class="param-desc" style="margin-top: 0.8rem;">
+                    <p>
+                        <strong>It is self-gating.</strong> An untrained value head produces
+                        root evaluations averaging around $|v| \approx 0.12$ and essentially
+                        never reaches 0.90, so the rule does nothing at all until the network
+                        is genuinely confident. Expect no speedup in early training — that is
+                        intended, not a misconfiguration.
+                    </p>
+                    <p>
+                        <strong>Collapse interlock.</strong> While the Collapse Guard is
+                        tripped the rule is suppressed automatically. A collapsed value head
+                        emits $\pm 1$ from the turn-colour plane alone, so it would resign
+                        every game on sight — and the resulting two-move games would silence
+                        the guard's own pass-rate tripwire, hiding the collapse that caused it.
+                    </p>
+                    <p>
+                        <strong>Both Sides Must Agree.</strong> Requires the winner's own
+                        search to confirm it is winning, so a single broken value head cannot
+                        end games by itself.
+                    </p>
+                    <p>
+                        <strong>Streak semantics.</strong> Confirming moves are counted from
+                        the start of the game, not from the earliest-resign boundary. A side
+                        hopeless for forty moves resigns as soon as the boundary opens.
+                    </p>
+                </div>
+            </details>
+            <div class="param-meta">
+                Earliest Resign below 1.0 starts trading training data for speed &nbsp;·&nbsp;
+                Suppressed automatically while the Collapse Guard is tripped &nbsp;·&nbsp;
+                Live tunable.
+            </div>
+        </section>
+
+        <!-- Learning Rate -->
+        <section id="learning-rate" class="param-card glass" data-category="network" data-keywords="learning rate adam optimizer gradient step cosine schedule">
+            <div class="param-head">
+                <h3 class="param-name">Learning Rate ($\eta$)</h3>
+                <span class="rec-pill">Recommended: 0.002</span>
+            </div>
+            <p class="param-desc">
+                Optimizer step magnitude for Adam gradient updates, paired with a Cosine Annealing learning rate schedule.
+            </p>
+            <details class="param-details">
+                <summary class="details-summary">View Learning Rate Tradeoffs</summary>
+                <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                    <div class="tradeoff-col tradeoff-up">
+                        <span class="tradeoff-tag">Too high (> 0.005)</span>
+                        Gradient explosion, loss spikes, or NaN weights.
+                    </div>
+                    <div class="tradeoff-col tradeoff-down">
+                        <span class="tradeoff-tag">Too low (< 0.0003)</span>
+                        Excessively slow parameter updates; network struggles to overcome initial randomized weights.
+                    </div>
+                </div>
+            </details>
+            <div class="param-meta">Default: 0.002 &nbsp;·&nbsp; Range: 0.0001–0.02 &nbsp;·&nbsp; Live tunable.</div>
+        </section>
     </div>
 
-    <!-- Formula Card 2: Neural Network Architecture -->
-    <div class="math-card">
-        <div class="math-card-header">
-            <div class="math-card-title">2. Dual-Head Residual Network Architecture</div>
-            <span class="step-badge">ResNet Body + Policy & Value Heads</span>
-        </div>
-        <div class="formula-explanation">
-            The feature tensor $X$ passes through a Conv2D stem, $K$ residual blocks with skip connections, and splits into policy and value heads:
-        </div>
-        <div class="formula-box">
-            $$\text{Stem: } H_0 = \text{ReLU}\big(\text{BatchNorm}(\text{Conv}_{3\times3}(X))\big)$$
-            $$\text{ResBlock } l: \mathbf{y}_l = \text{ReLU}\big(\text{BN}(\text{Conv}_{3\times3}(H_{l-1}))\big), \quad H_l = \text{ReLU}\big(H_{l-1} + \text{BN}(\text{Conv}_{3\times3}(\mathbf{y}_l))\big)$$
-        </div>
-        <div class="formula-box">
-            $$\text{Policy Head: } \mathbf{p}(a|s) = \text{Softmax}\Big( W_p \cdot \text{flatten}\big(\text{ReLU}(\text{BN}(\text{Conv}_{1\times1}(H_K)))\big) + \mathbf{b}_p \Big) \in \mathbb{R}^{N^2+1}$$
-            $$\text{Value Head: } v(s) = \tanh\Big( W_{v2} \cdot \text{ReLU}\big( W_{v1} \cdot \text{flatten}(\text{ReLU}(\text{BN}(\text{Conv}_{1\times1}(H_K)))) + \mathbf{b}_{v1} \big) + b_{v2} \Big) \in [-1, +1]$$
-        </div>
-        <div class="formula-explanation">
-            The <strong>Policy Head</strong> outputs prior probabilities $P(a|s)$ for all $N^2$ board positions plus 1 Pass move. 
-            The <strong>Value Head</strong> outputs scalar outcome prediction $v(s) \in [-1, +1]$ from the mover's perspective.
-        </div>
-    </div>
+    <!-- =================================================================== -->
+    <!-- TAB 2: MATHEMATICAL DEEP DIVE & ARCHITECTURE                        -->
+    <!-- =================================================================== -->
+    <div id="tab-math" class="info-tab-pane">
+        <!-- Visual Stepper: Complete Iteration Lifecycle -->
+        <section class="param-card glass" style="margin-bottom: 2rem;">
+            <h3 class="param-name" style="margin-bottom: 0.5rem;">The AlphaZero Iteration Lifecycle</h3>
+            <p class="param-desc">
+                Each training iteration executes 6 continuous mathematical stages:
+            </p>
+            <div class="lifecycle-grid">
+                <div class="lifecycle-step">
+                    <div class="lifecycle-step-num">1</div>
+                    <div class="lifecycle-step-title">State Encoding</div>
+                    <div class="lifecycle-step-desc">
+                        Board $s_t$ converted into spatial binary tensor $X \in \mathbb{R}^{10 \times N \times N}$ containing stone locations, liberties, ko, and turn color.
+                    </div>
+                </div>
+                <div class="lifecycle-step">
+                    <div class="lifecycle-step-num">2</div>
+                    <div class="lifecycle-step-title">Dual Forward Pass</div>
+                    <div class="lifecycle-step-desc">
+                        ResNet evaluates $f_\theta(s) = (\boldsymbol{p}, v)$, outputting prior move distribution $\boldsymbol{p}(a|s)$ and scalar win prediction $v(s) \in [-1, 1]$.
+                    </div>
+                </div>
+                <div class="lifecycle-step">
+                    <div class="lifecycle-step-num">3</div>
+                    <div class="lifecycle-step-title">MCTS Lookahead</div>
+                    <div class="lifecycle-step-desc">
+                        Runs $M$ simulations using PUCT selection, First Play Urgency (FPU), Dirichlet root noise, and minimax value backpropagation.
+                    </div>
+                </div>
+                <div class="lifecycle-step">
+                    <div class="lifecycle-step-num">4</div>
+                    <div class="lifecycle-step-title">Action & Replay</div>
+                    <div class="lifecycle-step-desc">
+                        Move $a_t$ sampled from visit distribution $\boldsymbol{\pi}$. Sample $(s_t, \boldsymbol{\pi}_t, z_t, q_t)$ stored in 50k Replay Buffer with $D_4$ dihedral symmetry.
+                    </div>
+                </div>
+                <div class="lifecycle-step">
+                    <div class="lifecycle-step-num">5</div>
+                    <div class="lifecycle-step-title">Target Blended Loss</div>
+                    <div class="lifecycle-step-desc">
+                        Adam optimizes weights on mini-batches with blended target $y = 0.6 z + 0.4 q$ to prevent value-head collapse at the root.
+                    </div>
+                </div>
+                <div class="lifecycle-step">
+                    <div class="lifecycle-step-num">6</div>
+                    <div class="lifecycle-step-title">Gate & Benchmarks</div>
+                    <div class="lifecycle-step-desc">
+                        Candidate tested in Promotion Gate ($E_{\text{gate}}$ games vs champion) and Anchor Eval ($E_{\text{eval}}$ games vs random bot) to update Elo.
+                    </div>
+                </div>
+            </div>
+        </section>
 
-    <!-- Formula Card 3: MCTS & PUCT -->
-    <div class="math-card">
-        <div class="math-card-header">
-            <div class="math-card-title">3. MCTS Search & PUCT Selection</div>
-            <span class="step-badge">Upper Confidence Bound</span>
-        </div>
-        <div class="formula-explanation">
-            During tree search, moves are selected to maximize the Predictor Upper Confidence Bound (PUCT) score:
-        </div>
-        <div class="formula-box">
-            $$\text{UCB}(s, a) = Q(s, a) + c_{\text{puct}} \cdot P(s, a) \cdot \frac{\sqrt{\sum_{b} N(s, b)}}{1 + N(s, a)}$$
-        </div>
-        <div class="formula-explanation">
-            <ul>
-                <li>$Q(s, a) = \frac{W(s, a)}{N(s, a)}$ is the mean action value accumulated from subtree evaluations.</li>
-                <li>$P(s, a)$ is the prior move probability supplied by the policy head.</li>
-                <li>$N(s, a)$ is the visit count for candidate action $a$.</li>
-                <li><strong>First Play Urgency (FPU):</strong> Unvisited nodes ($N=0$) estimate $Q(s,a) = -Q_{\text{parent}} - f_{\text{reduction}}$ to prevent premature uniform widening.</li>
-            </ul>
-        </div>
-        <div class="formula-box">
-            $$\text{Dirichlet Root Noise: } P'(s_{\text{root}}, a) = (1 - \epsilon) P(s_{\text{root}}, a) + \epsilon \cdot \eta_a, \quad \boldsymbol{\eta} \sim \text{Dirichlet}(\alpha=0.3)$$
-        </div>
-        <div class="formula-explanation">
-            Injected at the root during self-play ($\epsilon = 0.25$) to guarantee opening diversity and prevent premature convergence.
-            During backup, values negate at alternating plies: $v_{\text{parent}} \leftarrow -v_{\text{child}}$.
-        </div>
-    </div>
-
-    <!-- MCTS Deep Dive Card: What is an MCTS Simulation? -->
-    <div id="mcts-deep-dive" class="math-card">
-        <div class="math-card-header">
-            <div class="math-card-title">3b. Deep Dive: What is an MCTS Simulation & How Does the Decision Tree Work?</div>
-            <span class="step-badge">Alternating Minimax Tree Lookahead</span>
-        </div>
-        <div class="formula-explanation">
-            <strong>Does MCTS play Black's moves for each move and make a decision tree on where White might go?</strong><br>
-            <strong>YES, EXACTLY!</strong> Monte Carlo Tree Search builds an alternating 2-player decision tree to evaluate candidate moves before making a final decision.
-            <br><br>
-            When it is Black's turn at root board state $s_0$, MCTS does not make a blind guess. Instead, it runs $M$ lookahead simulations (e.g. 50–100 simulations). Each single simulation performs 4 distinct steps:
-            <br><br>
-            <ol>
-                <li>
-                    <strong>1. Selection (Simulating Alternating Black & White Turns down the Tree):</strong><br>
-                    Starting at $s_0$ (Black's turn), MCTS picks Black's candidate move $a_1$ with the highest PUCT score ($Q + U$).
-                    This leads to state $s_1$, where it is <strong>White's turn</strong>.
-                    At $s_1$, MCTS simulates <strong>where White might respond</strong> by evaluating White's candidate moves $a_2$ using PUCT from White's perspective!
-                    This forms an alternating decision tree:
-                    $$\text{Root } s_0 (\text{Black}) \xrightarrow{a_1} s_1 (\text{White}) \xrightarrow{a_2} s_2 (\text{Black}) \xrightarrow{a_3} s_3 (\text{White}) \dots s_L$$
-                </li>
-                <li>
-                    <strong>2. Expansion & Neural Network Forward Pass:</strong><br>
-                    When the search reaches an unexplored leaf position $s_L$, MCTS expands the node and queries the dual-head Residual Neural Network:
-                    $$f_\theta(s_L) = (\boldsymbol{p}(a|s_L), \; v(s_L))$$
-                    The Policy Head supplies prior probabilities $\boldsymbol{p}$ for legal moves at $s_L$. The Value Head returns scalar evaluation $v(s_L) \in [-1, +1]$ predicting the expected outcome from the perspective of the player whose turn it is at $s_L$.
-                </li>
-                <li>
-                    <strong>3. Backpropagation (Zero-Sum Value Negation):</strong><br>
-                    The outcome prediction $v(s_L)$ travels back up the path to the root $s_0$. 
-                    Because Go is a zero-sum game, Black's gain is White's loss:
-                    $$v_{\text{parent}} = -v_{\text{child}}$$
-                    At each node along the path, visit count $N(s,a)$ is incremented by $+1$, and total action value $W(s,a)$ is updated ($W \leftarrow W + v$).
-                </li>
-                <li>
-                    <strong>4. Final Move Selection:</strong><br>
-                    After repeating this 4-step simulation $M$ times, root node $s_0$ has accumulated visit counts $N(s_0, a)$ across all candidate branches. 
-                    The move $a^*$ with the <strong>most visits</strong> is chosen as Black's actual played move!
-                </li>
-            </ol>
-            <br>
-            <div style="background: rgba(255,255,255,0.03); border-left: 3px solid var(--accent-light); padding: 0.75rem 1rem; border-radius: 4px; margin-top: 1rem;">
-                <strong>💡 Search Depth & Why MCTS Doesn't Explode Exponentially ($10 \times 10 = 100$):</strong>
+        <!-- 1. Input Tensor Encoding -->
+        <div class="math-card">
+            <div class="math-card-header">
+                <div class="math-card-title">1. Spatial Input State Representation</div>
+                <span class="step-badge">Tensor $X \in \mathbb{R}^{10 \times N \times N}$</span>
+            </div>
+            <div class="formula-explanation">
+                At move $t$, board position $s_t$ is encoded into a 10-plane binary feature tensor:
+            </div>
+            <div class="formula-box">
+                $$X(s) = \left[ X_{\text{player}}, X_{\text{opp}}, X_{\text{lib}_1}^P, X_{\text{lib}_2}^P, X_{\text{lib}_{\ge3}}^P, X_{\text{lib}_1}^O, X_{\text{lib}_2}^O, X_{\text{lib}_{\ge3}}^O, X_{\text{ko}}, X_{\text{turn}} \right]$$
+            </div>
+            <div class="formula-explanation">
                 <ul>
-                    <li><strong>How Deep Does a Simulation Go?</strong> Depth is <em>asymmetric and variable</em>. Each simulation travels down the tree until it hits an unvisited state $s_L$. Unpromising lines are evaluated in 1–2 moves, while critical tactical fights (like a capturing race) are revisited across multiple simulations, deepening <strong>10 to 30+ moves deep</strong> down that single sharp line!</li>
-                    <li><strong>How Simulation Budget Limits Search:</strong> A simulation budget of $M = 50$ means MCTS executes exactly 50 single lookahead paths from $s_0$. It does <em>not</em> explore all $80^{10} \approx 10^{19}$ full combinations.</li>
-                    <li><strong>Neural Network Policy Pruning:</strong> Out of 80 legal moves, the NN policy head immediately assigns low probabilities ($P \approx 0.001$) to weak moves. PUCT ignores those bad moves, concentrating ~90% of the 50 simulations into the top 2–3 strongest candidate lines.</li>
+                    <li><strong>Planes 0–1 ($X_{\text{player}}, X_{\text{opp}}$):</strong> Binary stone locations for current player and opponent ($1$ if present, $0$ empty).</li>
+                    <li><strong>Planes 2–4 ($X_{\text{lib}_k}^P$):</strong> Liberty count buckets for current player's stone chains (1, 2, or $\ge 3$ liberties).</li>
+                    <li><strong>Planes 5–7 ($X_{\text{lib}_k}^O$):</strong> Liberty count buckets for opponent stone chains.</li>
+                    <li><strong>Plane 8 ($X_{\text{ko}}$):</strong> Illegal Ko move mask (blocks infinite capture-recapture cycles).</li>
+                    <li><strong>Plane 9 ($X_{\text{turn}}$):</strong> Turn plane ($1$ for Black to move, $0$ for White).</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- 2. Dual-Head ResNet Architecture -->
+        <div class="math-card">
+            <div class="math-card-header">
+                <div class="math-card-title">2. Dual-Head Residual Network Architecture</div>
+                <span class="step-badge">ResNet Body + Policy & Value Heads</span>
+            </div>
+            <div class="formula-explanation">
+                Feature tensor $X$ passes through a Conv2D stem, $K$ residual blocks with skip connections, then splits into policy and value heads:
+            </div>
+            <div class="formula-box">
+                $$\text{Stem: } H_0 = \text{ReLU}\big(\text{BatchNorm}(\text{Conv}_{3\times3}(X))\big)$$
+                $$\text{ResBlock } l: \mathbf{y}_l = \text{ReLU}\big(\text{BN}(\text{Conv}_{3\times3}(H_{l-1}))\big), \quad H_l = \text{ReLU}\big(H_{l-1} + \text{BN}(\text{Conv}_{3\times3}(\mathbf{y}_l))\big)$$
+            </div>
+            <div class="formula-box">
+                $$\text{Policy Head: } \mathbf{p}(a|s) = \text{Softmax}\Big( W_p \cdot \text{flatten}\big(\text{ReLU}(\text{BN}(\text{Conv}_{1\times1}(H_K)))\big) + \mathbf{b}_p \Big) \in \mathbb{R}^{N^2+1}$$
+                $$\text{Value Head: } v(s) = \tanh\Big( W_{v2} \cdot \text{ReLU}\big( W_{v1} \cdot \text{flatten}(\text{ReLU}(\text{BN}(\text{Conv}_{1\times1}(H_K)))) + \mathbf{b}_{v1} \big) + b_{v2} \Big) \in [-1, +1]$$
+            </div>
+            <div class="formula-explanation">
+                The <strong>Policy Head</strong> outputs prior probabilities for all $N^2$ board positions plus the Pass move. 
+                The <strong>Value Head</strong> outputs scalar prediction $v(s) \in [-1, +1]$ from the moving player's perspective.
+            </div>
+        </div>
+
+        <!-- 3. MCTS & PUCT Selection -->
+        <div class="math-card">
+            <div class="math-card-header">
+                <div class="math-card-title">3. MCTS Search, PUCT Selection & FPU</div>
+                <span class="step-badge">Predictor Upper Confidence Bound</span>
+            </div>
+            <div class="formula-explanation">
+                During tree traversal, child moves are selected to maximize the PUCT formula:
+            </div>
+            <div class="formula-box">
+                $$\text{PUCT}(s, a) = Q(s, a) + c_{\text{puct}} \cdot P(s, a) \cdot \frac{\sqrt{\sum_{b} N(s, b)}}{1 + N(s, a)}$$
+            </div>
+            <div class="formula-explanation">
+                <ul>
+                    <li>$Q(s, a) = \frac{W(s, a)}{N(s, a)}$ is the mean accumulated action value from subtree simulations.</li>
+                    <li>$P(s, a)$ is the prior probability supplied by the policy head.</li>
+                    <li>$N(s, a)$ is the visit count for candidate action $a$.</li>
+                    <li><strong>First Play Urgency (FPU reduction = 0.35):</strong> Unvisited nodes ($N=0$) estimate $Q(s,a) = -Q_{\text{parent}} - 0.35$, encouraging focus on promising branches instead of exploring every legal move once.</li>
+                </ul>
+            </div>
+            <div class="formula-box">
+                $$\text{Dirichlet Root Noise: } P'(s_{\text{root}}, a) = (1 - \epsilon) P(s_{\text{root}}, a) + \epsilon \cdot \eta_a, \quad \boldsymbol{\eta} \sim \text{Dirichlet}(\alpha=0.3)$$
+            </div>
+            <div class="formula-explanation">
+                Injected at the root during self-play ($\epsilon = 0.25$) to ensure opening diversity and prevent deterministic overfitting.
+            </div>
+        </div>
+
+        <!-- 4. Minimax Lookahead Deep Dive -->
+        <div class="math-card">
+            <div class="math-card-header">
+                <div class="math-card-title">4. Alternating Minimax Decision Tree Lookahead</div>
+                <span class="step-badge">Alternating 2-Player Tree</span>
+            </div>
+            <div class="formula-explanation">
+                <strong>How does MCTS anticipate opponent responses?</strong><br>
+                MCTS constructs an alternating decision tree:
+                $$\text{Root } s_0 (\text{Black}) \xrightarrow{a_1} s_1 (\text{White}) \xrightarrow{a_2} s_2 (\text{Black}) \xrightarrow{a_3} s_3 (\text{White}) \dots s_L$$
+                <ol style="margin-top: 0.6rem;">
+                    <li><strong>Selection:</strong> From $s_0$ (Black), MCTS picks Black's move $a_1$ via PUCT. At $s_1$ (White), it simulates White's best response $a_2$ via PUCT from White's perspective.</li>
+                    <li><strong>Expansion:</strong> Reaching unvisited leaf $s_L$, the neural network evaluates $f_\theta(s_L) = (\boldsymbol{p}, v)$.</li>
+                    <li><strong>Backpropagation:</strong> Value $v(s_L)$ negates at alternating plies ($v_{\text{parent}} = -v_{\text{child}}$) because Go is zero-sum.</li>
+                    <li><strong>Action:</strong> After $M$ simulations, the move with the highest visit count $N(s_0, a)$ is played.</li>
+                </ol>
+            </div>
+        </div>
+
+        <!-- 5. Loss Function with KataGo Target Blending -->
+        <div class="math-card">
+            <div class="math-card-header">
+                <div class="math-card-title">5. Neural Network Loss with Target Blending</div>
+                <span class="step-badge">Adam + Blended Value Target</span>
+            </div>
+            <div class="formula-explanation">
+                Network parameters $\boldsymbol{\theta}$ are optimized on sampled mini-batches by minimizing the combined loss:
+            </div>
+            <div class="formula-box">
+                $$\mathcal{L}(\boldsymbol{\theta}) = \underbrace{(y - v_\theta(s))^2}_{\text{Value MSE Loss } \mathcal{L}_v} \;+\; \underbrace{\left( -\sum_{a=1}^{N^2+1} \pi_a \log p_\theta(a|s) \right)}_{\text{Policy Cross-Entropy Loss } \mathcal{L}_p} \;+\; c \|\boldsymbol{\theta}\|^2$$
+                $$\text{Blended Value Target: } y = \lambda \cdot z + (1 - \lambda) \cdot q$$
+            </div>
+            <div class="formula-explanation">
+                <ul>
+                    <li>$z \in \{-1, 0, +1\}$ is the final game outcome (Chinese Area scoring).</li>
+                    <li>$q \in [-1, +1]$ is the MCTS root evaluation at that exact board position.</li>
+                    <li><strong>$\lambda = 0.6$ (Outcome Weight):</strong> KataGo-style blending prevents value-head collapse at the root. Even if one color wins every game, $q$ varies from position to position, forcing the network to evaluate the board rather than relying on turn color.</li>
+                    <li>$c \|\boldsymbol{\theta}\|^2$ is $L_2$ weight decay ($c = 10^{-4}$); gradients are clipped at $\|\mathbf{g}\|_2 \le 1.0$.</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- 6. Chinese Area Scoring Algorithm -->
+        <div class="math-card">
+            <div class="math-card-header">
+                <div class="math-card-title">6. Chinese Area Scoring & Territory Flood-Fill</div>
+                <span class="step-badge">Area Scoring: $S = \text{Stones} + \text{Territory}$</span>
+            </div>
+            <div class="formula-explanation">
+                Scoring evaluates position equity deterministically without requiring manual dead-stone agreement:
+            </div>
+            <div class="formula-box">
+                $$\text{Black Score} = S_B + T_B, \qquad \text{White Score} = S_W + T_W + \text{Komi}$$
+                $$\text{Lead} = \text{Black Score} - \text{White Score}$$
+            </div>
+            <div class="formula-explanation">
+                <strong>4-Step Territory BFS Flood-Fill:</strong>
+                <ol style="margin-top: 0.6rem;">
+                    <li><strong>Stone Counting:</strong> Count living Black ($S_B$) and White ($S_W$) stones on the grid.</li>
+                    <li><strong>Empty Region Discovery:</strong> Run Breadth-First Search (BFS) on all empty intersections to discover connected empty regions $R_1, \dots, R_k$.</li>
+                    <li><strong>Perimeter Inspection:</strong> For each region $R_k$:
+                        <ul>
+                            <li>Exclusively Black border stones $\to$ Black Territory ($T_B += |R_k|$).</li>
+                            <li>Exclusively White border stones $\to$ White Territory ($T_W += |R_k|$).</li>
+                            <li>Touches both Black and White border stones $\to$ Neutral Dame ($T = 0$).</li>
+                        </ul>
+                    </li>
+                    <li><strong>Komi Addition:</strong> Add Komi (6.5 on 9×9) to White's total.</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    <!-- =================================================================== -->
+    <!-- TAB 3: PROMOTION GATE & SAFEGUARDS                                  -->
+    <!-- =================================================================== -->
+    <div id="tab-gate" class="info-tab-pane">
+        <!-- Champion vs Candidate Architecture -->
+        <section class="param-card glass">
+            <div class="param-head">
+                <h3 class="param-name">Champion vs Candidate (The Promotion Gate)</h3>
+                <span class="rec-pill">Gate: 55% Win Share over 20 Games</span>
+            </div>
+            <p class="param-desc">
+                Training maintains <strong>two distinct networks</strong>. Only the verified Champion is permitted to generate self-play games. 
+                This prevents bad gradient updates from poisoning future training data.
+            </p>
+            <div class="table-scroll">
+                <table class="preset-table">
+                    <thead>
+                        <tr><th>Network Role</th><th>Attribute in Code</th><th>Responsibilities</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Champion</strong></td>
+                            <td><code>trainer.eval_network</code></td>
+                            <td>The reigning best network. Generates all self-play games, defends in gate matches, and plays against humans on the Play page.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Candidate</strong></td>
+                            <td><code>trainer.network</code></td>
+                            <td>The network actively updated by gradient descent each iteration. Never generates self-play until it defeats the Champion.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="param-desc" style="margin-top: 1rem;">
+                <strong>Gating Match & Elo Step Formula:</strong><br>
+                Candidate plays <code>gate_games</code> (default 20) against the Champion with alternating colors. If Candidate win share $p \ge 0.55$, it is promoted to Champion. The Champion Elo increases in a step function:
+            </p>
+            <div class="formula-box">
+                $$\Delta \text{Elo} = 400 \cdot \log_{10}\!\left(\frac{p}{1 - p}\right) \quad (\text{e.g. } 55\% \to +35 \text{ Elo}, \ 70\% \to +147 \text{ Elo})$$
+            </div>
+            <div class="param-meta">
+                Stored in <code>models/&lt;id&gt;/weights.pt</code> under <code>champion_state_dict</code> and <code>model_state_dict</code>.
+            </div>
+        </section>
+
+        <!-- Value Collapse: Root Cause & 3-Layer Defense -->
+        <section class="param-card glass">
+            <div class="param-head">
+                <h3 class="param-name">Value-Head Collapse: Root Cause & 3-Layer Defense</h3>
+                <span class="rec-pill">3 Safeguard Layers</span>
+            </div>
+            <p class="param-desc">
+                <strong>What is Value Collapse?</strong> When one color wins nearly all games in a batch, the value head can minimize its MSE loss by ignoring board features and predicting purely from the turn-color plane (outputting $+1$ on Black turns, $-1$ on White). MCTS move values become identical, causing search to degenerate into raw policy.
+            </p>
+            <div class="diag-grid">
+                <div class="diag-box">
+                    <div class="diag-box-label">Layer 1: Target Blending (Root Fix)</div>
+                    <div class="diag-box-content">
+                        <code>value_target_outcome_weight: 0.6</code> mixes final outcome $z$ with continuous MCTS evaluation $q$. Because $q$ varies position-to-position, the color shortcut cannot minimize loss.
+                    </div>
+                </div>
+                <div class="diag-box">
+                    <div class="diag-box-label">Layer 2: Promotion Gate (Filter)</div>
+                    <div class="diag-box-content">
+                        Because gate matches alternate colors equally, a color-collapsed network wins ~50% and is rejected. It never becomes Champion.
+                    </div>
+                </div>
+                <div class="diag-box">
+                    <div class="diag-box-label">Layer 3: Collapse Guard (Tripwires)</div>
+                    <div class="diag-box-content">
+                        Evaluates probe positions each iteration. Warns if <code>value_std &lt; 0.05</code> (flat predictions per color) or <code>pass_rate &gt; 25%</code> (excessive passing).
+                    </div>
+                </div>
+                <div class="diag-box">
+                    <div class="diag-box-label">Layer 4: Stall Breaker (Auto-Reset)</div>
+                    <div class="diag-box-content">
+                        After 5 consecutive gate rejections (<code>gate_stall_warning</code>), candidate weights reset back to Champion weights to resume from a known-good state.
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Move Restrictions: Two-Eye Theorem -->
+        <section class="param-card glass">
+            <div class="param-head">
+                <h3 class="param-name">Move Restrictions: The Own-Two-Eye Theorem</h3>
+                <span class="rec-pill">`restrict_eye_fill`</span>
+            </div>
+            <p class="param-desc">
+                When enabled, the bot is prohibited from playing into an eye of its own chain if that chain has <strong>exactly two eyes</strong>.
+            </p>
+            <div class="formula-explanation">
+                <strong>Why this is a provable theorem rather than a heuristic:</strong>
+                <ul>
+                    <li><strong>Strict Eye Definition:</strong> A point $p$ is an eye of chain $C$ iff every on-board neighbor of $p$ belongs to chain $C$.</li>
+                    <li><strong>Unconditional Immortality:</strong> A chain with 2 strict eyes cannot be captured by the opponent, because playing into either eye is immediate suicide (0 liberties, captures nothing).</li>
+                    <li><strong>False Eye Safety:</strong> False eyes (surrounded by multiple separate chains) do not meet the strict definition, so connecting moves at false eyes are never forbidden.</li>
+                </ul>
+            </div>
+            <div class="param-meta">
+                Enforced inside MCTS tree expansion, so the suicide move receives zero prior, zero visits, and never appears in policy targets.
+            </div>
+        </section>
+    </div>
+
+    <!-- =================================================================== -->
+    <!-- TAB 4: DIAGNOSTICS & TROUBLESHOOTING HUB                            -->
+    <!-- =================================================================== -->
+    <div id="tab-diagnostics" class="info-tab-pane">
+        <!-- Progress Timeline Table -->
+        <section class="timeline-card glass">
+            <h3 class="param-name" style="margin-bottom: 0.5rem;">Expected Learning Progress Timeline (9×9 Board)</h3>
+            <p class="param-desc">
+                Typical metric benchmarks across a standard 9×9 training run:
+            </p>
+            <div class="health-table-wrap">
+                <table class="health-table">
+                    <thead>
+                        <tr>
+                            <th>Phase / Iterations</th>
+                            <th>Estimated Rank</th>
+                            <th>Win vs Random</th>
+                            <th>Policy Loss</th>
+                            <th>Value Loss</th>
+                            <th>Behavioral Milestones</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Phase 1: Bootstrapping</strong><br><small>Iter 1–5 (0–50 games)</small></td>
+                            <td>25k – 20k<br><small>(500 – 750 Elo)</small></td>
+                            <td><span class="health-val-warn">50% → 85%</span></td>
+                            <td><span class="health-val-warn">3.8 → 2.2</span></td>
+                            <td><span class="health-val-warn">0.60 → 0.90</span></td>
+                            <td>Learns legal stone placement, basic captures, and avoiding immediate atari. Value loss rises initially as scoring concepts emerge.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Phase 2: Tactical Foundations</strong><br><small>Iter 6–20 (50–200 games)</small></td>
+                            <td>15k – 10k<br><small>(800 – 1200 Elo)</small></td>
+                            <td><span class="health-val-good">95% → 100%</span></td>
+                            <td><span class="health-val-good">1.4 → 1.9</span></td>
+                            <td><span class="health-val-good">0.18 → 0.35</span></td>
+                            <td>Consistently beats random bot. Forms 2-eye living groups, connects chains, and surrounds basic corner/side territory.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Phase 3: Strategic Mastery</strong><br><small>Iter 20+ (200+ games)</small></td>
+                            <td>SDK – Dan<br><small>(1300 – 2000+ Elo)</small></td>
+                            <td><span class="health-val-good">100% (Dominant)</span></td>
+                            <td><span class="health-val-good">0.8 → 1.4</span></td>
+                            <td><span class="health-val-good">0.08 → 0.20</span></td>
+                            <td>Global influence, efficient shape, sacrifice tactics, complex life-and-death, and ko fighting.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Troubleshooting Triage Cards -->
+        <h3 style="color: var(--accent-light); margin: 2rem 0 1rem; font-size: 1.25rem;">
+            🚨 Troubleshooting Matrix (Symptom & Action Guide)
+        </h3>
+
+        <!-- Flag 1: NaN / Loss Explosion -->
+        <div class="diag-card diag-card-red">
+            <div class="diag-header">
+                <div class="diag-title">
+                    <span>💥</span> Loss Explosion / NaN / Infs
+                </div>
+                <span class="diag-badge diag-badge-red">Critical Red Flag</span>
+            </div>
+            <div class="diag-grid">
+                <div class="diag-box">
+                    <div class="diag-box-label">Observed Symptoms</div>
+                    <div class="diag-box-content">
+                        Policy Loss or Value Loss suddenly displays <strong>NaN</strong>, <strong>Infinity</strong>, or spikes to <strong>> 50.0</strong>.
+                    </div>
+                </div>
+                <div class="diag-box">
+                    <div class="diag-box-label">Root Cause</div>
+                    <div class="diag-box-content">
+                        Learning rate is set too high, causing Adam gradient steps to overshoot local minima and corrupt weights.
+                    </div>
+                </div>
+                <div class="diag-action-box">
+                    <div class="diag-action-title">Action Required:</div>
+                    Lower <strong>Learning Rate</strong> in Live Tuning (e.g. from 0.002 to 0.0005). If weights are corrupted with NaN, revert to a previous checkpoint.
+                </div>
+            </div>
+        </div>
+
+        <!-- Flag 2: Policy Loss Flatline -->
+        <div class="diag-card diag-card-yellow">
+            <div class="diag-header">
+                <div class="diag-title">
+                    <span>📉</span> Policy Loss Flatlines High (> 3.2 after 15+ Iterations)
+                </div>
+                <span class="diag-badge diag-badge-yellow">Attention Needed</span>
+            </div>
+            <div class="diag-grid">
+                <div class="diag-box">
+                    <div class="diag-box-label">Observed Symptoms</div>
+                    <div class="diag-box-content">
+                        Policy loss stays near the uniform entropy baseline ($\approx \ln(82) \approx 4.4$ on 9×9) and fails to decrease.
+                    </div>
+                </div>
+                <div class="diag-box">
+                    <div class="diag-box-label">Root Cause</div>
+                    <div class="diag-box-content">
+                        <strong>MCTS Simulations count is too low</strong> (< 30). With few simulations, tree visits remain flat and noisy.
+                    </div>
+                </div>
+                <div class="diag-action-box">
+                    <div class="diag-action-title">Action Required:</div>
+                    Increase <strong>MCTS Simulations</strong> to 100–200. This sharpens visit distribution $\boldsymbol{\pi}$ so the policy head has clear targets.
+                </div>
+            </div>
+        </div>
+
+        <!-- Flag 3: Win Rate vs Random Stuck -->
+        <div class="diag-card diag-card-yellow">
+            <div class="diag-header">
+                <div class="diag-title">
+                    <span>🎲</span> Win Rate vs Random Bot Stuck at ~50%
+                </div>
+                <span class="diag-badge diag-badge-yellow">Stagnation Warning</span>
+            </div>
+            <div class="diag-grid">
+                <div class="diag-box">
+                    <div class="diag-box-label">Observed Symptoms</div>
+                    <div class="diag-box-content">
+                        After 10+ iterations, the model still loses games to the random bot and win rate hovers between 45%–60%.
+                    </div>
+                </div>
+                <div class="diag-box">
+                    <div class="diag-box-label">Root Cause</div>
+                    <div class="diag-box-content">
+                        Lookahead budget is insufficient to resolve basic captures, or network capacity is undersized for the board size.
+                    </div>
+                </div>
+                <div class="diag-action-box">
+                    <div class="diag-action-title">Action Required:</div>
+                    Raise <strong>MCTS Simulations</strong> to at least 100. If on 13×13 or 19×19, ensure you are using at least a <strong>Medium</strong> network.
+                </div>
+            </div>
+        </div>
+
+        <!-- Flag 4: Value Loss Oscillations -->
+        <div class="diag-card diag-card-yellow">
+            <div class="diag-header">
+                <div class="diag-title">
+                    <span>🌊</span> Value Loss Lingers High (> 0.50)
+                </div>
+                <span class="diag-badge diag-badge-yellow">Data Variance</span>
+            </div>
+            <div class="diag-grid">
+                <div class="diag-box">
+                    <div class="diag-box-label">Observed Symptoms</div>
+                    <div class="diag-box-content">
+                        Value loss oscillates wildly between 0.40 and 0.80 instead of smoothly settling into the 0.15–0.30 range.
+                    </div>
+                </div>
+                <div class="diag-box">
+                    <div class="diag-box-label">Root Cause</div>
+                    <div class="diag-box-content">
+                        Replay buffer is underfilled or self-play volume is too low (e.g. 1–2 games), causing overfitting to single game outcomes.
+                    </div>
+                </div>
+                <div class="diag-action-box">
+                    <div class="diag-action-title">Action Required:</div>
+                    Increase <strong>Self-Play Games per Iteration</strong> from 5 to 10–15 to populate the buffer with diverse positions.
+                </div>
+            </div>
+        </div>
+
+        <!-- Flag 5: Color Bias -->
+        <div class="diag-card diag-card-yellow">
+            <div class="diag-header">
+                <div class="diag-title">
+                    <span>☯</span> Extreme Color Bias (100% Black or White Wins)
+                </div>
+                <span class="diag-badge diag-badge-yellow">Komi Mismatch</span>
+            </div>
+            <div class="diag-grid">
+                <div class="diag-box">
+                    <div class="diag-box-label">Observed Symptoms</div>
+                    <div class="diag-box-content">
+                        Self-play balance shows 100% Black wins or 100% White wins across multiple consecutive iterations.
+                    </div>
+                </div>
+                <div class="diag-box">
+                    <div class="diag-box-label">Root Cause</div>
+                    <div class="diag-box-content">
+                        Komi is misconfigured (e.g. set to 0.0 or 15.0), introducing structural unfairness.
+                    </div>
+                </div>
+                <div class="diag-action-box">
+                    <div class="diag-action-title">Action Required:</div>
+                    Verify <strong>Komi</strong> is set to 6.5 for 9×9 boards or 7.5 for 19×19 boards.
+                </div>
+            </div>
+        </div>
+
+        <!-- Flag 6: Premature Passing -->
+        <div class="diag-card diag-card-yellow">
+            <div class="diag-header">
+                <div class="diag-title">
+                    <span>⚔</span> Premature Passing / 1-Liberty Hesitation
+                </div>
+                <span class="diag-badge diag-badge-yellow">Temperature Cliff</span>
+            </div>
+            <div class="diag-grid">
+                <div class="diag-box">
+                    <div class="diag-box-label">Observed Symptoms</div>
+                    <div class="diag-box-content">
+                        Bots pass at move 40–50 while 1-liberty enemy groups remain uncaptured, or hesitate on obvious tactical captures.
+                    </div>
+                </div>
+                <div class="diag-box">
+                    <div class="diag-box-label">Root Cause</div>
+                    <div class="diag-box-content">
+                        Temperature dropped to 0.001 prematurely via a hard step, freezing MCTS move selection before fights resolved.
+                    </div>
+                </div>
+                <div class="diag-action-box">
+                    <div class="diag-action-title">Action Required:</div>
+                    Set <strong>Temp Decay Moves</strong> to at least 30, and keep <strong>Temp Final</strong> at <code>0.1</code> instead of <code>0.001</code>.
+                </div>
+            </div>
+        </div>
+
+        <!-- Healthy Training Checklist -->
+        <div class="diag-card diag-card-green">
+            <div class="diag-header">
+                <div class="diag-title">
+                    <span>✅</span> Healthy Training Benchmark Checklist
+                </div>
+                <span class="diag-badge diag-badge-green">All Systems Optimal</span>
+            </div>
+            <div class="formula-explanation">
+                Your model is learning properly when all of the following hold:
+                <ul>
+                    <li><strong>Win rate vs Random Bot:</strong> Exceeds 90% by iteration 8–10 and reaches 100% by iteration 15.</li>
+                    <li><strong>Policy Loss:</strong> Shows a steady downward trajectory from ~3.8 down to 1.2–1.8.</li>
+                    <li><strong>Value Loss:</strong> Settles into the 0.15–0.30 band without wild spikes.</li>
+                    <li><strong>Elo Progression:</strong> Climbs smoothly from 500 up past 1000 within 15–20 iterations.</li>
+                    <li><strong>Self-play Balance:</strong> Black and White win proportions fluctuate near 45%–55% equity.</li>
                 </ul>
             </div>
         </div>
     </div>
-
-    <!-- Territory Estimation Algorithm Card -->
-    <div id="territory-algorithm" class="math-card">
-        <div class="math-card-header">
-            <div class="math-card-title">3c. Territory Estimation & Chinese Area Scoring Algorithm</div>
-            <span class="step-badge">Area Scoring: $S = \text{Stones} + \text{Territory}$</span>
-        </div>
-        <div class="formula-explanation">
-            Territory estimation in Chinese Area Scoring evaluates position equity without requiring manual dead-stone removal agreements. The system computes territory and score using a 4-step spatial algorithm:
-        </div>
-        <div class="formula-box">
-            $$\text{Black Score} = S_B + T_B, \qquad \text{White Score} = S_W + T_W + \text{Komi}$$
-            $$\text{Estimated Lead} = \text{Black Score} - \text{White Score}$$
-        </div>
-        <div class="formula-explanation">
-            <strong>The 4-Step Flood-Fill Territory Algorithm:</strong>
-            <ol>
-                <li>
-                    <strong>Step 1 (Stone Counting):</strong> Count all living Black stones ($S_B = \sum \mathbb{I}[grid = 1]$) and White stones ($S_W = \sum \mathbb{I}[grid = 2]$) on the $N \times N$ grid.
-                </li>
-                <li>
-                    <strong>Step 2 (Empty Region Discovery):</strong> Perform Breadth-First Search (BFS) on all empty intersections ($grid[r][c] = 0$) to group connected empty spaces into discrete regions $R_1, R_2, \dots, R_k$.
-                </li>
-                <li>
-                    <strong>Step 3 (Border Color Inspection):</strong> For each empty region $R_k$, inspect the colors of all adjacent stones bordering the perimeter:
-                    <ul>
-                        <li>If the perimeter consists <strong>exclusively of Black stones</strong> $\rightarrow R_k$ is <strong>Black Territory</strong> ($T_B += |R_k|$).</li>
-                        <li>If the perimeter consists <strong>exclusively of White stones</strong> $\rightarrow R_k$ is <strong>White Territory</strong> ($T_W += |R_k|$).</li>
-                        <li>If the perimeter touches <strong>both Black and White stones</strong> $\rightarrow R_k$ is <strong>Neutral / Dame</strong> ($T = 0$).</li>
-                    </ul>
-                </li>
-                <li>
-                    <strong>Step 4 (Area Scoring Summary):</strong> Add total territory $T_B, T_W$ to stone counts $S_B, S_W$ and add Komi to White.
-                </li>
-            </ol>
-        </div>
-    </div>
-
-    <!-- Formula Card 4: Action Selection & Replay Buffer -->
-    <div class="math-card">
-        <div class="math-card-header">
-            <div class="math-card-title">4. Temperature Scaling & Symmetry Augmentation</div>
-            <span class="step-badge">Replay Buffer (50,000 states)</span>
-        </div>
-        <div class="formula-explanation">
-            After $M$ simulations, the search visit distribution forms policy target vector $\boldsymbol{\pi}$:
-        </div>
-        <div class="formula-box">
-            $$\pi_a = \frac{N(s, a)^{1/\tau}}{\sum_{b} N(s, b)^{1/\tau}}$$
-        </div>
-        <div class="formula-explanation">
-            <ul>
-                <li><strong>Exploratory phase ($\tau = 1.0$):</strong> Plays early moves (first 15–30 turns) probabilistically according to $\boldsymbol{\pi}$.</li>
-                <li><strong>Greedy phase ($\tau \to 0$):</strong> Selects the move with maximum visit count $\text{argmax}_a N(s, a)$.</li>
-            </ul>
-            <strong>8-Fold Dihedral Symmetry ($D_4$):</strong> When sampling mini-batches from the Replay Buffer, positions are randomly augmented using 4 rotations $\times$ 2 reflections ($k \in \{0 \dots 7\}$), expanding data efficiency 8-fold without extra self-play compute.
-        </div>
-    </div>
-
-    <!-- Formula Card 5: Loss Function -->
-    <div class="math-card">
-        <div class="math-card-header">
-            <div class="math-card-title">5. Neural Network Loss Function & Optimization</div>
-            <span class="step-badge">Adam + Cosine LR Schedule</span>
-        </div>
-        <div class="formula-explanation">
-            The neural network parameters $\boldsymbol{\theta}$ are optimized to minimize the combined loss $\mathcal{L}(\boldsymbol{\theta})$ over sampled mini-batches:
-        </div>
-        <div class="formula-box">
-            $$\mathcal{L}(\boldsymbol{\theta}) = \underbrace{(z - v_\theta(s))^2}_{\text{Value MSE Loss } \mathcal{L}_v} \;+\; \underbrace{\left( -\sum_{a=1}^{N^2+1} \pi_a \log p_\theta(a|s) \right)}_{\text{Policy Cross-Entropy Loss } \mathcal{L}_p} \;+\; c \|\boldsymbol{\theta}\|^2$$
-        </div>
-        <div class="formula-explanation">
-            <ul>
-                <li>$z \in \{-1, 0, +1\}$ is the actual game outcome (scored by Chinese Area Rules).</li>
-                <li>$\boldsymbol{\pi}$ is the target MCTS visit probability distribution vector.</li>
-                <li>$c \|\boldsymbol{\theta}\|^2$ is $L_2$ weight decay ($c = 10^{-4}$) preventing parameter explosion.</li>
-                <li>Gradients are clipped at maximum norm $\|\mathbf{g}\|_2 \le 1.0$ before the Adam step.</li>
-            </ul>
-        </div>
-    </div>
-
-    <!-- Formula Card 6: Elo Evaluation -->
-    <div class="math-card">
-        <div class="math-card-header">
-            <div class="math-card-title">6. Elo Rating & Skill Progression</div>
-            <span class="step-badge">Anchor Baseline = 500 Elo</span>
-        </div>
-        <div class="formula-explanation">
-            Model strength is measured by playing $E$ eval games against a uniform random bot. The new Elo rating $R_{\text{new}}$ updates according to actual win rate $W$:
-        </div>
-        <div class="formula-box">
-            $$E_A = \frac{1}{1 + 10^{(R_{\text{anchor}} - R_{\text{model}})/400}}, \quad R_{\text{new}} = R_{\text{old}} + K \cdot (W_{\text{actual}} - E_A)$$
-        </div>
-    </div>
-
-    <!-- =================================================================== -->
-    <!-- SECTION 3: TRAINING HEALTH & DIAGNOSTICS                            -->
-    <!-- =================================================================== -->
-    <h2 id="training-health" class="section-divider-title">
-        <span>🩺</span> Training Health, Expected Progress & Diagnostics
-    </h2>
-    <p class="info-intro">
-        How do you know if your model is learning properly or if training has stalled? 
-        Use this guide to benchmark your loss metrics, track rank milestones, and diagnose issues.
-    </p>
-
-    <!-- Timeline Progress Benchmarks -->
-    <div class="timeline-card glass">
-        <h3 class="param-name" style="margin-bottom: 1rem;">Expected Learning Progress Timeline (9×9 Board)</h3>
-        <div class="health-table-wrap">
-            <table class="health-table">
-                <thead>
-                    <tr>
-                        <th>Phase / Iterations</th>
-                        <th>Estimated Rank</th>
-                        <th>Win Rate vs Random</th>
-                        <th>Policy Loss</th>
-                        <th>Value Loss</th>
-                        <th>Behavioral Milestones</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><strong>Phase 1: Bootstrapping</strong><br><small>Iter 1–5 (0–50 games)</small></td>
-                        <td>25k – 20k<br><small>(500 – 750 Elo)</small></td>
-                        <td><span class="health-val-warn">50% → 85%</span></td>
-                        <td><span class="health-val-warn">3.8 → 2.2</span></td>
-                        <td><span class="health-val-warn">0.60 → 0.90</span></td>
-                        <td>Learns legal moves, basic stone captures, avoiding self-atari. Value loss rises initially as it learns scoring.</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Phase 2: Tactical Foundations</strong><br><small>Iter 6–20 (50–200 games)</small></td>
-                        <td>15k – 10k<br><small>(800 – 1200 Elo)</small></td>
-                        <td><span class="health-val-good">95% → 100%</span></td>
-                        <td><span class="health-val-good">1.4 → 1.9</span></td>
-                        <td><span class="health-val-good">0.18 → 0.35</span></td>
-                        <td>Beats random bot 100% of games. Creates 2-eye alive groups, connects stones, surrounds basic territory.</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Phase 3: Strategic Mastery</strong><br><small>Iter 20+ (200+ games)</small></td>
-                        <td>SDK – Dan<br><small>(1300 – 2000+ Elo)</small></td>
-                        <td><span class="health-val-good">100% (Dominant)</span></td>
-                        <td><span class="health-val-good">0.8 → 1.4</span></td>
-                        <td><span class="health-val-good">0.08 → 0.20</span></td>
-                        <td>Understands global board influence, efficient shape, sacrifice play, complex life-and-death, and ko fights.</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- =================================================================== -->
-    <!-- CHAMPION vs CANDIDATE (PROMOTION GATE)                              -->
-    <!-- =================================================================== -->
-    <h2 id="gate" class="section-divider-title">
-        <span>🛡</span> Champion vs Candidate — the Promotion Gate
-    </h2>
-    <p class="info-intro">
-        Training keeps <strong>two</strong> copies of the network. Only one of them is
-        allowed to generate self-play games. This is the single most important
-        safety mechanism in the loop: the network that plays the training games
-        decides what every future iteration learns from, so letting a worse
-        network take that job poisons everything downstream.
-    </p>
-
-    <section class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">The two networks</h3>
-            <span class="rec-pill">Gate: 55% over 10 games</span>
-        </div>
-        <div class="table-scroll">
-            <table class="preset-table">
-                <thead>
-                    <tr>
-                        <th>Role</th>
-                        <th>In code</th>
-                        <th>What it does</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><strong>Champion</strong></td>
-                        <td><code>trainer.eval_network</code></td>
-                        <td>The reigning best network. <strong>Generates every self-play game</strong>, plays the eval matches, and is the opponent you face on the Play page. Changes only when a candidate beats it.</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Candidate</strong></td>
-                        <td><code>trainer.network</code></td>
-                        <td>The network being actively trained by gradient descent each iteration. It never touches self-play until it earns promotion.</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-        <p class="param-desc">
-            Each iteration the candidate is trained on the replay buffer, then plays
-            <strong>Gate Games</strong> against the champion with colours alternating. If it
-            scores at least the <strong>Promotion Threshold</strong> it is promoted and becomes
-            the new champion. If not, the candidate is discarded as a generator and the
-            champion keeps its job.
-        </p>
-        <div class="param-meta">
-            Colours alternate deliberately — a network that only wins as Black scores ~50% and cannot pass.
-        </div>
-    </section>
-
-    <!-- Promotion Gate — configurable parameters -->
-    <section id="gate-enabled" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Promotion Gate <span class="param-sub">on / off</span></h3>
-            <span class="rec-pill">Recommended: On</span>
-        </div>
-        <p class="param-desc">
-            Master switch for the whole mechanism. With the gate <strong>off</strong>, every
-            trained candidate is copied straight into the champion slot, so a bad gradient
-            step immediately starts generating the self-play data that all future iterations
-            learn from — and nothing in the loop can detect or undo it.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">On</span>
-                Strength can only ever ratchet upward. Costs one extra match per iteration.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Off</span>
-                Iterations run faster, but regressions are permanent and compound. Only useful
-                for quick throwaway experiments.
-            </div>
-        </div>
-        <div class="param-meta">Default: On &nbsp;·&nbsp; Skipping the gate also blanks the Champion Progress chart.</div>
-    </section>
-
-    <section id="gate-games" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Gate Games <span class="param-sub">candidate vs champion</span></h3>
-            <span class="rec-pill">Recommended: 20–30</span>
-        </div>
-        <p class="param-desc">
-            How many head-to-head games decide a promotion. This is a <strong>statistical
-            measurement</strong>, and its reliability comes almost entirely from the number of
-            games, not from how well each game is played. With only 10 games, a candidate that
-            is genuinely 65% strength still fails the gate about 25% of the time — real progress
-            gets thrown away as noise.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">More (20–40)</span>
-                Sharper verdicts at every effect size: a truly worse candidate ($p = 0.35$) is
-                blocked ~95% of the time instead of ~90%, and a truly better one ($p = 0.65$)
-                is accepted ~88% instead of ~75%.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Fewer (2–10)</span>
-                Cheap gate, but the verdict is close to a coin flip — expect both lost progress
-                and promoted regressions.
-            </div>
-        </div>
-        <div class="param-meta">Range 2–60 &nbsp;·&nbsp; Default: 20 &nbsp;·&nbsp; Always even, so both colours are played equally.</div>
-    </section>
-
-    <section id="gate-threshold" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Promotion Threshold <span class="param-sub">win share required</span></h3>
-            <span class="rec-pill">Recommended: 0.55</span>
-        </div>
-        <p class="param-desc">
-            The win rate the candidate must reach to take the champion's job. 0.50 would promote
-            on a coin flip; the margin above 50% is what stops sampling noise from installing a
-            network that is merely <em>equal</em>.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Higher (0.60–0.80)</span>
-                Only clearly-better networks get promoted. Late in training, when gains per
-                iteration are small, this can stall the ladder completely.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Lower (0.50–0.53)</span>
-                Promotes readily and keeps the ladder moving, but lets sideways or slightly
-                worse networks through, which drifts the self-play data quality downward.
-            </div>
-        </div>
-        <div class="param-meta">Range 0.50–0.80 &nbsp;·&nbsp; Default: 0.55 &nbsp;·&nbsp; Shown as the dashed rule on the Champion Progress chart.</div>
-    </section>
-
-    <section id="gate-simulations" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Gate Simulations <span class="param-sub">per move in gate games</span></h3>
-            <span class="rec-pill">Recommended: 50</span>
-        </div>
-        <p class="param-desc">
-            MCTS budget per move during the gate match, kept separate from the self-play
-            setting because the gate has a different job: it only needs to <em>rank</em> two
-            networks, not produce training targets. Cost is roughly
-            $\text{games} \times \text{sims}$, so for a fixed budget, buying more games
-            beats buying more sims per game.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Higher (100–400)</span>
-                Each game is played closer to the networks' true strength, but the gate starts
-                dominating iteration time — and search increasingly masks the difference
-                between the two networks you are trying to tell apart.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Lower (10–30)</span>
-                Very fast matches that lean more heavily on the raw policy head — noisier per
-                game, but affordable enough to play many of them.
-            </div>
-        </div>
-        <div class="param-meta">Range 10–400 &nbsp;·&nbsp; Default: 50 &nbsp;·&nbsp; ~35s/game at 100 sims vs ~18s at 50 (9×9, M2).</div>
-    </section>
-
-    <section id="gate-stall" class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Stall Breaker <span class="param-sub">rejections before reset</span></h3>
-            <span class="rec-pill">Recommended: 5</span>
-        </div>
-        <p class="param-desc">
-            After this many <em>consecutive</em> rejections, the candidate is assumed to have
-            drifted somewhere it cannot recover from, and its weights are reset back to the
-            champion's so it retrains from a known-good point instead of deadlocking. Three
-            such resets escalate to a collapse warning, because a loop that keeps needing them
-            has a data problem the reset cannot fix.
-        </p>
-        <div class="tradeoff-grid">
-            <div class="tradeoff-col tradeoff-up">
-                <span class="tradeoff-tag">Higher (8–20)</span>
-                Gives a candidate more room to work through a rough patch on its own — worth it
-                with a low learning rate, where progress is genuinely slow.
-            </div>
-            <div class="tradeoff-col tradeoff-down">
-                <span class="tradeoff-tag">Lower (2–3)</span>
-                Snaps back quickly, but a reset also discards whatever partial progress the
-                candidate had made, so an over-eager setting can itself prevent promotions.
-            </div>
-        </div>
-        <div class="param-meta">Range 2–20 &nbsp;·&nbsp; Default: 5 &nbsp;·&nbsp; The counter resets to 0 on any promotion.</div>
-    </section>
-
-    <div class="param-meta" style="margin-bottom: 1.5rem;">
-        Gate matches are played in parallel like every other phase — see
-        <a href="#parallel-workers">Parallel Workers</a>.
-    </div>
-
-    <section class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">What <code>gate_promoted</code> means for learning</h3>
-        </div>
-        <div class="diag-grid">
-            <div class="diag-box">
-                <div class="diag-box-label">gate_promoted = true</div>
-                <div class="diag-box-content">
-                    The candidate genuinely plays better. It becomes the champion, so the
-                    <strong>next</strong> batch of self-play games is generated at a higher level.
-                    Stronger games → better training targets → the model advances. This is
-                    normal, healthy progress.
-                </div>
-            </div>
-            <div class="diag-box">
-                <div class="diag-box-label">gate_promoted = false</div>
-                <div class="diag-box-content">
-                    The update made the network <em>worse</em>. It is refused, and the champion
-                    generates the next games. <strong>Training does not stop</strong> — the candidate
-                    keeps training on fresh champion-quality data and can try again next
-                    iteration. A rejection is the system working, not an error.
-                </div>
-            </div>
-            <div class="diag-action-box">
-                <div class="diag-action-title">Stall breaker:</div>
-                After <strong>5 consecutive rejections</strong> the candidate is assumed to have drifted
-                somewhere it cannot recover from, and is reset back to the champion's weights so
-                it retrains from a known-good starting point instead of deadlocking forever.
-            </div>
-        </div>
-        <p class="param-desc">
-            Expect a healthy run to promote most — but not all — iterations. A long streak of
-            rejections means learning has stalled: lower the learning rate, or add more
-            self-play games so the buffer carries more signal.
-        </p>
-    </section>
-
-    <section class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Where the champion is stored</h3>
-        </div>
-        <p class="param-desc">
-            Both networks live in the model's single checkpoint,
-            <code>models/&lt;model-id&gt;/weights.pt</code>, under separate keys:
-        </p>
-        <div class="table-scroll">
-            <table class="preset-table">
-                <thead>
-                    <tr><th>Key</th><th>Contents</th></tr>
-                </thead>
-                <tbody>
-                    <tr><td><code>champion_state_dict</code></td><td>The gated champion — restored as the self-play generator on restart.</td></tr>
-                    <tr><td><code>model_state_dict</code></td><td>The training candidate, plus <code>optimizer_state_dict</code> so training resumes mid-stride.</td></tr>
-                </tbody>
-            </table>
-        </div>
-        <div class="param-meta">
-            Checkpoints saved before gating existed have no <code>champion_state_dict</code>; those
-            fall back to using the training weights as the champion, so old models still load.
-        </div>
-    </section>
-
-    <section class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">Reading the Champion Progress chart</h3>
-            <span class="rec-pill">Training page</span>
-        </div>
-        <p class="param-desc">
-            The <strong>Champion Progress</strong> panel on the Training page is the honest
-            progress curve. <code>Win rate vs random</code> pins at 100% within ~12 iterations and
-            stays there even while the model degrades — it cannot show you anything after that.
-            Every gate match, by contrast, is a fresh head-to-head against the previous best,
-            so the ladder never saturates.
-        </p>
-        <div class="table-scroll">
-            <table class="preset-table">
-                <thead>
-                    <tr><th>Element</th><th>Meaning</th></tr>
-                </thead>
-                <tbody>
-                    <tr><td><span style="color:#81c784">Green bar</span></td><td>Candidate beat the champion and was promoted.</td></tr>
-                    <tr><td><span style="color:#ff6b6b">Red bar</span></td><td>Candidate fell short; the champion kept its job.</td></tr>
-                    <tr><td>Dashed rule</td><td>The 55% promotion threshold.</td></tr>
-                    <tr><td>Gold line</td><td>Champion strength in Elo — a step function that only rises on a promotion.</td></tr>
-                </tbody>
-            </table>
-        </div>
-        <p class="param-desc">
-            Each promotion's Elo gain is derived from the margin it won by,
-            $\Delta = 400\log_{10}\!\left(\frac{p}{1-p}\right)$, so a narrow 55% win adds ~35 Elo
-            while a 70% win adds ~147. Because the ladder is flat on rejection,
-            <strong>a long flat stretch is real stagnation, not noise</strong> — the model has genuinely
-            failed to out-play its own previous best.
-        </p>
-        <div class="param-meta">
-            Healthy: most iterations promote, gold line climbing steadily. &nbsp;·&nbsp;
-            Stalled: 5+ red bars in a row — lower the learning rate or add self-play games.
-        </div>
-    </section>
-
-    <!-- =================================================================== -->
-    <!-- COLLAPSE GUARD                                                      -->
-    <!-- =================================================================== -->
-    <h2 id="collapse-guard" class="section-divider-title">
-        <span>🚨</span> The Collapse Guard
-    </h2>
-    <p class="info-intro">
-        A monitor, not a blocker. It runs once per iteration and reports two numbers that
-        reveal a specific failure the ordinary loss metrics cannot see.
-    </p>
-
-    <div class="diag-card diag-card-yellow">
-        <div class="diag-header">
-            <div class="diag-title">
-                <span>📖</span> What it is actually detecting
-            </div>
-            <span class="diag-badge diag-badge-yellow">Detection &amp; Warning</span>
-        </div>
-        <div class="diag-grid">
-            <div class="diag-box">
-                <div class="diag-box-label">The failure: value-head collapse</div>
-                <div class="diag-box-content">
-                    When one colour starts winning nearly every game, the value head can drive
-                    its loss to almost zero by ignoring the board entirely and reading only the
-                    turn-colour input plane — outputting <code>+1</code> whenever Black is to move and
-                    <code>−1</code> whenever White is. Value loss looks <em>excellent</em> (≈0.03) while the
-                    network has stopped evaluating positions altogether.
-                </div>
-            </div>
-            <div class="diag-box">
-                <div class="diag-box-label">Why that is fatal</div>
-                <div class="diag-box-content">
-                    MCTS picks moves by comparing the values of candidate positions. If every
-                    position returns the same number, every move looks identical, and the search
-                    degenerates into following the raw policy. Your simulations per move stop
-                    doing any work at all.
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <section class="param-card glass">
-        <div class="param-head">
-            <h3 class="param-name">The two tripwires</h3>
-        </div>
-        <div class="table-scroll">
-            <table class="health-table">
-                <thead>
-                    <tr><th>Metric</th><th>Healthy</th><th>Trips at</th><th>Meaning</th></tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><code>value_std_black</code><br><code>value_std_white</code></td>
-                        <td><span class="health-val-good">&gt; 0.05</span></td>
-                        <td><span class="health-val-bad">&lt; 0.05</span></td>
-                        <td>Spread of the value head <strong>within each colour</strong>. Near zero means it is predicting from turn colour alone.</td>
-                    </tr>
-                    <tr>
-                        <td><code>pass_rate_black</code><br><code>pass_rate_white</code></td>
-                        <td><span class="health-val-good">&lt; 15%</span></td>
-                        <td><span class="health-val-bad">&gt; 15%</span></td>
-                        <td>Share of a colour's moves that are passes. Under area scoring a pass donates points, so heavy passing bleeds the game away.</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-        <p class="param-desc">
-            The spread must be measured <strong>separately for each colour</strong>. Across mixed
-            positions a fully collapsed head still looks perfectly healthy — the values are
-            bimodal at ±1, giving a standard deviation near 1.0. Only splitting by side to move
-            exposes that each group is flat.
-        </p>
-    </section>
-
-    <div class="diag-card diag-card-red">
-        <div class="diag-header">
-            <div class="diag-title">
-                <span>⚙️</span> Does it actually stop anything?
-            </div>
-            <span class="diag-badge diag-badge-red">Read this</span>
-        </div>
-        <div class="diag-grid">
-            <div class="diag-box">
-                <div class="diag-box-label">By default — no</div>
-                <div class="diag-box-content">
-                    The collapse guard is a <strong>smoke alarm, not a sprinkler</strong>. It emits a
-                    <code>collapse_warning</code> event to the training log and writes the four numbers
-                    into every metrics row. Training continues. <code>collapse_auto_stop</code> is
-                    <code>false</code> by default.
-                </div>
-            </div>
-            <div class="diag-box">
-                <div class="diag-box-label">What actually prevents collapse</div>
-                <div class="diag-box-content">
-                    The <a href="#gate">promotion gate</a> is the real defence. Because gate matches
-                    alternate colours, a colour-degenerate network scores about 50% and never gets
-                    promoted — so it can never become the generator and poison the next iteration's
-                    data. The guard tells you <em>why</em> the gate started rejecting.
-                </div>
-            </div>
-            <div class="diag-action-box">
-                <div class="diag-action-title">If you want it to halt automatically:</div>
-                Set <code>collapse_auto_stop: true</code> in the model's <code>config.json</code>. Training then
-                stops the moment either tripwire fires, instead of only logging it.
-            </div>
-        </div>
-    </div>
-
-    <!-- Diagnostic Red Flags -->
-    <h3 id="diagnostics" style="color: var(--accent-light); margin: 2rem 0 1rem; font-size: 1.25rem;">
-        🚨 Red Flags & Diagnostic Troubleshooting (When to Take Charge)
-    </h3>
-
-    <!-- Flag 1: NaN / Loss Explosion -->
-    <div class="diag-card diag-card-red">
-        <div class="diag-header">
-            <div class="diag-title">
-                <span>💥</span> Loss Explosion / NaN / Infs
-            </div>
-            <span class="diag-badge diag-badge-red">Critical Red Flag</span>
-        </div>
-        <div class="diag-grid">
-            <div class="diag-box">
-                <div class="diag-box-label">Observed Symptoms</div>
-                <div class="diag-box-content">
-                    Policy Loss or Value Loss suddenly displays <strong>NaN</strong>, <strong>Infinity</strong>, or spikes to <strong>> 50.0</strong> in the training metrics log.
-                </div>
-            </div>
-            <div class="diag-box">
-                <div class="diag-box-label">Root Cause</div>
-                <div class="diag-box-content">
-                    Learning rate is set too high, causing gradient steps to overshoot local minima and corrupt network weights.
-                </div>
-            </div>
-            <div class="diag-action-box">
-                <div class="diag-action-title">Action Required:</div>
-                Lower <strong>Learning Rate</strong> in the command bar tuner (e.g. from 0.002 to 0.0005). If weights are corrupted with NaN, stop training and revert to a previous checkpoint.
-            </div>
-        </div>
-    </div>
-
-    <!-- Flag 2: Policy Loss Stagnation -->
-    <div class="diag-card diag-card-yellow">
-        <div class="diag-header">
-            <div class="diag-title">
-                <span>📉</span> Policy Loss Flatlines High (> 3.2 after 15+ Iterations)
-            </div>
-            <span class="diag-badge diag-badge-yellow">Attention Needed</span>
-        </div>
-        <div class="diag-grid">
-            <div class="diag-box">
-                <div class="diag-box-label">Observed Symptoms</div>
-                <div class="diag-box-content">
-                    Policy loss stays near the initial uniform entropy baseline ($\approx \ln(N^2+1) \approx 4.4$ for 9×9) and doesn't drop below 3.2.
-                </div>
-            </div>
-            <div class="diag-box">
-                <div class="diag-box-label">Root Cause</div>
-                <div class="diag-box-content">
-                    <strong>MCTS Simulations count is too low</strong> (< 30). With few simulations, tree visits remain flat, creating noisy, near-uniform policy targets $\boldsymbol{\pi}$.
-                </div>
-            </div>
-            <div class="diag-action-box">
-                <div class="diag-action-title">Action Required:</div>
-                Increase <strong>MCTS Simulations</strong> to 100–200. This sharpens the visit distribution $\boldsymbol{\pi}$ so the policy head has clear move targets to learn.
-            </div>
-        </div>
-    </div>
-
-    <!-- Flag 3: Win Rate vs Random Stuck -->
-    <div class="diag-card diag-card-yellow">
-        <div class="diag-header">
-            <div class="diag-title">
-                <span>🎲</span> Win Rate vs Random Stuck at ~50%
-            </div>
-            <span class="diag-badge diag-badge-yellow">Stagnation Warning</span>
-        </div>
-        <div class="diag-grid">
-            <div class="diag-box">
-                <div class="diag-box-label">Observed Symptoms</div>
-                <div class="diag-box-content">
-                    After 10+ iterations, the model still loses games to the random bot and win rate hovers between 45% – 60%.
-                </div>
-            </div>
-            <div class="diag-box">
-                <div class="diag-box-label">Root Cause</div>
-                <div class="diag-box-content">
-                    Search lookahead is insufficient to find basic ladder/capture tactics, or network size is undersized for board dimensions (e.g. Tiny net on 19×19).
-                </div>
-            </div>
-            <div class="diag-action-box">
-                <div class="diag-action-title">Action Required:</div>
-                Raise <strong>MCTS Simulations</strong> to at least 100. If playing on 13×13 or 19×19, ensure you are using a <strong>Medium</strong> or <strong>Large</strong> network.
-            </div>
-        </div>
-    </div>
-
-    <!-- Flag 4: High Value Loss Oscillations -->
-    <div class="diag-card diag-card-yellow">
-        <div class="diag-header">
-            <div class="diag-title">
-                <span>🌊</span> Value Loss Lingers High (> 0.50)
-            </div>
-            <span class="diag-badge diag-badge-yellow">Data Unbalance</span>
-        </div>
-        <div class="diag-grid">
-            <div class="diag-box">
-                <div class="diag-box-label">Observed Symptoms</div>
-                <div class="diag-box-content">
-                    Value loss oscillates wildly between 0.40 and 0.80 instead of smoothly settling into 0.15–0.30.
-                </div>
-            </div>
-            <div class="diag-box">
-                <div class="diag-box-label">Root Cause</div>
-                <div class="diag-box-content">
-                    Replay buffer is underfilled or self-play games per iteration is too low (e.g. 1–2 games), causing network to overfit to extreme outcomes of a single game.
-                </div>
-            </div>
-            <div class="diag-action-box">
-                <div class="diag-action-title">Action Required:</div>
-                Increase <strong>Self-Play Games per Iteration</strong> from 5 to 15–20. This populates the buffer with diverse positions and stabilizes value targets.
-            </div>
-        </div>
-    </div>
-
-    <!-- Flag 5: Severe Color Bias -->
-    <div class="diag-card diag-card-yellow">
-        <div class="diag-header">
-            <div class="diag-title">
-                <span>☯</span> Extreme Color Skew (Black or White Wins 100%)
-            </div>
-            <span class="diag-badge diag-badge-yellow">Komi Mismatch</span>
-        </div>
-        <div class="diag-grid">
-            <div class="diag-box">
-                <div class="diag-box-label">Observed Symptoms</div>
-                <div class="diag-box-content">
-                    Self-play win balance bar on Training page shows 100% Black wins or 100% White wins across multiple iterations.
-                </div>
-            </div>
-            <div class="diag-box">
-                <div class="diag-box-label">Root Cause</div>
-                <div class="diag-box-content">
-                    Komi is misconfigured (e.g., set to 0.0 or 15.0), introducing structural imbalance that makes one side unplayable.
-                </div>
-            </div>
-            <div class="diag-action-box">
-                <div class="diag-action-title">Action Required:</div>
-                Verify <strong>Komi</strong> is set to 6.5 for 9×9 boards or 7.5 for 19×19 boards.
-            </div>
-        </div>
-    </div>
-
-    <!-- Flag 6: Premature Passing & 1-Liberty Group Hesitation -->
-    <div class="diag-card diag-card-yellow">
-        <div class="diag-header">
-            <div class="diag-title">
-                <span>⚔</span> Premature Passing / Hesitation to Kill 1-Liberty Groups
-            </div>
-            <span class="diag-badge diag-badge-yellow">Temperature Cliff</span>
-        </div>
-        <div class="diag-grid">
-            <div class="diag-box">
-                <div class="diag-box-label">Observed Symptoms</div>
-                <div class="diag-box-content">
-                    Bots pass at move 40–60 while enemy groups with 1 liberty (atari) remain uncaptured, or seem hesitant to initiate tactical captures late in the game.
-                </div>
-            </div>
-            <div class="diag-box">
-                <div class="diag-box-label">Root Cause</div>
-                <div class="diag-box-content">
-                    Temperature dropped to near-zero ($0.001$) too early via a hard step function, freezing MCTS move selection into rigid, single-branch choices before tactical fights resolved.
-                </div>
-            </div>
-            <div class="diag-action-box">
-                <div class="diag-action-title">Action Required:</div>
-                Ensure <strong>Temp Decay Moves</strong> is set to at least 30 moves, and set <strong>Temp Final</strong> to <code>0.1</code> instead of <code>0.001</code> to maintain tactical alertness.
-            </div>
-        </div>
-    </div>
-
-    <!-- Flag 6: Healthy Training Checklist -->
-    <div class="diag-card diag-card-green">
-        <div class="diag-header">
-            <div class="diag-title">
-                <span>✅</span> Healthy Training Benchmark Checklist
-            </div>
-            <span class="diag-badge diag-badge-green">All Systems Optimal</span>
-        </div>
-        <div class="formula-explanation">
-            Your model is learning effectively if you observe all of the following:
-            <ul>
-                <li><strong>Win rate vs Random Bot:</strong> Exceeds 90% by iteration 8–10 and hits 100% by iteration 15.</li>
-                <li><strong>Policy Loss:</strong> Shows a steady downward trajectory from ~3.8 down to 1.2–1.8.</li>
-                <li><strong>Value Loss:</strong> Settles into the 0.15–0.30 band without wild spikes.</li>
-                <li><strong>Elo Progression:</strong> Climbs smoothly from 500 up past 1000 (15k rank) within 15–20 iterations.</li>
-                <li><strong>Self-play Balance:</strong> Black and White win proportions fluctuate near 45%–55% equity.</li>
-            </ul>
-        </div>
-    </div>
-
-    <!-- Rule of Thumb Callout -->
-    <div class="info-callout glass info-callout-end">
-        <div class="info-callout-icon">💡</div>
-        <div>
-            <h3>Golden Rule for Tuning</h3>
-            <p>
-                When you want to boost model performance, the highest-impact interventions — in order — are: 
-                <strong>1. Increase MCTS Simulations</strong> (sharpens move targets $\boldsymbol{\pi}$), 
-                <strong>2. Increase Self-Play Games</strong> (stabilizes value $z$), and 
-                <strong>3. Increase Network Capacity</strong>. Keep <strong>c_puct</strong> (1.5) and 
-                <strong>Learning Rate</strong> (0.002) at their defaults unless diagnosing a specific anomaly above.
-            </p>
-        </div>
-    </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // --- 1. Tab Navigation & URL Hash Sync ---
+    const tabBtns = document.querySelectorAll('.info-tab-btn');
+    const tabPanes = document.querySelectorAll('.info-tab-pane');
+
+    function switchTab(tabId) {
+        tabBtns.forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.tab === tabId);
+        });
+        tabPanes.forEach(pane => {
+            pane.classList.toggle('active', pane.id === `tab-${tabId}`);
+        });
+
+        // Trigger KaTeX render on newly active pane if needed
+        if (window.renderMathInElement) {
+            const activePane = document.getElementById(`tab-${tabId}`);
+            if (activePane) {
+                renderMathInElement(activePane, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '$', right: '$', display: false}
+                    ]
+                });
+            }
+        }
+    }
+
+    tabBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const targetTab = btn.dataset.tab;
+            switchTab(targetTab);
+            history.replaceState(null, '', `#${targetTab}`);
+        });
+    });
+
+    // Handle deep links and hash navigation
+    function handleInitialHash() {
+        const hash = window.location.hash.replace('#', '');
+        if (!hash) return;
+
+        // Check if hash matches a tab
+        if (['params', 'math', 'gate', 'diagnostics'].includes(hash)) {
+            switchTab(hash);
+            return;
+        }
+
+        // Check if hash matches an element ID
+        const targetElem = document.getElementById(hash);
+        if (targetElem) {
+            // Find which pane contains this element
+            const parentPane = targetElem.closest('.info-tab-pane');
+            if (parentPane) {
+                const paneTabId = parentPane.id.replace('tab-', '');
+                switchTab(paneTabId);
+                setTimeout(() => {
+                    targetElem.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }, 100);
+            }
+        }
+    }
+
+    handleInitialHash();
+    window.addEventListener('hashchange', handleInitialHash);
+
+    // In-page tab links (e.g. "see Gate tab")
+    document.querySelectorAll('.tab-link').forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            const target = link.dataset.target;
+            if (target) {
+                switchTab(target);
+                history.replaceState(null, '', `#${target}`);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
+        });
+    });
+
+    // --- 2. Interactive Parameter Search & Category Filter ---
+    const searchInput = document.getElementById('param-search-input');
+    const clearBtn = document.getElementById('param-search-clear');
+    const catPills = document.querySelectorAll('.cat-pill');
+    const paramCards = document.querySelectorAll('#tab-params .param-card');
+
+    let activeCategory = 'all';
+    let searchQuery = '';
+
+    function filterParams() {
+        paramCards.forEach(card => {
+            const cardCat = card.dataset.category || '';
+            const cardKeywords = (card.dataset.keywords || '').toLowerCase();
+            const cardText = card.textContent.toLowerCase();
+
+            const matchesCategory = (activeCategory === 'all') || (cardCat === activeCategory);
+            const matchesSearch = !searchQuery || cardKeywords.includes(searchQuery) || cardText.includes(searchQuery);
+
+            if (matchesCategory && matchesSearch) {
+                card.style.display = '';
+            } else {
+                card.style.display = 'none';
+            }
+        });
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+            searchQuery = e.target.value.trim().toLowerCase();
+            clearBtn.style.display = searchQuery ? 'block' : 'none';
+            filterParams();
+        });
+    }
+
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            searchInput.value = '';
+            searchQuery = '';
+            clearBtn.style.display = 'none';
+            filterParams();
+            searchInput.focus();
+        });
+    }
+
+    catPills.forEach(pill => {
+        pill.addEventListener('click', () => {
+            catPills.forEach(p => p.classList.remove('active'));
+            pill.classList.add('active');
+            activeCategory = pill.dataset.cat;
+            filterParams();
+        });
+    });
+
+    // --- 3. Interactive Network Preset Visualizer ---
+    const presetBtns = document.querySelectorAll('.preset-select-btn');
+    const prevArch = document.getElementById('prev-arch');
+    const prevParams = document.getElementById('prev-params');
+    const prevHidden = document.getElementById('prev-hidden');
+    const prevNote = document.getElementById('prev-note');
+
+    presetBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            presetBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            const blocks = btn.dataset.blocks;
+            const filters = btn.dataset.filters;
+            const hidden = btn.dataset.hidden;
+            const params = btn.dataset.params;
+            const note = btn.dataset.note;
+
+            if (prevArch) prevArch.textContent = `${blocks} blocks × ${filters} filters`;
+            if (prevParams) prevParams.textContent = params;
+            if (prevHidden) prevHidden.textContent = `${hidden} units`;
+            if (prevNote) prevNote.textContent = note;
+        });
+    });
+});
+</script>
 {% endblock %}

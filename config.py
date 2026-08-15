@@ -246,7 +246,33 @@ class TrainingConfig:
     collapse_pass_rate_max: float = 0.25   # Max share of a colour's moves that are passes
     collapse_probe_positions: int = 128    # Buffer positions sampled for the probe
     collapse_auto_stop: bool = False       # True = halt training when tripped
-    
+
+    # --- Move restrictions (heuristics, not rules of Go) -------------------
+    # When True, the bot may not play into one of its own chain's only two
+    # eyes — the move that turns a provably-alive group into a dead one. It is
+    # enforced by removing the move from the action set, so MCTS never expands
+    # it, never gives it a prior and never puts it in a policy target.
+    # See game/eyes.py for the exact eye definition and its proof.
+    # Default False = identical behaviour to before this setting existed.
+    restrict_eye_fill: bool = False
+
+    # --- Mercy rule (self-play resignation) -------------------------------
+    # Stop a self-play game once one side's own search says it is lost, instead
+    # of paying a full MCTS search per move for a decided endgame. Self-play
+    # ONLY — the gate and the random-bot eval never resign, because there a
+    # wrong verdict corrupts a measurement rather than one training game.
+    #
+    # The cost of the tail being cut is zero at the default factor: training
+    # samples stop at move board_size², so nothing that produces data is ever
+    # reached. What resignation does risk is the outcome LABEL, which is why
+    # resign_playout_fraction exists — see ai/self_play.py.
+    resign_enabled: bool = False
+    resign_threshold: float = 0.90         # Root value <= -this counts as lost
+    resign_consecutive: int = 4            # Consecutive own moves that must agree
+    resign_min_move_factor: float = 1.0    # Earliest resign = factor x board area
+    resign_both_sides: bool = True         # Winner must agree it is winning
+    resign_playout_fraction: float = 0.1   # Share played out to measure mistakes
+
     # Elo
     elo_anchor: int = 500                  # Random bot starts at this Elo (≈30 kyu)
 
@@ -347,6 +373,13 @@ class Config:
             num_parallel_workers=_model_default(model_info.training, "num_parallel_workers"),
             collapse_guard_enabled=_model_default(model_info.training, "collapse_guard_enabled"),
             collapse_auto_stop=_model_default(model_info.training, "collapse_auto_stop"),
+            restrict_eye_fill=_model_default(model_info.training, "restrict_eye_fill"),
+            resign_enabled=_model_default(model_info.training, "resign_enabled"),
+            resign_threshold=_model_default(model_info.training, "resign_threshold"),
+            resign_consecutive=_model_default(model_info.training, "resign_consecutive"),
+            resign_min_move_factor=_model_default(model_info.training, "resign_min_move_factor"),
+            resign_both_sides=_model_default(model_info.training, "resign_both_sides"),
+            resign_playout_fraction=_model_default(model_info.training, "resign_playout_fraction"),
         )
         # Network architecture is stored per-model so that a saved weights.pt
         # is always rebuilt into the matching network. Fall back to defaults

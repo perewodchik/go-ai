@@ -1,0 +1,9 @@
+{
+  "id": "7",
+  "subject": "Auto-sim scaling by board size",
+  "description": "Add config to scale MCTS simulations to board area so policy targets stay learnable; raise defaults.",
+  "activeForm": "Adding board-scaled simulation config",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": []
+}

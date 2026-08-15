@@ -35,7 +35,12 @@ def _eval_worker(kwargs: dict) -> int:
     import time
     start_time = time.time()
 
-    mcts = MCTS(network=network, num_simulations=num_simulations, device=device)
+    # Only the network is restricted. The random bot is the Elo ANCHOR — giving
+    # it the same move filter would quietly make the baseline stronger and the
+    # measured Elo incomparable with every iteration recorded before the setting
+    # was switched on.
+    mcts = MCTS(network=network, num_simulations=num_simulations, device=device,
+                restrict_eye_fill=kwargs.get('restrict_eye_fill', False))
     random_bot = RandomBot(pass_probability=0.05)
     scorer = get_scorer("chinese")
     
@@ -111,6 +116,8 @@ def evaluate_against_random(
     games_dir: Optional[str] = None,
     stop_checker: Optional[Callable[[], bool]] = None,
     num_workers: int = 4,
+    progress_callback: Optional[Callable] = None,
+    restrict_eye_fill: bool = False,
 ) -> float:
     """
     Play games against the random bot and return win rate.
@@ -139,29 +146,60 @@ def evaluate_against_random(
             'game_idx': game_idx,
             'iteration': iteration,
             'games_dir': games_dir,
+            'restrict_eye_fill': restrict_eye_fill,
         })
-        
+
     wins = 0
+    completed = 0
+    active_futures = {}  # future -> game_idx
+    next_task_idx = 0
+
+    def _notify_progress():
+        if not progress_callback:
+            return
+        active_nums = sorted([idx + 1 for idx in active_futures.values()])
+        try:
+            progress_callback(completed, num_games, active_games=active_nums, num_workers=num_workers)
+        except TypeError:
+            try:
+                progress_callback(completed, num_games, active_nums, num_workers)
+            except TypeError:
+                progress_callback(completed, num_games)
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(_eval_worker, task) for task in tasks]
-        pending = set(futures)
-        
-        while pending:
+        while next_task_idx < min(num_workers, num_games):
+            f = executor.submit(_eval_worker, tasks[next_task_idx])
+            active_futures[f] = next_task_idx
+            next_task_idx += 1
+
+        _notify_progress()
+
+        while active_futures:
             if stop_checker and stop_checker():
                 executor.shutdown(wait=False, cancel_futures=True)
                 break
-            
-            done, pending = concurrent.futures.wait(
-                pending, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
+
+            done, _ = concurrent.futures.wait(
+                set(active_futures.keys()), timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
             )
-            
+
             for future in done:
+                game_idx = active_futures.pop(future)
                 try:
                     wins += future.result()
                 except Exception as e:
                     print(f"Eval worker failed: {e}")
 
-    return wins / max(num_games, 1)
+                completed += 1
+
+                if next_task_idx < num_games and not (stop_checker and stop_checker()):
+                    new_f = executor.submit(_eval_worker, tasks[next_task_idx])
+                    active_futures[new_f] = next_task_idx
+                    next_task_idx += 1
+
+                _notify_progress()
+
+    return wins / max(completed, 1)
 
 
 def _play_gate_game(
@@ -174,6 +212,7 @@ def _play_gate_game(
     game_idx: int,
     iteration: int,
     games_dir: Optional[str],
+    restrict_eye_fill: bool = False,
 ) -> int:
     """
     Play one candidate-vs-champion game and record it. Returns 1 if the
@@ -186,8 +225,13 @@ def _play_gate_game(
     from datetime import datetime
 
     game_start = time.time()
-    current_mcts = MCTS(network=current_network, num_simulations=num_simulations, device=device)
-    opponent_mcts = MCTS(network=opponent_network, num_simulations=num_simulations, device=device)
+    # Both sides restricted: the gate compares the candidate with the champion
+    # under the conditions they will actually play under, so an asymmetric
+    # filter here would measure the filter instead of the networks.
+    current_mcts = MCTS(network=current_network, num_simulations=num_simulations,
+                        device=device, restrict_eye_fill=restrict_eye_fill)
+    opponent_mcts = MCTS(network=opponent_network, num_simulations=num_simulations,
+                         device=device, restrict_eye_fill=restrict_eye_fill)
     scorer = get_scorer("chinese")
 
     state = GameState(board_size=board_size, komi=komi)
@@ -265,6 +309,8 @@ def evaluate_against_checkpoint(
     games_dir: Optional[str] = None,
     num_workers: int = 4,
     stop_checker: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable] = None,
+    restrict_eye_fill: bool = False,
 ) -> float:
     """
     Play the promotion-gate match between the candidate (`current_network`) and
@@ -298,6 +344,7 @@ def evaluate_against_checkpoint(
             'game_idx': game_idx,
             'iteration': iteration,
             'games_dir': games_dir,
+            'restrict_eye_fill': restrict_eye_fill,
         }
 
     workers = max(1, min(num_games, num_workers, os.cpu_count() or 4))
@@ -306,22 +353,54 @@ def evaluate_against_checkpoint(
         try:
             wins = 0
             completed = 0
+            active_futures = {}  # future -> game_idx
+            next_task_idx = 0
+
+            def _notify_progress():
+                if not progress_callback:
+                    return
+                active_nums = sorted([idx + 1 for idx in active_futures.values()])
+                try:
+                    progress_callback(completed, num_games, active_games=active_nums, num_workers=workers, candidate_wins=wins)
+                except TypeError:
+                    try:
+                        progress_callback(completed, num_games, active_nums, workers)
+                    except TypeError:
+                        progress_callback(completed, num_games)
+
             with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-                pending = {executor.submit(_gate_worker, _task(i)) for i in range(num_games)}
-                while pending:
+                while next_task_idx < min(workers, num_games):
+                    f = executor.submit(_gate_worker, _task(next_task_idx))
+                    active_futures[f] = next_task_idx
+                    next_task_idx += 1
+
+                _notify_progress()
+
+                while active_futures:
                     if stop_checker and stop_checker():
                         executor.shutdown(wait=False, cancel_futures=True)
                         break
-                    done, pending = concurrent.futures.wait(
-                        pending, timeout=0.1,
+
+                    done, _ = concurrent.futures.wait(
+                        set(active_futures.keys()), timeout=0.1,
                         return_when=concurrent.futures.FIRST_COMPLETED,
                     )
                     for future in done:
+                        game_idx = active_futures.pop(future)
                         try:
                             wins += future.result()
-                            completed += 1
                         except Exception as e:
                             print(f"Gate worker failed: {e}")
+
+                        completed += 1
+
+                        if next_task_idx < num_games and not (stop_checker and stop_checker()):
+                            new_f = executor.submit(_gate_worker, _task(next_task_idx))
+                            active_futures[new_f] = next_task_idx
+                            next_task_idx += 1
+
+                        _notify_progress()
+
             # Score against the games that actually finished, so an interrupted
             # or partially failed match is not read as a pile of losses.
             return wins / max(completed, 1)
@@ -335,8 +414,36 @@ def evaluate_against_checkpoint(
             break
         wins += _play_gate_game(**_task(game_idx))
         played += 1
+        if progress_callback:
+            try:
+                progress_callback(played, num_games, active_games=[game_idx + 1], num_workers=1, candidate_wins=wins)
+            except Exception:
+                pass
 
     return wins / max(played, 1)
+
+
+
+def compute_pairwise_elo(elo_a: float, elo_b: float, score_a: float,
+                         k: float = 16.0) -> tuple:
+    """
+    Symmetric Elo update for one head-to-head result between two rated players.
+
+    `score_a` is A's score in the game: 1.0 win, 0.5 draw, 0.0 loss. Unlike
+    `compute_elo_update`, which moves a single rating against a fixed anchor,
+    this moves BOTH ratings by the same amount in opposite directions — the
+    right model when the opponent is another tracked bot rather than the random
+    anchor, since points won have to come from somewhere.
+
+    K defaults to 16 rather than the 32 used against the anchor: bot-vs-bot
+    matches are played in batches, so a per-game K of 32 would swing ratings
+    wildly over a 20-game series.
+
+    Returns (new_elo_a, new_elo_b), both floored at 0.
+    """
+    expected_a = 1.0 / (1.0 + math.pow(10, (elo_b - elo_a) / 400))
+    delta = k * (score_a - expected_a)
+    return max(0.0, elo_a + delta), max(0.0, elo_b - delta)
 
 
 def compute_elo_update(current_elo: float, opponent_elo: float, win_rate: float) -> float:

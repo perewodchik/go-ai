@@ -51,6 +51,18 @@ class TrainingParams:
     gate_stall_warning: int = 5
     # Worker processes shared by self-play, the gate, and the random-bot eval.
     num_parallel_workers: int = 4
+    # --- Move restrictions ---
+    # Opt-in heuristic: forbid the bot from filling one of its own two eyes.
+    # False reproduces the behaviour of every model created before it existed.
+    restrict_eye_fill: bool = False
+    # --- Mercy rule (self-play resignation) ---
+    # Off by default; see config.TrainingConfig for what each one does.
+    resign_enabled: bool = False
+    resign_threshold: float = 0.90
+    resign_consecutive: int = 4
+    resign_min_move_factor: float = 1.0
+    resign_both_sides: bool = True
+    resign_playout_fraction: float = 0.1
 
 
 @dataclass

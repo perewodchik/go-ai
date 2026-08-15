@@ -80,11 +80,13 @@ def create_app() -> Flask:
     from web.routes.game_routes import game_bp
     from web.routes.training_routes import training_bp
     from web.routes.model_routes import model_bp
+    from web.routes.match_routes import match_bp
     from web.routes.api import api_bp
 
     app.register_blueprint(game_bp)
     app.register_blueprint(training_bp, url_prefix='/training')
     app.register_blueprint(model_bp, url_prefix='/models')
+    app.register_blueprint(match_bp, url_prefix='/api/match')
     app.register_blueprint(api_bp, url_prefix='/api')
 
     # Index route
@@ -104,6 +106,28 @@ def create_app() -> Flask:
         from config import NETWORK_PRESETS, NETWORK_PRESET_ORDER
         presets = [dict(key=k, **NETWORK_PRESETS[k]) for k in NETWORK_PRESET_ORDER]
         return render_template('info.html', network_presets=presets)
+
+    # Legacy training page route
+    @app.route('/training_old')
+    @app.route('/training_old/')
+    def training_old():
+        from flask import render_template
+        active_model = model_manager.get_active_model()
+        status = trainer.get_status() if trainer else {}
+        return render_template('training_old.html',
+                               status=status,
+                               active_model=active_model)
+
+    # Redesigned training page (Candidate vs Champion) — also accessible at /training_new
+    @app.route('/training_new')
+    @app.route('/training_new/')
+    def training_new():
+        from flask import render_template
+        active_model = model_manager.get_active_model()
+        status = trainer.get_status() if trainer else {}
+        return render_template('training.html',
+                               status=status,
+                               active_model=active_model)
 
     @socketio.on('start_training')
     def handle_start_training(data=None):
@@ -132,6 +156,20 @@ def create_app() -> Flask:
             'kyu_rank': '30k',
             'buffer_size': 0,
             'device': 'cpu',
+            'current_stage': {
+                'stage': 'idle',
+                'stage_name': 'Idle',
+                'stage_index': 0,
+                'total_stages': 5,
+                'iteration': 0,
+                'completed_items': 0,
+                'total_items': 0,
+                'percent': 0,
+                'active_games': [],
+                'num_workers': 0,
+                'detail': 'Select a model to begin',
+                'stages_overview': [],
+            },
             'recent_logs': [],
         }
         status_data['active_model'] = active_model.to_dict() if active_model else None

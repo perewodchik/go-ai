@@ -1,0 +1,522 @@
+{% extends "base.html" %}
+{% block title %}Go AI — Training (Candidate vs Champion){% endblock %}
+
+{% block content %}
+{% if not active_model %}
+<div class="training-container">
+    <div class="no-model-state glass" style="text-align: center; padding: 4rem 2rem; margin-top: 2rem;">
+        <div class="no-model-icon" style="font-size: 3rem; margin-bottom: 1rem;">🧠</div>
+        <h2>No Model Selected</h2>
+        <p style="color: var(--text-muted); margin-bottom: 2rem;">You must create or select a model from the Dashboard before you can train.</p>
+        <a href="/" class="btn-primary" style="text-decoration: none;">Go to Dashboard</a>
+    </div>
+</div>
+{% else %}
+<div class="training-container">
+    <div class="page-title-row">
+        <h1 class="page-title">Training: {{ active_model.name }}</h1>
+    </div>
+
+    <!-- Live Status & Learning Pipeline Hub -->
+    <div class="status-hub-block glass" id="live-status-hub">
+            <!-- Top Status Bar -->
+            <div class="status-hub-header">
+                <div class="status-meta-badge iter-badge" title="Current training iteration">
+                    <span class="meta-badge-k">Iteration</span>
+                    <strong class="meta-badge-v" id="status-iter-badge">#{{ status.iteration or 0 }}</strong>
+                </div>
+                <div class="status-meta-badge games-badge" title="Total games played across all iterations">
+                    <span class="meta-badge-k">Games</span>
+                    <strong class="meta-badge-v" id="status-games-badge">{{ status.total_games or 0 }}</strong>
+                </div>
+                <div class="status-meta-badge workers-badge" id="status-workers-badge" title="Number of parallel worker processes">
+                    <span class="meta-badge-k">Workers</span>
+                    <strong class="meta-badge-v" id="status-workers-count">—</strong>
+                </div>
+                <div class="status-meta-badge device-badge" title="Compute hardware">
+                    <span class="meta-badge-k">Device</span>
+                    <strong class="meta-badge-v" id="status-device-badge">{{ (status.device or 'CPU')|upper }}</strong>
+                </div>
+            </div>
+
+            <!-- 5-Stage Learning Pipeline Stepper -->
+            <div class="pipeline-stepper-wrap">
+                <div class="pipeline-stepper" id="pipeline-stepper">
+                    <div class="pipeline-step" data-stage="self_play" id="step-self_play">
+                        <div class="step-icon-wrap">
+                            <span class="step-num">1</span>
+                            <span class="step-icon">🎲</span>
+                            <span class="step-check">✓</span>
+                        </div>
+                        <div class="step-info">
+                            <span class="step-name">Self-Play</span>
+                            <span class="step-sub">MCTS Games</span>
+                        </div>
+                    </div>
+                    <div class="step-connector" id="conn-1"></div>
+
+                    <div class="pipeline-step" data-stage="training" id="step-training">
+                        <div class="step-icon-wrap">
+                            <span class="step-num">2</span>
+                            <span class="step-icon">🧠</span>
+                            <span class="step-check">✓</span>
+                        </div>
+                        <div class="step-info">
+                            <span class="step-name">NN Training</span>
+                            <span class="step-sub">Loss Optimization</span>
+                        </div>
+                    </div>
+                    <div class="step-connector" id="conn-2"></div>
+
+                    <div class="pipeline-step" data-stage="gate" id="step-gate">
+                        <div class="step-icon-wrap">
+                            <span class="step-num">3</span>
+                            <span class="step-icon">🛡️</span>
+                            <span class="step-check">✓</span>
+                        </div>
+                        <div class="step-info">
+                            <span class="step-name">Champion Gate</span>
+                            <span class="step-sub">Head-to-Head</span>
+                        </div>
+                    </div>
+                    <div class="step-connector" id="conn-3"></div>
+
+                    <div class="pipeline-step" data-stage="eval" id="step-eval">
+                        <div class="step-icon-wrap">
+                            <span class="step-num">4</span>
+                            <span class="step-icon">🎯</span>
+                            <span class="step-check">✓</span>
+                        </div>
+                        <div class="step-info">
+                            <span class="step-name">Random Eval</span>
+                            <span class="step-sub">Elo Anchor</span>
+                        </div>
+                    </div>
+                    <div class="step-connector" id="conn-4"></div>
+
+                    <div class="pipeline-step" data-stage="saving" id="step-saving">
+                        <div class="step-icon-wrap">
+                            <span class="step-num">5</span>
+                            <span class="step-icon">💾</span>
+                            <span class="step-check">✓</span>
+                        </div>
+                        <div class="step-info">
+                            <span class="step-name">Checkpoint</span>
+                            <span class="step-sub">Save & Diagnostics</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Live Execution Details & Progress Bar -->
+            <div class="stage-arena" id="stage-arena">
+                <div class="stage-arena-header">
+                    <div class="stage-detail-text" id="stage-detail-text">Ready for training · Press Start Training below to begin.</div>
+                    <div class="stage-progress-counts">
+                        <span class="stage-count-val" id="stage-progress-text">0 / 0</span>
+                        <span class="stage-pct-val" id="stage-progress-pct">0%</span>
+                    </div>
+                </div>
+
+                <div class="stage-progress-bar-wrap">
+                    <div class="stage-progress-bar-fill" id="stage-progress-fill" style="width: 0%;"></div>
+                </div>
+
+                <!-- Parallel Games Visualizer (active during game generation phases) -->
+                <div class="parallel-games-arena" id="parallel-games-arena" style="display: none;">
+                    <div class="active-games-grid" id="active-games-container"></div>
+                </div>
+
+                <!-- NN Training Step Readout (active during Stage 2) -->
+                <div class="nn-step-arena" id="nn-step-arena" style="display: none;">
+                    <div class="nn-metrics-chips">
+                        <span class="nn-metric-chip" id="nn-chip-step">Step: <strong>0 / 0</strong></span>
+                        <span class="nn-metric-chip" id="nn-chip-loss">Combined Loss: <strong>—</strong></span>
+                        <span class="nn-metric-chip" id="nn-chip-policy">Policy Loss: <strong>—</strong></span>
+                        <span class="nn-metric-chip" id="nn-chip-value">Value Loss: <strong>—</strong></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
+    <!-- 1. Champion Progress / Promotion Gate (Primary Focus) -->
+    <div class="collapsible-block glass" id="gate-panel">
+        <div class="collapsible-header">
+            <div class="collapsible-title">
+                <h3>🛡 Champion Progress</h3>
+                <span class="gate-champ-pill" id="gate-champ-version">v1</span>
+            </div>
+            <button class="collapse-toggle" type="button" aria-label="Toggle Champion Progress">
+                <span class="collapse-chevron">▼</span>
+            </button>
+        </div>
+
+        <div class="collapsible-content">
+            <div class="gate-stats" id="gate-stats">
+                <div class="gate-stat">
+                    <span class="gate-stat-label">Strength gain</span>
+                    <strong class="gate-stat-val gate-stat-accent" id="gate-elo">—</strong>
+                    <small>Elo vs first champion</small>
+                </div>
+                <div class="gate-stat">
+                    <span class="gate-stat-label">Promotions</span>
+                    <strong class="gate-stat-val" id="gate-promotions">—</strong>
+                    <small id="gate-promo-rate">—</small>
+                </div>
+                <div class="gate-stat">
+                    <span class="gate-stat-label">Avg gate score</span>
+                    <strong class="gate-stat-val" id="gate-avg">—</strong>
+                    <small>vs previous champion</small>
+                </div>
+                <div class="gate-stat">
+                    <span class="gate-stat-label">Since last promotion</span>
+                    <strong class="gate-stat-val" id="gate-streak">—</strong>
+                    <small id="gate-last-promo">—</small>
+                </div>
+            </div>
+
+            <div class="gate-chart-wrap">
+                <canvas id="gate-chart"></canvas>
+            </div>
+            <p class="margin-caption">
+                Bars = the candidate's score against the reigning champion each iteration
+                (<span style="color:#81c784">green</span> promoted, <span style="color:#ff6b6b">red</span> rejected);
+                the dashed line is the 55% promotion threshold. The gold line is the champion's
+                cumulative strength — it only rises when a candidate actually proved it was better.
+            </p>
+            <p class="margin-caption" id="gate-empty" style="display:none;">
+                No gate data yet — the champion ladder starts building from the next completed iteration.
+            </p>
+        </div>
+    </div>
+
+    <!-- 2. Training Metrics (Neural Network Health: Policy & Value Loss) -->
+    <div class="collapsible-block glass" id="nn-health-panel">
+        <div class="collapsible-header">
+            <div class="collapsible-title">
+                <h3>📈 Training Metrics</h3>
+            </div>
+            <div class="collapsible-header-actions">
+                <button class="collapse-toggle" type="button" aria-label="Toggle Training Metrics">
+                    <span class="collapse-chevron">▼</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="collapsible-content">
+            <div class="metrics-toolbar-bar">
+                <div class="graph-filter-buttons" id="metrics-view-toggle">
+                    <button class="filter-btn active" data-view="chart" title="Show loss charts">Chart</button>
+                    <button class="filter-btn" data-view="table" title="Show raw metrics table">Table</button>
+                </div>
+            </div>
+
+            <!-- Chart mode (2-card grid for Policy and Value Loss) -->
+            <div class="charts-grid charts-grid-2col" id="metrics-charts">
+                <div class="chart-card glass">
+                    <div class="chart-header">
+                        <h4>Policy Loss</h4>
+                        <span class="chart-metric-hint" title="Cross-entropy loss between MCTS visit distribution and network move policy">Move Distribution</span>
+                    </div>
+                    <canvas id="policy-loss-chart"></canvas>
+                </div>
+                <div class="chart-card glass">
+                    <div class="chart-header">
+                        <h4>Value Loss</h4>
+                        <span class="chart-metric-hint" title="Mean-squared error between network outcome prediction and actual game result">Game Outcome (MSE)</span>
+                    </div>
+                    <canvas id="value-loss-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- Table mode (hidden by default) -->
+            <div class="metrics-table-card glass" id="metrics-table-card" hidden>
+                <div class="metrics-table-scroll">
+                    <table class="metrics-table">
+                        <thead>
+                            <tr>
+                                <th>Iter</th>
+                                <th>Champion Elo</th>
+                                <th>Policy Loss</th>
+                                <th>Value Loss</th>
+                                <th>Total Loss</th>
+                                <th>Gate Win Rate</th>
+                                <th>Eval vs Random</th>
+                            </tr>
+                        </thead>
+                        <tbody id="metrics-table-body"></tbody>
+                    </table>
+                </div>
+                <p class="metrics-table-empty" id="metrics-table-empty">No iterations recorded yet.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. Pipeline Stats (Learning Stats + Compact Self-Play Balance) -->
+    <div class="collapsible-block glass" id="pipeline-stats-panel">
+        <div class="collapsible-header">
+            <div class="collapsible-title">
+                <h3>⚙️ Pipeline & Self-Play Stats</h3>
+            </div>
+            <button class="collapse-toggle" type="button" aria-label="Toggle Pipeline Stats">
+                <span class="collapse-chevron">▼</span>
+            </button>
+        </div>
+
+        <div class="collapsible-content">
+            <div class="pipeline-stats-grid">
+                <!-- Win Margin Dispersion & Spread column -->
+                <div class="pipeline-subcard">
+                    <div class="pipeline-subcard-header">
+                        <h4 class="pipeline-subcard-title">📈 Margin Dispersion & Spread <small>(variability / ±1σ)</small></h4>
+                    </div>
+                    <div class="dispersion-container-compact">
+                        <div class="dispersion-stats-bar">
+                            <div class="dispersion-stat-chip" title="Standard deviation of victory margins (higher = wide swing between close & blowout games)">
+                                <span class="disp-stat-label">Std Dev (σ)</span>
+                                <strong class="disp-stat-val" id="disp-std-val">—</strong>
+                            </div>
+                            <div class="dispersion-stat-chip" title="Average victory margin across games in points">
+                                <span class="disp-stat-label">Mean (μ)</span>
+                                <strong class="disp-stat-val" id="disp-mean-val">—</strong>
+                            </div>
+                            <div class="dispersion-stat-chip" title="Share of close games won by 10 points or less">
+                                <span class="disp-stat-label">Close (≤10p)</span>
+                                <strong class="disp-stat-val disp-stat-close" id="disp-close-val">—</strong>
+                            </div>
+                            <div class="dispersion-stat-chip" title="Share of blowout games won by 40 points or more">
+                                <span class="disp-stat-label">Blowout (≥40p)</span>
+                                <strong class="disp-stat-val disp-stat-blowout" id="disp-blowout-val">—</strong>
+                            </div>
+                        </div>
+
+                        <!-- Dispersion & Spread chart -->
+                        <div class="margin-chart-wrap pipeline-margin-chart-wrap">
+                            <div class="margin-axis-label margin-axis-top">Moving Avg Margin (μ) & ±1σ Spread Band →</div>
+                            <canvas id="margin-dispersion-chart"></canvas>
+                            <div class="margin-axis-label margin-axis-bottom">Captures score volatility · Peaks show wide swings (close vs blowout); lower bands show uniform games.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Self-Play Balance column -->
+                <div class="pipeline-subcard">
+                    <div class="pipeline-subcard-header">
+                        <h4 class="pipeline-subcard-title">⚖️ Self-Play Balance <small>(black vs white)</small></h4>
+                        <div class="graph-filter-buttons" id="selfplay-filter-btns">
+                            <button class="filter-btn active" data-limit="all" title="Show all games">All</button>
+                            <button class="filter-btn" data-limit="10" title="Show last 10 games">10</button>
+                            <button class="filter-btn" data-limit="20" title="Show last 20 games">20</button>
+                            <button class="filter-btn" data-limit="50" title="Show last 50 games">50</button>
+                            <button class="filter-btn" data-limit="100" title="Show last 100 games">100</button>
+                        </div>
+                    </div>
+                    <div class="balance-container-compact">
+                        <div class="balance-bar">
+                            <div class="balance-fill-black" id="balance-black-fill" style="width:50%"></div>
+                            <div class="balance-fill-white" id="balance-white-fill" style="width:50%"></div>
+                        </div>
+                        <div class="balance-labels">
+                            <span>⚫ Black <strong id="ls-wr-black">—</strong></span>
+                            <span>⚪ White <strong id="ls-wr-white">—</strong></span>
+                        </div>
+                        <div class="margin-wins" id="selfplay-wins">
+                            <span class="win-pill win-pill-black">⚫ <strong id="sp-black-wins">0</strong> wins</span>
+                            <span class="win-pill win-pill-white">⚪ <strong id="sp-white-wins">0</strong> wins</span>
+                        </div>
+
+                        <!-- Diverging margin chart -->
+                        <div class="margin-chart-wrap pipeline-margin-chart-wrap">
+                            <div class="margin-axis-label margin-axis-top">⚫ Black winning →</div>
+                            <canvas id="selfplay-margin-chart"></canvas>
+                            <div class="margin-axis-label margin-axis-bottom">⚪ White winning →</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 4. Time Metrics Block (Open by Default) -->
+    <div class="collapsible-block glass" id="time-metrics-panel">
+        <div class="collapsible-header">
+            <div class="collapsible-title">
+                <h3>⏱️ Time Metrics</h3>
+            </div>
+            <div class="collapsible-header-actions">
+                <button class="collapse-toggle" type="button" aria-label="Toggle Time Metrics">
+                    <span class="collapse-chevron">▼</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="collapsible-content">
+            <!-- Tabs & summary badges inside collapsible block -->
+            <div class="time-tabs-bar">
+                <div class="time-summary-badges">
+                    <span class="time-badge" title="Total duration of the last completed iteration">
+                        Last Iter: <strong id="tm-last-iter-total">—</strong>
+                    </span>
+                    <span class="time-badge time-badge-primary" title="Total time spent across all iterations">
+                        Total Runtime: <strong id="tm-all-time-total">—</strong>
+                    </span>
+                </div>
+                <div class="time-tabs" id="time-metrics-tabs">
+                    <button class="time-tab-btn active" data-tab="summary">Overview</button>
+                    <button class="time-tab-btn" data-tab="graphs">Graph</button>
+                    <button class="time-tab-btn" data-tab="history">History</button>
+                </div>
+            </div>
+
+            <!-- TAB 1: Overview Matrix Table -->
+            <div class="time-tab-content active" id="time-tab-summary">
+                <div class="time-matrix-table-wrap">
+                    <table class="time-matrix-table">
+                        <thead>
+                            <tr>
+                                <th>Phase</th>
+                                <th>Share</th>
+                                <th>Last Iter</th>
+                                <th>Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="phase-cell"><span class="phase-dot dot-sp"></span> Self-Play</td>
+                                <td class="share-cell"><div class="phase-share-bar"><div class="share-fill fill-sp" id="tm-sp-bar" style="width:0%"></div><span class="share-txt" id="tm-sp-pct">0%</span></div></td>
+                                <td><span class="time-val-badge badge-sp" id="tm-sp-total-last">—</span></td>
+                                <td><span class="time-val-muted" id="tm-sp-total-all">—</span></td>
+                            </tr>
+                            <tr>
+                                <td class="phase-cell"><span class="phase-dot dot-nn"></span> NN Training</td>
+                                <td class="share-cell"><div class="phase-share-bar"><div class="share-fill fill-nn" id="tm-nn-bar" style="width:0%"></div><span class="share-txt" id="tm-nn-pct">0%</span></div></td>
+                                <td><span class="time-val-badge badge-nn" id="tm-nn-total-last">—</span></td>
+                                <td><span class="time-val-muted" id="tm-nn-total-all">—</span></td>
+                            </tr>
+                            <tr>
+                                <td class="phase-cell"><span class="phase-dot dot-rand"></span> Random Bot</td>
+                                <td class="share-cell"><div class="phase-share-bar"><div class="share-fill fill-rand" id="tm-rand-bar" style="width:0%"></div><span class="share-txt" id="tm-rand-pct">0%</span></div></td>
+                                <td><span class="time-val-badge badge-rand" id="tm-rand-total-last">—</span></td>
+                                <td><span class="time-val-muted" id="tm-rand-total-all">—</span></td>
+                            </tr>
+                            <tr>
+                                <td class="phase-cell"><span class="phase-dot dot-champ"></span> Champion Gate</td>
+                                <td class="share-cell"><div class="phase-share-bar"><div class="share-fill fill-champ" id="tm-champ-bar" style="width:0%"></div><span class="share-txt" id="tm-champ-pct">0%</span></div></td>
+                                <td><span class="time-val-badge badge-champ" id="tm-champ-total-last">—</span></td>
+                                <td><span class="time-val-muted" id="tm-champ-total-all">—</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- TAB 2: Interactive Graphs -->
+            <div class="time-tab-content" id="time-tab-graphs" style="display: none;">
+                <div class="graph-toolbar">
+                    <span class="toolbar-label">Component Filter:</span>
+                    <div class="graph-filter-buttons" id="time-graph-toggles">
+                        <button class="filter-btn active" data-series="self_play">Self</button>
+                        <button class="filter-btn active" data-series="nn_train">Training</button>
+                        <button class="filter-btn active" data-series="random_eval">Random</button>
+                        <button class="filter-btn active" data-series="champion_gate">Champion</button>
+                        <button class="filter-btn active" data-series="total">Total</button>
+                    </div>
+                </div>
+                <div class="time-chart-wrap">
+                    <canvas id="time-breakdown-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- TAB 3: Time History Table -->
+            <div class="time-tab-content" id="time-tab-history" style="display: none;">
+                <div class="time-history-table-wrap">
+                    <table class="time-history-table">
+                        <thead>
+                            <tr>
+                                <th>Iter</th>
+                                <th>Total</th>
+                                <th>Self</th>
+                                <th>Training</th>
+                                <th>Random</th>
+                                <th>Champion</th>
+                            </tr>
+                        </thead>
+                        <tbody id="time-history-table-body"></tbody>
+                    </table>
+                </div>
+                <p class="time-history-empty" id="time-history-empty" style="display: none;">No iteration time history recorded yet.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 5. Log + Games Browser -->
+    <div class="collapsible-block glass" id="logs-games-panel">
+        <div class="collapsible-header">
+            <div class="collapsible-title">
+                <h3>📋 Training Log & Games</h3>
+            </div>
+            <button class="collapse-toggle" type="button" aria-label="Toggle Training Log and Games">
+                <span class="collapse-chevron">▼</span>
+            </button>
+        </div>
+
+        <div class="collapsible-content">
+            <div class="bottom-panels">
+                <div class="log-panel glass">
+                    <h4 class="subpanel-title">Live Training Log</h4>
+                    <div id="training-log" class="log-content"></div>
+                </div>
+                <div class="games-panel glass">
+                    <h4 class="subpanel-title">Stored Games Browser</h4>
+                    <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem;">Click any self-play or promotion game to open the full interactive board review.</p>
+                    <div id="games-list" class="games-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Milestone notifications -->
+    <div id="milestone-toast" class="toast" style="display:none;">
+        <span id="milestone-text"></span>
+    </div>
+</div>
+
+<!-- Sticky command bar — always visible at bottom -->
+<div class="command-bar" id="command-bar">
+    <!-- Slide-up tuning panel (hidden by default) -->
+    <div class="tune-panel" id="tune-panel" hidden>
+        <div class="tune-panel-inner">
+            <div class="tune-panel-head">
+                <span class="tune-title">⚙ Tune Parameters</span>
+                <span class="tune-hint">Applies from the next iteration — no restart needed.</span>
+            </div>
+            <div id="tuner-param-categories" class="param-categories-container"></div>
+            <div class="tune-panel-actions">
+                <button id="btn-tune-cancel" class="cmd-btn cmd-btn-save">Cancel</button>
+                <button id="btn-tune-apply" class="cmd-btn cmd-btn-apply">✓ Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="command-bar-inner">
+        <div class="cmd-actions">
+            <button id="btn-tune-toggle" class="cmd-btn cmd-btn-tune">⚙ <span class="cmd-btn-label">Tune</span></button>
+            <button id="btn-start-training" class="cmd-btn cmd-btn-start" style="display:none;">▶ <span class="cmd-btn-label">Start Training</span></button>
+            <button id="btn-stop-training" class="cmd-btn cmd-btn-stop" style="display:none;" title="Graceful stop after current iteration finishes">⏹ <span class="cmd-btn-label">Stop Training</span></button>
+            <button id="btn-force-stop" class="cmd-btn cmd-btn-force-stop" style="display:none;" title="Immediately abort training & restore last clean checkpoint">⚡ <span class="cmd-btn-label">Force Stop</span></button>
+        </div>
+    </div>
+</div>
+
+<!-- Lightweight action toast -->
+<div id="action-toast" class="toast" style="display:none;"></div>
+<script id="initial-status-data" type="application/json">{{ (status or {})|tojson }}</script>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/board.js') }}"></script>
+<script src="{{ url_for('static', filename='js/charts.js') }}"></script>
+<script src="{{ url_for('static', filename='js/training_new.js') }}"></script>
+{% endblock %}

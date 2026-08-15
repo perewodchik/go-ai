@@ -40,9 +40,15 @@ class GameState:
         is_over: Whether the game has ended.
         winner: Winner color or None (if not yet determined).
         resign_color: Color that resigned, or None.
+        restrict_eye_fill: Optional bot-only restriction. When True,
+            get_legal_moves() hides moves that would fill one of the mover's own
+            two eyes (see game/eyes.py). It deliberately does NOT affect
+            is_legal()/play_move(), so humans, replays and stored games behave
+            identically whether it is set or not.
     """
-    
-    def __init__(self, board_size: int = 9, komi: float = 6.5):
+
+    def __init__(self, board_size: int = 9, komi: float = 6.5,
+                 restrict_eye_fill: bool = False):
         self.board = Board(board_size)
         self.board_size = board_size
         self.komi = komi
@@ -55,7 +61,8 @@ class GameState:
         self.is_over = False
         self.winner: Optional[int] = None
         self.resign_color: Optional[int] = None
-    
+        self.restrict_eye_fill = restrict_eye_fill
+
     def copy(self) -> 'GameState':
         """Deep copy the entire game state."""
         new = GameState.__new__(GameState)
@@ -71,6 +78,10 @@ class GameState:
         new.is_over = self.is_over
         new.winner = self.winner
         new.resign_color = self.resign_color
+        # Carried through every copy on purpose: MCTS builds its whole tree out
+        # of copies, so this is what keeps the restriction in force at every
+        # depth of the search rather than only at the root.
+        new.restrict_eye_fill = self.restrict_eye_fill
         return new
     
     @property
@@ -85,7 +96,8 @@ class GameState:
         """
         return rules.get_legal_moves(
             self.board, self.current_player,
-            self.ko_point, self.board_hash_history
+            self.ko_point, self.board_hash_history,
+            restrict_eye_fill=self.restrict_eye_fill,
         )
     
     def is_legal(self, row: int, col: int) -> bool:
@@ -174,9 +186,10 @@ class GameState:
         history = self.move_history[:-1]
         komi = self.komi
         size = self.board_size
-        
+        restrict = self.restrict_eye_fill
+
         # Reset to initial state
-        self.__init__(board_size=size, komi=komi)
+        self.__init__(board_size=size, komi=komi, restrict_eye_fill=restrict)
         
         # Replay
         for color, move in history:
