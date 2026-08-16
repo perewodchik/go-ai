@@ -258,11 +258,6 @@
 
         <div class="gate-stats" id="gate-stats">
             <div class="gate-stat">
-                <span class="gate-stat-label">Strength gain</span>
-                <strong class="gate-stat-val gate-stat-accent" id="gate-elo">—</strong>
-                <small>Elo vs first champion</small>
-            </div>
-            <div class="gate-stat">
                 <span class="gate-stat-label">Promotions</span>
                 <strong class="gate-stat-val" id="gate-promotions">—</strong>
                 <small id="gate-promo-rate">—</small>
@@ -285,9 +280,7 @@
         <p class="margin-caption">
             Bars = the candidate's score against the reigning champion each iteration
             (<span style="color:#81c784">green</span> promoted, <span style="color:#ff6b6b">red</span> rejected);
-            the dashed line is the 55% promotion threshold. The gold line is the champion's
-            cumulative strength — it only rises when a candidate actually proved it was better,
-            so a flat stretch means genuine stagnation, not noise.
+            the dashed line is the 55% promotion threshold.
         </p>
         <p class="margin-caption" id="gate-empty" style="display:none;">
             No gate data yet — the champion ladder starts building from the next completed iteration.

@@ -102,9 +102,9 @@
                 <strong id="net-size-label">Small</strong>
                 <span id="net-size-note" class="model-list-meta"></span>
             </div>
-            <span id="net-size-locked" class="model-form-warning" style="display:none;">
+            <p id="net-size-locked" class="model-form-warning" style="display:none;">
                 Network size is frozen after creation — the saved weights depend on it.
-            </span>
+            </p>
         </div>
         <details class="advanced-toggle" open>
             <summary>Advanced Training Settings</summary>
@@ -123,13 +123,9 @@
     <div class="modal-content glass delete-model-form">
         <h2>Delete model</h2>
         <p id="delete-impact" class="delete-impact"></p>
-        <div class="form-group">
-            <label>Type the model name to confirm</label>
-            <input type="text" id="delete-confirm-name" autocomplete="off" placeholder="model name">
-        </div>
         <div class="modal-actions">
             <button id="btn-cancel-delete" class="btn-secondary">Cancel</button>
-            <button id="btn-confirm-delete" class="btn-danger" disabled>Delete permanently</button>
+            <button id="btn-confirm-delete" class="btn-danger">Delete permanently</button>
         </div>
     </div>
 </div>

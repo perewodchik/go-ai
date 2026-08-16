@@ -300,18 +300,47 @@ body {
     margin-top: 1rem;
     margin-bottom: 1.5rem;
     background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border-glass);
     border-radius: var(--radius-sm);
     padding: 0.5rem 1rem;
 }
 .advanced-toggle summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     cursor: pointer;
     font-weight: 500;
     color: var(--accent-light);
     padding: 0.5rem 0;
     list-style: none;
+    user-select: none;
+    transition: color 0.15s ease;
 }
 .advanced-toggle summary::-webkit-details-marker { display: none; }
-.advanced-toggle[open] summary { border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 1rem; }
+.advanced-toggle summary::marker { content: ""; display: none; }
+.advanced-toggle summary::after {
+    content: '▼';
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    transition: transform 0.2s ease, color 0.2s ease;
+    display: inline-block;
+    transform: rotate(-90deg);
+}
+.advanced-toggle[open] summary {
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    margin-bottom: 1rem;
+}
+.advanced-toggle[open] summary::after {
+    transform: rotate(0deg);
+    color: var(--accent-light);
+}
+.advanced-toggle summary:hover {
+    color: var(--accent);
+}
+.advanced-toggle summary:hover::after {
+    color: var(--accent);
+}
 
 /* ---- Parameter Sliders & Categories ---- */
 .param-categories-container {
@@ -639,6 +668,7 @@ body {
 .play-view { display: block; }
 .play-view-narrow { max-width: 480px; margin: 0 auto; }
 .play-view-wide { max-width: 620px; margin: 0 auto; }
+.play-view-game { max-width: calc(600px + 340px + 1.5rem); margin: 0 auto; }
 
 .play-topbar {
     display: flex;
@@ -754,7 +784,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     gap: 1.5rem;
     align-items: start;
 }
-.board-section { display: flex; justify-content: center; width: 100%; min-width: 0; }
+.board-section { display: flex; justify-content: flex-start; width: 100%; min-width: 0; }
 #go-board, #review-board {
     cursor: pointer;
     border-radius: var(--radius);
@@ -1011,7 +1041,8 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .create-model-form h2 { text-align: center; }
 .form-row-3 { grid-template-columns: 1fr 1fr 1fr; }
 .model-form-warning {
-    margin: 0.5rem 0 0;
+    display: block;
+    margin: 0.85rem 0 0;
     padding: 0.6rem 0.8rem;
     border-radius: var(--radius-sm);
     background: rgba(255, 167, 38, 0.12);
@@ -1019,6 +1050,9 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     color: var(--warning);
     font-size: 0.8rem;
     line-height: 1.4;
+}
+#net-size-locked {
+    margin-top: 0.85rem;
 }
 
 .modal-actions {
@@ -1667,7 +1701,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     border-collapse: collapse;
     font-size: 0.85rem;
     font-variant-numeric: tabular-nums;
-    min-width: 560px;
+    min-width: 720px;
 }
 .metrics-table thead th {
     position: sticky;
@@ -1694,7 +1728,19 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
     white-space: nowrap;
 }
 .metrics-table tbody tr:hover td { background: var(--bg-glass); }
-.metrics-table tbody td:nth-child(2) { color: var(--accent-light); font-weight: 600; }
+.metrics-table tbody td.cell-iter { color: var(--text-primary); font-weight: 600; }
+.metrics-table tbody td .gate-tag { font-weight: 600; }
+.metrics-table tbody td .gate-tag.promo { color: var(--success); }
+.metrics-table tbody td .gate-tag.reject { color: var(--text-dim); }
+.metrics-table tbody td .wrong-tag.danger { color: var(--danger); font-weight: 600; }
+.metrics-table tbody td .wrong-tag.safe { color: var(--text-secondary); }
+.metrics-table tbody td .mercy-tag.guard {
+    color: var(--warning);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
 .metrics-table-empty {
     text-align: center;
     color: var(--text-muted);
@@ -1968,7 +2014,7 @@ details.iteration-group {
     overflow: hidden;
 }
 details.iteration-group summary {
-    padding: 0.8rem;
+    padding: 0.65rem 0.8rem;
     font-weight: 600;
     cursor: pointer;
     user-select: none;
@@ -1986,7 +2032,7 @@ details.phase-group {
     margin: 0 0 0 0.6rem;
 }
 details.phase-group summary {
-    padding: 0.5rem 0.8rem;
+    padding: 0.5rem 0.75rem;
     font-size: 0.85rem;
     font-weight: 600;
     cursor: pointer;
@@ -2004,9 +2050,93 @@ details.phase-group .game-item {
     padding-left: 1.4rem;
 }
 
-/* Both summary levels lay their label and badge out on one row. */
-details.iteration-group > summary,
-details.phase-group > summary {
+/* 2-row collapsible summary layout */
+.group-summary-2row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    width: 100%;
+}
+details.iteration-group > summary.group-summary-2row,
+details.phase-group > summary.group-summary-2row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.summary-row-top,
+.summary-row-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    width: 100%;
+}
+
+.summary-row-left {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.summary-row-right {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-shrink: 0;
+}
+
+.summary-title {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--accent-light);
+}
+
+details.phase-group .summary-title {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+details.phase-group[open] > summary .summary-title {
+    color: var(--accent-light);
+}
+
+.btn-group-delete,
+.btn-game-delete {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    margin: 0;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    opacity: 0.45;
+    flex-shrink: 0;
+}
+
+.btn-group-delete:hover,
+.btn-game-delete:hover {
+    opacity: 1;
+    color: var(--danger);
+    background: rgba(239, 83, 80, 0.18);
+    border-color: rgba(239, 83, 80, 0.35);
+}
+
+/* Fallback for single-row summaries if any */
+details.iteration-group > summary:not(.group-summary-2row),
+details.phase-group > summary:not(.group-summary-2row) {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -2016,11 +2146,11 @@ details.phase-group > summary {
     color: var(--text-muted);
     font-size: 0.85em;
     font-weight: normal;
-    margin-left: 0.5rem;
+    margin-left: 0.25rem;
 }
 
 .game-item, .checkpoint-item {
-    padding: 0.6rem 1rem;
+    padding: 0.6rem 0.8rem;
     border-bottom: 1px solid rgba(255,255,255,0.03);
     cursor: pointer;
     font-size: 0.8rem;
@@ -2028,10 +2158,20 @@ details.phase-group > summary {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 1rem;
+    gap: 0.75rem;
 }
 .game-item:last-child { border-bottom: none; }
-.game-item.review-list-item { flex-direction: column; align-items: stretch; gap: 0; }
+.game-item.review-list-item {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+.game-item-body {
+    flex: 1 1 auto;
+    min-width: 0;
+}
 .game-item.review-list-item > div { gap: 1rem; }
 .game-item:hover, .checkpoint-item:hover { background: var(--bg-glass); }
 .game-item .meta, .checkpoint-item .meta { color: var(--text-muted); font-size: 0.75rem; }
@@ -2857,6 +2997,7 @@ details.phase-group > summary {
 
     /* minmax(0, …) so a canvas that has not been re-measured yet cannot push
        the column — and the page — wider than the screen. */
+    .play-view-game { max-width: 600px; }
     .game-area { grid-template-columns: minmax(0, 1fr); }
     .bottom-panels { grid-template-columns: 1fr; }
     .charts-grid { grid-template-columns: 1fr; }
@@ -4862,7 +5003,54 @@ details.phase-group > summary {
 .match-results-empty { color: var(--text-muted); }
 
 /* Review page: a bot-vs-bot series groups its games under the match name. */
-.match-series-group > summary { padding-left: 0.5rem; }
+.match-series-group > summary {
+    padding: 0.5rem 0.75rem;
+}
+.opponent-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+.match-series-score {
+    flex-shrink: 0;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+.opponent-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.12rem 0.38rem;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    line-height: 1.2;
+    flex-shrink: 0;
+}
+.badge-ogs {
+    background: rgba(79, 195, 247, 0.14);
+    color: #81d4fa;
+    border: 1px solid rgba(79, 195, 247, 0.28);
+}
+.badge-model {
+    background: rgba(200, 149, 108, 0.14);
+    color: var(--accent-light);
+    border: 1px solid rgba(200, 149, 108, 0.28);
+}
+.badge-random {
+    background: rgba(102, 187, 106, 0.14);
+    color: #a5d6a7;
+    border: 1px solid rgba(102, 187, 106, 0.28);
+}
+.badge-self {
+    background: rgba(171, 71, 188, 0.14);
+    color: #ce93d8;
+    border: 1px solid rgba(171, 71, 188, 0.28);
+}
 .match-game-item .match-game-line { font-size: 0.8rem; color: var(--text-muted); }
 
 @media (max-width: 768px) {
@@ -4873,12 +5061,36 @@ details.phase-group > summary {
     .play-topbar { margin: 0.5rem 0 0.9rem; }
     .play-back-btn { padding: 0.5rem 0.9rem; }
     .info-panel { padding: 1rem; }
-    .play-inprogress { padding: 0.85rem 0.9rem; }
-    /* Name on its own line: on a phone the row cannot hold name, state and
-       two buttons side by side without truncating the name to nothing. */
-    .play-progress-row { flex-wrap: wrap; row-gap: 0.4rem; }
-    .play-progress-name { flex: 1 1 100%; }
-    .play-progress-btn { margin-left: auto; }
+    /* Mobile row layout: dot and name together on line 1; status and action buttons on line 2 */
+    .play-progress-row {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto auto;
+        grid-template-areas:
+            "dot  name  name    name"
+            ".    meta  button  dismiss";
+        align-items: center;
+        gap: 0.35rem 0.6rem;
+    }
+    .play-progress-dot {
+        grid-area: dot;
+        align-self: center;
+    }
+    .play-progress-name {
+        grid-area: name;
+        min-width: 0;
+    }
+    .play-progress-meta {
+        grid-area: meta;
+    }
+    .play-progress-btn {
+        grid-area: button;
+        justify-self: end;
+    }
+    .play-progress-dismiss {
+        grid-area: dismiss;
+        padding: 0.3rem 0.55rem;
+        font-size: 0.78rem;
+    }
 }
 
 /* ===========================================================================
@@ -5215,9 +5427,16 @@ details.phase-group > summary {
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     font-size: 0.85rem;
 }
-.h2h-row:last-of-type { border-bottom: none; }
-.h2h-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.h2h-record { font-weight: 700; font-variant-numeric: tabular-nums; }
+.h2h-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
 .h2h-record.is-win { color: var(--success); }
 .h2h-record.is-loss { color: var(--danger); }
 .h2h-record.is-draw { color: var(--warning); }

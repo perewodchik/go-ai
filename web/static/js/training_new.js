@@ -372,16 +372,7 @@ if (typeof socket !== 'undefined' && socket) {
         // Update charts on iteration_done
         if (data.type === 'iteration_done') {
             updateCharts(data);
-            pushMetric({
-                iteration: data.iteration,
-                elo: data.elo,
-                kyu_rank: data.kyu_rank,
-                policy_loss: data.policy_loss,
-                value_loss: data.value_loss,
-                total_loss: data.total_loss,
-                gate_win_rate: data.gate_win_rate,
-                win_rate_vs_random: data.win_rate_vs_random,
-            });
+            pushMetric(data);
             if (metricsTableVisible()) renderMetricsTable();
             loadGamesList();
             loadLearningStats();
@@ -482,10 +473,30 @@ async function loadGamesList() {
             details.className = 'iteration-group';
             if (groupIdx === 0) details.open = true; // Open the most recent by default
 
-            details.innerHTML = `<summary>
-                <span>Iteration ${group.iteration}</span>
-                <span class="group-note">${group.total_games} games</span>
-            </summary>`;
+            const iterFolder = group.folder || `iter_${String(group.iteration).padStart(6, '0')}`;
+            const summary = document.createElement('summary');
+            summary.className = 'group-summary-2row';
+            summary.innerHTML = `
+                <div class="summary-row-top">
+                    <span class="summary-title">Iteration ${group.iteration}</span>
+                </div>
+                <div class="summary-row-bottom">
+                    <div class="summary-row-left">
+                        <span class="group-note">${group.total_games} game${group.total_games === 1 ? '' : 's'}</span>
+                    </div>
+                    <button class="btn-group-delete" title="Delete Iteration ${group.iteration}" aria-label="Delete">✕</button>
+                </div>
+            `;
+            const iterDelBtn = summary.querySelector('.btn-group-delete');
+            if (iterDelBtn) {
+                iterDelBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    await fetch(`/training/api/games/${encodeURIComponent(iterFolder)}`, { method: 'DELETE' });
+                    loadGamesList();
+                });
+            }
+            details.appendChild(summary);
 
             (group.phases || []).forEach((phase, phaseIdx) => {
                 const phaseEl = document.createElement('details');
@@ -494,10 +505,32 @@ async function loadGamesList() {
                     phaseEl.open = true;
                 }
 
-                phaseEl.innerHTML = `<summary>
-                    <span>${phase.label} <span class="group-note">${phase.count}</span></span>
-                    ${gamesPhaseBadge(phase)}
-                </summary>`;
+                const phaseFolder = phase.folder || `${iterFolder}/${phase.phase}`;
+                const phaseSummary = document.createElement('summary');
+                phaseSummary.className = 'group-summary-2row';
+                phaseSummary.innerHTML = `
+                    <div class="summary-row-top">
+                        <span class="summary-title">${phase.label}</span>
+                        <span class="summary-badge-wrap">${gamesPhaseBadge(phase)}</span>
+                    </div>
+                    <div class="summary-row-bottom">
+                        <div class="summary-row-left">
+                            <span class="group-note">${phase.count} game${phase.count === 1 ? '' : 's'}</span>
+                        </div>
+                        <button class="btn-group-delete" title="Delete ${phase.label}" aria-label="Delete">✕</button>
+                    </div>
+                `;
+                const phaseDelBtn = phaseSummary.querySelector('.btn-group-delete');
+                if (phaseDelBtn) {
+                    phaseDelBtn.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        const enc = phaseFolder.split('/').map(encodeURIComponent).join('/');
+                        await fetch(`/training/api/games/${enc}`, { method: 'DELETE' });
+                        loadGamesList();
+                    });
+                }
+                phaseEl.appendChild(phaseSummary);
 
                 phase.games.forEach(game => {
                     const item = document.createElement('div');
@@ -525,13 +558,30 @@ async function loadGamesList() {
                     if (game.winner === 1) resultText = `B+${game.margin || '?'}`;
                     else if (game.winner === 2) resultText = `W+${game.margin || '?'}`;
 
-                    item.innerHTML = `
-                        <span>${winnerIcon} ${label}</span>
-                        <span class="meta"><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves</span>
+                    const body = document.createElement('div');
+                    body.className = 'game-item-body';
+                    body.style.cursor = 'pointer';
+                    body.innerHTML = `
+                        <div style="font-weight: 500;">${winnerIcon} ${label}</div>
+                        <div class="meta"><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves</div>
                     `;
-                    item.addEventListener('click', () => {
+                    body.addEventListener('click', () => {
                         window.location.href = `/training/review?game=${encodeURIComponent(game.filename)}`;
                     });
+                    item.appendChild(body);
+
+                    const del = document.createElement('button');
+                    del.className = 'btn-game-delete';
+                    del.title = 'Delete this game';
+                    del.textContent = '✕';
+                    del.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        const enc = game.filename.split('/').map(encodeURIComponent).join('/');
+                        await fetch(`/training/api/games/${enc}`, { method: 'DELETE' });
+                        loadGamesList();
+                    });
+                    item.appendChild(del);
+
                     phaseEl.appendChild(item);
                 });
 
@@ -764,7 +814,7 @@ function pushMetric(m) {
     if (m == null || m.iteration == null) return;
     const at = allMetrics.findIndex(x => x.iteration === m.iteration);
     if (at !== -1) {
-        allMetrics[at] = m;
+        allMetrics[at] = { ...allMetrics[at], ...m };
     } else {
         allMetrics.push(m);
     }
@@ -787,18 +837,60 @@ function renderMetricsTable() {
     if (empty) empty.style.display = 'none';
     const rows = allMetrics.slice().sort((a, b) => (a.iteration || 0) - (b.iteration || 0));
     body.innerHTML = rows.map(m => {
-        const wr = (m.win_rate_vs_random != null) ? Math.round(m.win_rate_vs_random * 100) + '%' : '—';
-        const gateWr = (m.gate_win_rate != null) ? Math.round(m.gate_win_rate * 100) + '%' : '—';
         let total = m.total_loss;
         if (total == null && m.policy_loss != null && m.value_loss != null) total = m.policy_loss + m.value_loss;
+
+        // Gate Win Rate & Promotion Status
+        let gateText = '—';
+        if (m.gate_win_rate != null) {
+            const gatePct = Math.round(m.gate_win_rate * 100) + '%';
+            if (m.gate_promoted === true) {
+                gateText = `<span class="gate-tag promo" title="Promoted to Champion">${gatePct} ✓</span>`;
+            } else if (m.gate_promoted === false) {
+                gateText = `<span class="gate-tag reject" title="Rejected by gate">${gatePct} ✗</span>`;
+            } else {
+                gateText = gatePct;
+            }
+        }
+
+        // Mercy Resign Rate
+        let mercyText = '—';
+        if (m.resign_suppressed) {
+            mercyText = '<span class="mercy-tag guard" title="Suppressed by collapse guard">Guard</span>';
+        } else if (m.resign_rate != null) {
+            mercyText = Math.round(m.resign_rate * 100) + '%';
+        }
+
+        // Wrong Resignation Rate
+        let wrongText = '—';
+        if (m.false_resign_rate != null) {
+            const wrPct = Math.round(m.false_resign_rate * 100) + '%';
+            wrongText = m.false_resign_rate > 0.05
+                ? `<span class="wrong-tag danger" title="Wrong resignation rate exceeds 5% danger threshold">${wrPct}</span>`
+                : `<span class="wrong-tag safe">${wrPct}</span>`;
+        }
+
+        // Value Head Spread (Black / White)
+        let vstdText = '—';
+        if (m.value_std_black != null && m.value_std_white != null) {
+            vstdText = `${Number(m.value_std_black).toFixed(2)} / ${Number(m.value_std_white).toFixed(2)}`;
+        } else if (m.value_std_black != null) {
+            vstdText = `${Number(m.value_std_black).toFixed(2)} / —`;
+        }
+
+        // Duration
+        const durText = m.elapsed_seconds != null ? formatDuration(m.elapsed_seconds) : '—';
+
         return `<tr>
-            <td>${m.iteration != null ? m.iteration : '—'}</td>
-            <td>${m.elo != null ? Math.round(m.elo) : '—'}</td>
+            <td class="cell-iter">#${m.iteration != null ? m.iteration : '—'}</td>
             <td>${fmtLoss(m.policy_loss)}</td>
             <td>${fmtLoss(m.value_loss)}</td>
             <td>${fmtLoss(total)}</td>
-            <td>${gateWr}</td>
-            <td>${wr}</td>
+            <td>${gateText}</td>
+            <td>${mercyText}</td>
+            <td>${wrongText}</td>
+            <td>${vstdText}</td>
+            <td>${durText}</td>
         </tr>`;
     }).join('');
 }
@@ -865,7 +957,7 @@ async function loadGateHistory() {
         };
 
         if (!hasData) {
-            ['gate-elo', 'gate-promotions', 'gate-avg', 'gate-streak'].forEach(id => set(id, '—'));
+            ['gate-promotions', 'gate-avg', 'gate-streak'].forEach(id => set(id, '—'));
             set('gate-promo-rate', 'no gated iterations yet');
             set('gate-last-promo', '—');
             set('gate-champ-version', 'v1');
@@ -887,7 +979,6 @@ async function loadGateHistory() {
         const streak = summary.current_reject_streak || 0;
         const champVer = `v${summary.champion_version || 1}`;
 
-        set('gate-elo', `${elo >= 0 ? '+' : ''}${Math.round(elo)}`);
         set('gate-promotions', `${promoCount}/${totalGated}`);
         set('gate-promo-rate', `${promoRatePct}% accepted`);
         set('gate-avg', `${Math.round((summary.avg_gate_win_rate || 0) * 100)}%`);

@@ -1,6 +1,6 @@
 {
   "id": "night-model",
-  "name": "Night Model",
+  "name": "Durachok",
   "board_size": 9,
   "komi": 6.5,
   "ruleset": "chinese",
@@ -16,7 +16,7 @@
     "reflection_interval_games": 50,
     "temperature_threshold": 30,
     "temperature_init": 0.8,
-    "temperature_final": 0.1,
+    "temperature_final": 0.101,
     "gate_enabled": true,
     "gate_games": 20,
     "gate_threshold": 0.55,
@@ -24,6 +24,8 @@
     "gate_stall_warning": 5,
     "num_parallel_workers": 4,
     "restrict_eye_fill": false,
+    "restrict_self_atari": false,
+    "self_atari_max_stones": 1,
     "resign_enabled": false,
     "resign_threshold": 0.9,
     "resign_consecutive": 4,
@@ -38,7 +40,9 @@
     "value_head_hidden": 64
   },
   "created_at": "2026-08-13T01:27:02.837677",
-  "elo": 370.0577082116021,
+  "notes": "worse than random",
+  "archived": false,
+  "elo": 439.70799314921203,
   "kyu_rank": "30k",
   "iteration": 10,
   "total_games": 250

@@ -120,18 +120,29 @@ def save_game(games_dir: str, iteration: int, phase: str, index: int, record: di
 
 def resolve_game_path(games_dir: str, rel_path: str) -> Optional[str]:
     """
-    Map a client-supplied relative id to an absolute path inside `games_dir`.
+    Map a client-supplied relative id or folder path to an absolute path inside `games_dir`.
 
     Returns None if the path escapes `games_dir` or does not exist — the id
     arrives from the browser, so it is never trusted to stay in the tree.
     """
+    if not rel_path:
+        return None
     games_root = os.path.realpath(games_dir)
-    candidate = os.path.realpath(os.path.join(games_root, rel_path))
+    clean_rel = rel_path.strip().lstrip('/')
+    candidate = os.path.realpath(os.path.join(games_root, clean_rel))
     if os.path.commonpath([games_root, candidate]) != games_root:
         return None
-    if not os.path.isfile(candidate):
+    if not os.path.exists(candidate):
         return None
     return candidate
+
+
+def resolve_game_file(games_dir: str, rel_path: str) -> Optional[str]:
+    """Resolve a game file path specifically (must be a regular file)."""
+    candidate = resolve_game_path(games_dir, rel_path)
+    if candidate and os.path.isfile(candidate):
+        return candidate
+    return None
 
 
 def iter_game_files(games_dir: str) -> Iterator[GameFile]:
@@ -267,30 +278,56 @@ def load_match_game_files(games_dir: str) -> Iterator[tuple]:
 
 def delete_saved_game(games_dir: str, rel_path: str) -> bool:
     """
-    Delete a user-created game (a recorded human game or a match game),
-    addressed by its id (path under `games_dir`).
+    Delete any game file, phase folder, iteration folder, match series, or
+    top-level game category folder under `games_dir`.
 
-    Deliberately limited to the directories in USER_DIRS: the id comes from the
-    browser, and training output is not the user's to delete from the review UI.
-    Returns False if the path is outside those directories or does not exist.
+    Prevents escaping `games_dir`. If target is `games_dir` itself, clears all
+    contents inside it.
     """
     path = resolve_game_path(games_dir, rel_path)
     if not path:
         return False
 
-    allowed = {os.path.realpath(os.path.join(games_dir, d)) for d in USER_DIRS}
-    if os.path.dirname(path) not in allowed:
-        return False
-
+    games_root = os.path.realpath(games_dir)
     try:
-        os.remove(path)
+        if path == games_root:
+            for item in os.listdir(games_root):
+                item_path = os.path.join(games_root, item)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path, ignore_errors=True)
+                else:
+                    os.remove(item_path)
+            return True
+
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            # If parent iteration folder is now empty, remove it too
+            parent = os.path.dirname(path)
+            if parent != games_root and os.path.isdir(parent) and not os.listdir(parent):
+                try:
+                    os.rmdir(parent)
+                except OSError:
+                    pass
+        elif os.path.isfile(path):
+            os.remove(path)
+            # If parent phase folder is now empty, remove it; and if iteration folder is now empty, remove it too
+            parent = os.path.dirname(path)
+            if parent != games_root and os.path.isdir(parent) and not os.listdir(parent):
+                try:
+                    os.rmdir(parent)
+                    grandparent = os.path.dirname(parent)
+                    if grandparent != games_root and os.path.isdir(grandparent) and not os.listdir(grandparent):
+                        os.rmdir(grandparent)
+                except OSError:
+                    pass
+        return True
     except OSError:
         return False
-    return True
 
 
-# Kept as the historical name; match games are deletable through it too.
+# Kept as historical names; any game or folder is deletable through it.
 delete_human_game = delete_saved_game
+delete_game_or_folder = delete_saved_game
 
 
 def migrate_legacy_layout(games_dir: str) -> int:

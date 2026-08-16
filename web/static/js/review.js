@@ -111,27 +111,65 @@ function buildIterationGroup(group, open) {
     details.className = 'iteration-group';
     if (open) details.open = true;
 
+    const iterFolder = group.folder || `iter_${String(group.iteration).padStart(6, '0')}`;
+
     const summary = document.createElement('summary');
+    summary.className = 'group-summary-2row';
     summary.innerHTML = `
-        <span>Iteration ${group.iteration}</span>
-        <span class="group-note">${group.total_games} games</span>
+        <div class="summary-row-top">
+            <span class="summary-title">Iteration ${group.iteration}</span>
+            ${group.elo != null ? `<span class="group-note elo-note">${group.elo} Elo</span>` : ''}
+        </div>
+        <div class="summary-row-bottom">
+            <div class="summary-row-left">
+                <span class="group-note">${group.total_games} game${group.total_games === 1 ? '' : 's'}</span>
+            </div>
+            <button class="btn-group-delete" title="Delete Iteration ${group.iteration}" aria-label="Delete">✕</button>
+        </div>
     `;
+
+    const delBtn = summary.querySelector('.btn-group-delete');
+    if (delBtn) {
+        delBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            deleteGamePath(iterFolder);
+        });
+    }
     details.appendChild(summary);
 
     (group.phases || []).forEach((phase, phaseIdx) => {
         const phaseEl = document.createElement('details');
         phaseEl.className = 'phase-group';
-        // Open the promotion section by default on the newest iteration —
-        // it's the match that decided whether the model moved forward.
         if (open && (phaseIdx === 0 || phase.phase === 'promotion')) {
             phaseEl.open = true;
         }
 
+        const phaseFolder = phase.folder || `${iterFolder}/${phase.phase}`;
+
         const phaseSummary = document.createElement('summary');
+        phaseSummary.className = 'group-summary-2row';
         phaseSummary.innerHTML = `
-            <span>${phase.label} <span class="group-note">${phase.count}</span></span>
-            ${phaseSummaryBadge(phase)}
+            <div class="summary-row-top">
+                <span class="summary-title">${escapeHtml(phase.label)}</span>
+                <span class="summary-badge-wrap">${phaseSummaryBadge(phase)}</span>
+            </div>
+            <div class="summary-row-bottom">
+                <div class="summary-row-left">
+                    <span class="group-note">${phase.count} game${phase.count === 1 ? '' : 's'}</span>
+                </div>
+                <button class="btn-group-delete" title="Delete ${escapeHtml(phase.label)}" aria-label="Delete">✕</button>
+            </div>
         `;
+
+        const phaseDelBtn = phaseSummary.querySelector('.btn-group-delete');
+        if (phaseDelBtn) {
+            phaseDelBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                deleteGamePath(phaseFolder);
+            });
+        }
         phaseEl.appendChild(phaseSummary);
 
         phase.games.forEach(game => {
@@ -349,10 +387,27 @@ function buildRecordedGroup(group, open) {
     details.open = open;
 
     const summary = document.createElement('summary');
+    summary.className = 'group-summary-2row';
     summary.innerHTML = `
-        <span>🎮 ${group.label}</span>
-        <span class="group-note">${group.total_games} games</span>
+        <div class="summary-row-top">
+            <span class="summary-title">🎮 ${escapeHtml(group.label)}</span>
+        </div>
+        <div class="summary-row-bottom">
+            <div class="summary-row-left">
+                <span class="group-note">${group.total_games} game${group.total_games === 1 ? '' : 's'}</span>
+            </div>
+            <button class="btn-group-delete" title="Delete all recorded games" aria-label="Delete">✕</button>
+        </div>
     `;
+
+    const delBtn = summary.querySelector('.btn-group-delete');
+    if (delBtn) {
+        delBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            deleteGamePath(group.folder || 'human');
+        });
+    }
     details.appendChild(summary);
 
     group.games.forEach(game => details.appendChild(buildRecordedGameItem(game)));
@@ -366,10 +421,27 @@ function buildMatchGroup(group, open) {
     details.open = open;
 
     const summary = document.createElement('summary');
+    summary.className = 'group-summary-2row';
     summary.innerHTML = `
-        <span>🤖 ${group.label}</span>
-        <span class="group-note">${group.total_games} games</span>
+        <div class="summary-row-top">
+            <span class="summary-title">🤖 ${escapeHtml(group.label)}</span>
+        </div>
+        <div class="summary-row-bottom">
+            <div class="summary-row-left">
+                <span class="group-note">${group.total_games} game${group.total_games === 1 ? '' : 's'}</span>
+            </div>
+            <button class="btn-group-delete" title="Delete all bot matches" aria-label="Delete">✕</button>
+        </div>
     `;
+
+    const delBtn = summary.querySelector('.btn-group-delete');
+    if (delBtn) {
+        delBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            deleteGamePath(group.folder || 'match');
+        });
+    }
     details.appendChild(summary);
 
     (group.series || []).forEach((series, idx) => {
@@ -377,18 +449,81 @@ function buildMatchGroup(group, open) {
         seriesEl.className = 'phase-group match-series-group';
         if (open && idx === 0) seriesEl.open = true;
 
-        const seriesSummary = document.createElement('summary');
-        seriesSummary.innerHTML = `
-            <span>${escapeHtml(series.name)} <span class="group-note">${series.count}</span></span>
-            <span class="group-note">${matchSeriesScore(series)}</span>
-        `;
-        seriesEl.appendChild(seriesSummary);
+        const oppName = series.opponent_name || getOpponentName(series);
+        const oppKind = series.opponent_kind || getOpponentKind(series, oppName);
+        const badgeLabel = oppKind === 'ogs' ? 'OGS' : (oppKind === 'self' ? 'Self' : (oppKind === 'random' ? 'Random' : 'Model'));
 
+        const seriesSummary = document.createElement('summary');
+        seriesSummary.className = 'group-summary-2row';
+        seriesSummary.innerHTML = `
+            <div class="summary-row-top">
+                <span class="opponent-name">${escapeHtml(oppName)}</span>
+                <span class="group-note match-series-score">${matchSeriesScore(series)}</span>
+            </div>
+            <div class="summary-row-bottom">
+                <div class="summary-row-left">
+                    <span class="opponent-badge badge-${escapeHtml(oppKind)}">${escapeHtml(badgeLabel)}</span>
+                    <span class="group-note">${series.count} game${series.count === 1 ? '' : 's'}</span>
+                </div>
+                <button class="btn-group-delete" title="Delete match series" aria-label="Delete">✕</button>
+            </div>
+        `;
+
+        const seriesDelBtn = seriesSummary.querySelector('.btn-group-delete');
+        if (seriesDelBtn) {
+            seriesDelBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                const paths = series.filenames || (series.games || []).map(g => g.filename).filter(Boolean);
+                deleteGamesBatch(paths);
+            });
+        }
+
+        seriesEl.appendChild(seriesSummary);
         series.games.forEach(game => seriesEl.appendChild(buildMatchGameItem(game)));
         details.appendChild(seriesEl);
     });
 
     return details;
+}
+
+function getOpponentName(series) {
+    if (series.opponent_name) return series.opponent_name;
+    const raw = series.name || '';
+    const activeName = (window.ACTIVE_MODEL && window.ACTIVE_MODEL.name) || '';
+    const activeId = (window.ACTIVE_MODEL && window.ACTIVE_MODEL.id) || '';
+
+    const first = (series.games && series.games[0]) || {};
+    const bp = first.black_player || {};
+    const wp = first.white_player || {};
+
+    const bpIsActive = Boolean((bp.model_id && bp.model_id === activeId) || (bp.name && bp.name === activeName));
+    const wpIsActive = Boolean((wp.model_id && wp.model_id === activeId) || (wp.name && wp.name === activeName));
+
+    if (bpIsActive && wpIsActive) return 'Self';
+    if (bpIsActive && !wpIsActive) return (wp.name || 'Opponent').replace(/\s*\(OGS\)$/i, '');
+    if (wpIsActive && !bpIsActive) return (bp.name || 'Opponent').replace(/\s*\(OGS\)$/i, '');
+
+    if (raw.includes(' vs ')) {
+        const parts = raw.split(' vs ');
+        if (activeName && parts[0].trim() === activeName) return parts[1].trim().replace(/\s*\(OGS\)$/i, '');
+        if (activeName && parts[1].trim() === activeName) return parts[0].trim().replace(/\s*\(OGS\)$/i, '');
+        if (parts[0].trim() === parts[1].trim()) return 'Self';
+        return parts[1].trim().replace(/\s*\(OGS\)$/i, '');
+    }
+    return raw.replace(/\s*\(OGS\)$/i, '');
+}
+
+function getOpponentKind(series, oppName) {
+    if (series.opponent_kind) return series.opponent_kind;
+    const first = (series.games && series.games[0]) || {};
+    const bp = first.black_player || {};
+    const wp = first.white_player || {};
+
+    if (oppName === 'Self') return 'self';
+    if (bp.kind === 'ogs' || wp.kind === 'ogs' || (series.name || '').includes('(OGS)') || (oppName && oppName.includes('OGS'))) return 'ogs';
+    if (bp.kind === 'random' || wp.kind === 'random' || (series.name || '').includes('Random') || (oppName && oppName.includes('Random'))) return 'random';
+    return 'model';
 }
 
 /**
@@ -435,12 +570,25 @@ function buildMatchGameItem(game) {
         resultColor = 'var(--text-primary)';
     }
 
-    item.innerHTML = `
+    const body = document.createElement('div');
+    body.className = 'game-item-body';
+    body.innerHTML = `
         <div style="font-weight: 600; margin-bottom: 0.15rem;">Game ${(game.game_index || 0) + 1}${resignTag(game)}</div>
         <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(resultText)}</div>
         <div class="match-game-line">⚫ ${escapeHtml(black)} vs ⚪ ${escapeHtml(white)} &middot; ${game.num_moves} moves</div>
     `;
-    item.addEventListener('click', () => selectGame(item, game.filename));
+    body.addEventListener('click', () => selectGame(item, game.filename));
+    item.appendChild(body);
+
+    const del = document.createElement('button');
+    del.className = 'btn-game-delete';
+    del.title = 'Delete this game';
+    del.textContent = '✕';
+    del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteGamePath(game.filename);
+    });
+    item.appendChild(del);
 
     return item;
 }
@@ -473,7 +621,7 @@ function buildRecordedGameItem(game) {
     const when = game.timestamp ? new Date(game.timestamp).toLocaleString() : '';
 
     const body = document.createElement('div');
-    body.className = 'recorded-item-body';
+    body.className = 'game-item-body';
     body.innerHTML = `
         <div style="font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(title)}${resignTag(game)}</div>
         <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${resultText}</div>
@@ -483,31 +631,63 @@ function buildRecordedGameItem(game) {
     item.appendChild(body);
 
     const del = document.createElement('button');
-    del.className = 'btn-small recorded-delete';
+    del.className = 'btn-game-delete';
     del.title = 'Delete this recorded game';
-    del.textContent = '🗑';
-    del.addEventListener('click', async (e) => {
-        // The row itself opens the game — don't do both on a delete click.
+    del.textContent = '✕';
+    del.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (!confirm(`Delete "${title}"? This cannot be undone.`)) return;
-        await deleteRecordedGame(game.filename);
+        deleteGamePath(game.filename);
     });
     item.appendChild(del);
 
     return item;
 }
 
-async function deleteRecordedGame(filename) {
-    const encodedPath = filename.split('/').map(encodeURIComponent).join('/');
-    const res = await fetch(`/training/api/games/${encodedPath}`, { method: 'DELETE' });
-    if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        alert(data.error || 'Failed to delete game.');
-        return;
+async function deleteGamePath(path) {
+    if (!path) return;
+    const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+    try {
+        const res = await fetch(`/training/api/games/${encodedPath}`, { method: 'DELETE' });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            console.error('Failed to delete game/folder:', data.error);
+        }
+    } catch (err) {
+        console.error('Error deleting game/folder:', err);
     }
 
-    // If the deleted game was open, clear the viewer — its data is gone.
-    if (currentGameData && currentGameData.filename === filename) {
+    if (currentGameData) {
+        const normTarget = path.replace(/\/+$/, '');
+        const normCurrent = currentGameData.filename.replace(/\/+$/, '');
+        if (normCurrent === normTarget || normCurrent.startsWith(normTarget + '/')) {
+            currentGameData = null;
+            document.getElementById('review-viewer').style.display = 'none';
+            document.getElementById('empty-state').style.display = '';
+            const url = new URL(window.location);
+            url.searchParams.delete('game');
+            window.history.replaceState({}, '', url);
+        }
+    }
+    loadGamesList();
+}
+
+async function deleteGamesBatch(paths) {
+    if (!paths || !paths.length) return;
+    try {
+        const res = await fetch('/training/api/games/delete_batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paths }),
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            console.error('Failed to delete games batch:', data.error);
+        }
+    } catch (err) {
+        console.error('Error deleting games batch:', err);
+    }
+
+    if (currentGameData && paths.includes(currentGameData.filename)) {
         currentGameData = null;
         document.getElementById('review-viewer').style.display = 'none';
         document.getElementById('empty-state').style.display = '';
@@ -517,6 +697,9 @@ async function deleteRecordedGame(filename) {
     }
     loadGamesList();
 }
+
+// Kept for backward compatibility
+const deleteRecordedGame = deleteGamePath;
 
 function escapeHtml(str) {
     const div = document.createElement('div');
@@ -556,6 +739,9 @@ function buildGameItem(game, phase) {
     // the point it stopped, which would read as a played-out result.
     resultText = gameResultText(game, resultText);
 
+    const body = document.createElement('div');
+    body.className = 'game-item-body';
+
     if (phase === 'promotion') {
         if (game.winner !== 0) {
             resultColor = game.candidate_won ? 'var(--success)' : 'var(--danger)';
@@ -566,7 +752,7 @@ function buildGameItem(game, phase) {
             outcomeLine = `${winnerWho} won - ${resultText}`;
         }
 
-        item.innerHTML = `
+        body.innerHTML = `
             <div style="font-weight: 600; margin-bottom: 0.15rem;">${winnerIcon} Promotion #${game.game_index}${resignTag(game)}</div>
             <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${outcomeLine}</div>
             <div style="font-size: 0.85rem; color: var(--text-muted);">${game.num_moves} moves</div>
@@ -582,7 +768,7 @@ function buildGameItem(game, phase) {
             label = `Self-Play #${game.game_index}`;
         }
 
-        item.innerHTML = `
+        body.innerHTML = `
             <div style="margin-bottom: 0.25rem;">
                 <strong>${winnerIcon} ${label}</strong>${resignTag(game)}
             </div>
@@ -592,7 +778,18 @@ function buildGameItem(game, phase) {
         `;
     }
 
-    item.addEventListener('click', () => selectGame(item, game.filename));
+    body.addEventListener('click', () => selectGame(item, game.filename));
+    item.appendChild(body);
+
+    const del = document.createElement('button');
+    del.className = 'btn-game-delete';
+    del.title = 'Delete this game';
+    del.textContent = '✕';
+    del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteGamePath(game.filename);
+    });
+    item.appendChild(del);
 
     return item;
 }

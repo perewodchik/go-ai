@@ -274,15 +274,25 @@ class TestMatchRecording:
         assert delete_saved_game(games_dir, rel) is True
         assert not os.path.exists(os.path.join(games_dir, rel))
 
-    def test_training_games_are_not_deletable(self, tmp_path):
+    def test_training_games_and_folders_are_deletable(self, tmp_path):
         games_dir = str(tmp_path / 'games')
         target = os.path.join(games_dir, 'iter_000001', 'self-play', 'game_0000.json')
         os.makedirs(os.path.dirname(target))
         with open(target, 'w') as fh:
             json.dump({'moves': []}, fh)
 
-        assert delete_saved_game(games_dir, 'iter_000001/self-play/game_0000.json') is False
-        assert os.path.isfile(target)
+        assert delete_saved_game(games_dir, 'iter_000001/self-play/game_0000.json') is True
+        assert not os.path.exists(target)
+
+    def test_traversal_paths_cannot_be_deleted(self, tmp_path):
+        games_dir = str(tmp_path / 'games')
+        os.makedirs(games_dir, exist_ok=True)
+        outside_file = str(tmp_path / 'outside.txt')
+        with open(outside_file, 'w') as fh:
+            fh.write('secret')
+
+        assert delete_saved_game(games_dir, '../outside.txt') is False
+        assert os.path.exists(outside_file)
 
 
 class TestPlayerSpecs:

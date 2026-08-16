@@ -753,7 +753,7 @@ async function loadGateHistory() {
         };
 
         if (!hasData) {
-            ['gate-elo', 'gate-promotions', 'gate-avg', 'gate-streak'].forEach(id => set(id, '—'));
+            ['gate-promotions', 'gate-avg', 'gate-streak'].forEach(id => set(id, '—'));
             set('gate-promo-rate', 'no gated iterations yet');
             set('gate-last-promo', '—');
             set('gate-champ-version', 'v1');
@@ -761,7 +761,6 @@ async function loadGateHistory() {
         }
 
         const elo = summary.gate_elo || 0;
-        set('gate-elo', `${elo >= 0 ? '+' : ''}${Math.round(elo)}`);
         set('gate-promotions', `${summary.promotions}/${summary.gated_iterations}`);
         set('gate-promo-rate', `${Math.round((summary.promotion_rate || 0) * 100)}% accepted`);
         set('gate-avg', `${Math.round((summary.avg_gate_win_rate || 0) * 100)}%`);

@@ -97,6 +97,9 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+window.ACTIVE_MODEL = {{ active_model.to_dict() | tojson if active_model else 'null' }};
+</script>
 <script src="{{ url_for('static', filename='js/board.js') }}"></script>
 <script src="{{ url_for('static', filename='js/review.js') }}"></script>
 {% endblock %}

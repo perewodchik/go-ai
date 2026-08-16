@@ -397,10 +397,7 @@ function updateRandomMargins(series) {
 
 /**
  * Champion lineage chart — bars are each iteration's gate score against the
- * reigning champion, the line is the champion's cumulative self-referential
- * Elo. This is the progress metric that matters: win-rate-vs-random saturates
- * at 100% and stays there even while the model degrades, whereas every gate
- * match is a fresh head-to-head against the previous best.
+ * reigning champion.
  */
 const gateChart = (() => {
     const el = document.getElementById('gate-chart');
@@ -412,25 +409,9 @@ const gateChart = (() => {
                 {
                     type: 'bar',
                     label: 'Gate score',
-                    yAxisID: 'y',
                     data: [],
                     backgroundColor: [],
                     borderWidth: 0,
-                    order: 2,
-                },
-                {
-                    type: 'line',
-                    label: 'Champion strength',
-                    yAxisID: 'y1',
-                    data: [],
-                    borderColor: '#c8956c',
-                    backgroundColor: 'rgba(200, 149, 108, 0.10)',
-                    borderWidth: 2,
-                    fill: true,
-                    stepped: true,      // strength is constant until a promotion
-                    pointRadius: 0,
-                    pointHoverRadius: 4,
-                    order: 1,
                 },
             ],
         },
@@ -445,12 +426,8 @@ const gateChart = (() => {
                     callbacks: {
                         title: (items) => `Iteration ${items[0].label}`,
                         label: (item) => {
-                            if (item.datasetIndex === 0) {
-                                const p = gateChart._promoted?.[item.dataIndex];
-                                return `Gate: ${(item.raw * 100).toFixed(0)}%  ${p ? 'promoted' : 'rejected'}`;
-                            }
-                            const d = gateChart._delta?.[item.dataIndex] || 0;
-                            return `Strength: ${Number(item.raw).toFixed(0)} Elo` + (d ? ` (+${d.toFixed(0)})` : '');
+                            const p = gateChart._promoted?.[item.dataIndex];
+                            return `Gate: ${(item.raw * 100).toFixed(0)}%  ${p ? 'promoted' : 'rejected'}`;
                         },
                     },
                 },
@@ -468,12 +445,6 @@ const gateChart = (() => {
                     title: { display: true, text: 'Gate score', color: '#9a9a9a' },
                     grid: { color: 'rgba(255,255,255,0.06)' },
                     ticks: { color: '#9a9a9a', stepSize: 0.25, callback: v => `${v * 100}%` },
-                },
-                y1: {
-                    position: 'right',
-                    title: { display: true, text: 'Champion Elo', color: '#c8956c' },
-                    grid: { drawOnChartArea: false },
-                    ticks: { color: '#c8956c' },
                 },
             },
         },
@@ -513,9 +484,7 @@ function updateGateChart(points, threshold) {
     gateChart.data.datasets[0].backgroundColor = points.map(
         p => (p.promoted ? 'rgba(76, 175, 80, 0.75)' : 'rgba(239, 83, 80, 0.55)')
     );
-    gateChart.data.datasets[1].data = points.map(p => p.gate_elo);
     gateChart._promoted = points.map(p => p.promoted);
-    gateChart._delta = points.map(p => p.elo_delta);
     gateChart.$gateThreshold = threshold ?? 0.55;
     gateChart.update('none');
 }

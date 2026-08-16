@@ -242,6 +242,21 @@ class TestHeadToHead:
         fleet("alpha", match_games=[self.match("m1", 0, "model:alpha", "random", 1)])
         assert model_stats.head_to_head()["alpha"]["random"]["wins"] == 1
 
+    def test_ogs_bot_opponent_name_and_kind_are_preserved(self, fleet):
+        game = ("match_m1_0.json", {
+            "match_id": "m1",
+            "game_index": 0,
+            "winner": 2,
+            "timestamp": "2026-01-01T00:00:00",
+            "black_player": {"rating_key": "model:alpha", "name": "alpha", "kind": "model"},
+            "white_player": {"rating_key": "ogs:1195518", "name": "Carnation", "kind": "ogs"},
+        })
+        fleet("alpha", match_games=[game])
+        cell = model_stats.head_to_head()["alpha"]["ogs:1195518"]
+        assert cell["opponent_name"] == "Carnation"
+        assert cell["opponent_kind"] == "ogs"
+        assert cell["losses"] == 1
+
     def test_no_matches_is_an_empty_table(self, fleet):
         fleet("alpha", run(3))
         assert model_stats.head_to_head() == {}

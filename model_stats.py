@@ -474,7 +474,7 @@ def head_to_head() -> dict:
     Win matrix over every stored match game.
 
     Returns {model_id: {opponent_id: {wins, losses, draws, games, last_played,
-    game_ids}}}. `random` appears as an opponent id like any model — it is the
+    game_ids, opponent_name, opponent_kind}}}. `random` appears as an opponent id like any model — it is the
     Elo anchor, and beating it is still evidence.
     """
     table: Dict[str, Dict[str, dict]] = {}
@@ -483,16 +483,20 @@ def head_to_head() -> dict:
         return table.setdefault(a, {}).setdefault(b, {
             'wins': 0, 'losses': 0, 'draws': 0, 'games': 0,
             'last_played': None, 'game_ids': [],
+            'opponent_name': None,
+            'opponent_kind': None,
         })
 
     for game in _match_games():
-        black = _side_key(game.get('black_player'))
-        white = _side_key(game.get('white_player'))
+        bp = game.get('black_player') or {}
+        wp = game.get('white_player') or {}
+        black = _side_key(bp)
+        white = _side_key(wp)
         if not black or not white or black == white:
             continue
 
         winner = game.get('winner')
-        for me, them, my_colour in ((black, white, 1), (white, black, 2)):
+        for me, them, my_colour, them_player in ((black, white, 1, wp), (white, black, 2, bp)):
             row = cell(me, them)
             row['games'] += 1
             if winner == my_colour:
@@ -504,6 +508,31 @@ def head_to_head() -> dict:
             stamp = game.get('timestamp')
             if stamp and (row['last_played'] is None or stamp > row['last_played']):
                 row['last_played'] = stamp
+            if them_player:
+                name = them_player.get('name')
+                if name and not row.get('opponent_name'):
+                    row['opponent_name'] = name
+                kind = them_player.get('kind')
+                if not kind:
+                    key = them_player.get('rating_key', '')
+                    if key.startswith('ogs:') or 'ogs' in key:
+                        kind = 'ogs'
+                    elif key == 'random':
+                        kind = 'random'
+                    elif key.startswith('model:'):
+                        kind = 'model'
+                if kind and not row.get('opponent_kind'):
+                    row['opponent_kind'] = kind
+            if not row.get('opponent_name') and them.startswith('ogs:'):
+                try:
+                    from ai.online.ogs_bots import registry
+                    bot_id_str = them.split('ogs:', 1)[1]
+                    bot = registry.get(int(bot_id_str))
+                    if bot and bot.username:
+                        row['opponent_name'] = bot.username
+                        row['opponent_kind'] = 'ogs'
+                except Exception:
+                    pass
             # Enough to link a few examples into the review page; the full list
             # would bloat the payload for no benefit.
             if len(row['game_ids']) < 5:

@@ -226,6 +226,7 @@ def list_games():
             result.append({
                 'kind': 'recorded',
                 'label': 'My Recorded Games',
+                'folder': 'human',
                 'games': recorded,
                 'total_games': len(recorded),
             })
@@ -240,6 +241,11 @@ def list_games():
             matches.append(annotate_resignation(_strip_bulk(data)))
 
         if matches:
+            from web.app import model_manager
+            active_model = model_manager.get_active_model()
+            active_id = active_model.id if active_model else (trainer.model_id if trainer else None)
+            active_name = active_model.name if active_model else None
+
             by_match = {}
             for data in matches:
                 by_match.setdefault(data.get('match_id') or 'unknown', []).append(data)
@@ -248,9 +254,59 @@ def list_games():
             for match_id, games in by_match.items():
                 games.sort(key=lambda g: g.get('game_index', 0))
                 first = games[0]
+                bp = first.get('black_player') or {}
+                wp = first.get('white_player') or {}
+
+                bp_name = bp.get('name') or ''
+                wp_name = wp.get('name') or ''
+                bp_id = bp.get('model_id') or ''
+                wp_id = wp.get('model_id') or ''
+                bp_kind = bp.get('kind') or ('ogs' if 'ogs' in bp.get('rating_key', '') else 'model')
+                wp_kind = wp.get('kind') or ('ogs' if 'ogs' in wp.get('rating_key', '') else 'model')
+
+                bp_is_active = bool((bp_id and bp_id == active_id) or (bp_name and bp_name == active_name))
+                wp_is_active = bool((wp_id and wp_id == active_id) or (wp_name and wp_name == active_name))
+
+                if bp_is_active and wp_is_active:
+                    opponent_name = 'Self'
+                    opponent_kind = 'self'
+                elif bp_is_active and not wp_is_active:
+                    opponent_name = wp_name or 'Opponent'
+                    opponent_kind = wp_kind
+                elif wp_is_active and not bp_is_active:
+                    opponent_name = bp_name or 'Opponent'
+                    opponent_kind = bp_kind
+                else:
+                    raw_name = first.get('match_name') or ''
+                    if ' vs ' in raw_name and active_name:
+                        parts = raw_name.split(' vs ', 1)
+                        if parts[0].strip() == active_name:
+                            opponent_name = parts[1].strip()
+                        elif parts[1].strip() == active_name:
+                            opponent_name = parts[0].strip()
+                        else:
+                            opponent_name = raw_name
+                    else:
+                        opponent_name = raw_name or 'Bot vs Bot match'
+
+                    if '(OGS)' in opponent_name or 'ogs' in bp.get('rating_key', '') or 'ogs' in wp.get('rating_key', '') or bp_kind == 'ogs' or wp_kind == 'ogs':
+                        opponent_kind = 'ogs'
+                    elif 'Random' in opponent_name or bp_kind == 'random' or wp_kind == 'random':
+                        opponent_kind = 'random'
+                    else:
+                        opponent_kind = 'model'
+
+                if opponent_name.endswith(' (OGS)'):
+                    opponent_name = opponent_name[:-6].strip()
+                elif opponent_name.endswith('(OGS)'):
+                    opponent_name = opponent_name[:-5].strip()
+
                 series.append({
                     'match_id': match_id,
                     'name': first.get('match_name') or 'Bot vs Bot match',
+                    'opponent_name': opponent_name,
+                    'opponent_kind': opponent_kind,
+                    'filenames': [g.get('filename') for g in games if g.get('filename')],
                     'games': games,
                     'count': len(games),
                     'timestamp': max((g.get('timestamp') or '') for g in games),
@@ -260,6 +316,7 @@ def list_games():
             result.append({
                 'kind': 'match',
                 'label': 'Bot vs Bot Matches',
+                'folder': 'match',
                 'series': series,
                 'total_games': len(matches),
             })
@@ -293,6 +350,7 @@ def list_games():
     for iteration in sorted(grouped.keys(), reverse=True):
         by_phase = grouped[iteration]
         m = iter_metrics.get(iteration, {})
+        iter_folder = f"iter_{iteration:06d}"
 
         phases = []
         # Known phases first in run order, then anything unexpected on disk.
@@ -304,6 +362,7 @@ def list_games():
             group = {
                 'phase': phase,
                 'label': PHASE_LABELS.get(phase, phase),
+                'folder': f"{iter_folder}/{phase}",
                 'count': len(games),
                 'games': games,
             }
@@ -342,6 +401,7 @@ def list_games():
         result.append({
             'kind': 'iteration',
             'iteration': iteration,
+            'folder': iter_folder,
             'elo': round(m['elo']) if m.get('elo') is not None else None,
             'phases': phases,
             'total_games': sum(p['count'] for p in phases),
@@ -362,19 +422,53 @@ def list_games():
     })
 
 
+@training_bp.route('/api/games/delete_batch', methods=['POST'])
+def delete_games_batch():
+    """
+    Delete multiple games or folder paths in a single request.
+    Body: {"paths": ["match/match_1.json", "iter_000001/self-play", ...]}
+    """
+    trainer = _require_trainer()
+    if not trainer:
+        return jsonify({'error': 'No model selected'}), 400
+
+    data = request.get_json() or {}
+    paths = data.get('paths', [])
+    if not isinstance(paths, list):
+        return jsonify({'error': 'paths must be a list'}), 400
+
+    deleted_count = 0
+    games_dir = trainer.config.paths.games_dir
+    for p in paths:
+        if isinstance(p, str) and delete_saved_game(games_dir, p):
+            deleted_count += 1
+
+    try:
+        import model_stats
+        model_stats.invalidate_caches()
+    except Exception:
+        pass
+
+    return jsonify({'deleted': True, 'count': deleted_count})
+
+
 @training_bp.route('/api/games/<path:rel_path>', methods=['DELETE'])
 def delete_game(rel_path):
     """
-    Delete a user-created game. Only games under games/human/ and games/match/
-    can be deleted — training output is produced by the pipeline, not
-    disposable from the UI.
+    Delete any game file or folder under games/.
     """
     trainer = _require_trainer()
     if not trainer:
         return jsonify({'error': 'No model selected'}), 400
 
     if not delete_saved_game(trainer.config.paths.games_dir, rel_path):
-        return jsonify({'error': 'Only recorded games can be deleted'}), 403
+        return jsonify({'error': 'Game or folder not found'}), 404
+
+    try:
+        import model_stats
+        model_stats.invalidate_caches()
+    except Exception:
+        pass
 
     return jsonify({'deleted': True})
 
@@ -387,7 +481,7 @@ def get_game(rel_path):
         return jsonify({'error': 'No model selected'}), 400
 
     path = resolve_game_path(trainer.config.paths.games_dir, rel_path)
-    if not path:
+    if not path or not os.path.isfile(path):
         return jsonify({'error': 'Game not found'}), 404
 
     with open(path) as f:

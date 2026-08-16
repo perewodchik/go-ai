@@ -431,15 +431,20 @@
         const entries = Object.entries(opponents).sort((a, b) => b[1].games - a[1].games);
 
         const played = entries.map(([id, rec]) => {
-            const name = id === 'random' ? 'Random Bot' : (state.byId[id] || {}).name || id;
+            const isOgs = id.startsWith('ogs:') || rec.opponent_kind === 'ogs';
+            const isRandom = id === 'random' || rec.opponent_kind === 'random';
+            let name = rec.opponent_name || (id === 'random' ? 'Random Bot' : (state.byId[id] || {}).name || id);
             const verdict = rec.wins > rec.losses ? 'win' : (rec.wins < rec.losses ? 'loss' : 'draw');
-            const canRematch = id === 'random' || (state.byId[id] && state.byId[id].board_size === model.board_size);
+            const badge = isOgs
+                ? '<span class="opponent-badge badge-ogs">OGS</span>'
+                : isRandom
+                ? '<span class="opponent-badge badge-random">Random</span>'
+                : '<span class="opponent-badge badge-model">Model</span>';
             return `
                 <div class="h2h-row">
-                    <span class="h2h-name">${escapeHtml(name)}</span>
+                    <span class="h2h-name">${badge}<span>${escapeHtml(name)}</span></span>
                     <span class="h2h-record is-${verdict}">${rec.wins}–${rec.losses}${rec.draws ? `–${rec.draws}` : ''}</span>
                     <span class="h2h-note">${escapeHtml(fmtAgo(rec.last_played))}</span>
-                    ${canRematch ? `<button class="btn-small" data-act="match" data-id="${escapeAttr(id)}">Rematch</button>` : ''}
                 </div>`;
         }).join('');
 
@@ -1019,8 +1024,6 @@
             ${(state.lineage[model.id] || {}).children?.length
                 ? ` ${((state.lineage[model.id] || {}).children || []).length} fork(s) of this run will keep their own copies.`
                 : ''}`;
-        el('delete-confirm-name').value = '';
-        el('btn-confirm-delete').disabled = true;
         el('delete-model-modal').style.display = 'flex';
     }
 
@@ -1408,12 +1411,6 @@
             }
         });
 
-        // Delete needs the name typed: the impact line says what is at stake,
-        // and a one-click confirm is not proportional to 29 MB of history.
-        el('delete-confirm-name').addEventListener('input', (e) => {
-            el('btn-confirm-delete').disabled =
-                !deleteTarget || e.target.value.trim() !== deleteTarget.name;
-        });
         el('btn-cancel-delete').addEventListener('click', () => {
             el('delete-model-modal').style.display = 'none';
         });
