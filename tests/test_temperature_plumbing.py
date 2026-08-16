@@ -24,18 +24,27 @@ from ai import self_play as sp
 from ai.self_play import build_self_play_task, play_self_play_game
 
 
+# Every argument the task builder takes. Adding a setting to self-play means
+# adding it here too — which is the point: `test_every_key_is_a_real_parameter`
+# then checks it against the worker's actual signature.
+TASK_KWARGS = dict(
+    network=None, board_size=9, komi=6.5, num_simulations=96,
+    c_puct=1.5, temperature_threshold=30, temperature_init=0.8,
+    temperature_final=0.2, device="cpu", fpu_reduction=0.35,
+    value_target_outcome_weight=0.6, restrict_eye_fill=False,
+    restrict_self_atari=False, self_atari_max_stones=1,
+    resign_enabled=False, resign_threshold=0.9, resign_consecutive=4,
+    resign_min_move_factor=1.0, resign_both_sides=True,
+    resign_playout_fraction=0.1,
+)
+
+
 class TestTaskDict:
     """The dict that crosses the process boundary."""
 
     def test_carries_the_temperature_schedule(self):
         task = build_self_play_task(
-            network=None, board_size=9, komi=6.5, num_simulations=96,
-            c_puct=1.5, temperature_threshold=30, temperature_init=0.8,
-            temperature_final=0.2, device="cpu", fpu_reduction=0.35,
-            value_target_outcome_weight=0.6, restrict_eye_fill=False,
-            resign_enabled=False, resign_threshold=0.9, resign_consecutive=4,
-            resign_min_move_factor=1.0, resign_both_sides=True,
-            resign_playout_fraction=0.1,
+            **dict(TASK_KWARGS)
         )
         assert task['temperature_init'] == 0.8
         assert task['temperature_final'] == 0.2
@@ -48,13 +57,7 @@ class TestTaskDict:
         traceback is swallowed by `print(f"Worker failed: {e}")`.
         """
         task = build_self_play_task(
-            network=None, board_size=9, komi=6.5, num_simulations=96,
-            c_puct=1.5, temperature_threshold=30, temperature_init=0.8,
-            temperature_final=0.2, device="cpu", fpu_reduction=0.35,
-            value_target_outcome_weight=0.6, restrict_eye_fill=False,
-            resign_enabled=False, resign_threshold=0.9, resign_consecutive=4,
-            resign_min_move_factor=1.0, resign_both_sides=True,
-            resign_playout_fraction=0.1,
+            **dict(TASK_KWARGS)
         )
         accepted = set(inspect.signature(play_self_play_game).parameters)
         unknown = set(task) - accepted

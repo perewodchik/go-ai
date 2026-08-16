@@ -16,7 +16,10 @@ python run_server.py [--port PORT] [--debug]
 # Run training headless from the CLI
 python run_training.py [--iterations N] [--board-size 9] [--simulations 200]
 
-# Tests (suite lives under tests/, 97+ tests)
+# Check the OGS connection (no game is played)
+python scripts/ogs_probe.py
+
+# Tests (suite lives under tests/, 500+ tests)
 python -m pytest tests/ -v
 python -m pytest tests/test_rules.py -v          # single file
 python -m pytest tests/test_rules.py::test_name -v  # single test
@@ -43,6 +46,47 @@ Three independent layers, each importable without the others pulling in unrelate
 `model_manager.py`'s `ModelManager` owns everything under `models/`: each model is a directory (`models/<slug>/`) with its own `config.json` (board size/komi/ruleset/training hyperparams/live Elo & iteration state), `weights.pt`, `games/`, and `logs/`.
 
 Recorded games live under `games/iter_<NNNNNN>/<phase>/`, where phase is `self-play`, `promotion` (candidate vs champion gate matches), or `eval` (champion vs random bot). `ai/game_store.py` owns that layout — writing (`save_game`), listing (`iter_game_files` / `load_game_files`), resolving a client-supplied id (`resolve_game_path`, which rejects paths escaping `games/`), and migrating the old flat `iter_000001_game_0000.json` naming (`migrate_legacy_layout`, run from `Trainer.__init__` and the games API). A game's id everywhere — API, review URLs — is its path relative to `games/`. The currently active model id is stored in `models/.active`. `web/app.py`'s `switch_model(model_id)` builds a `Config` from the model's `ModelInfo` and creates a new `Trainer` bound to that model's directory — so switching models swaps the entire training context (weights, replay data, hyperparameters) at once.
+
+### Playing on OGS (online-go.com)
+
+`ai/online/` bridges to online-go.com so a model can play the live bots there.
+It plugs in as a `Player` (`ai/players.py`), so `ai/match.py`, the live board,
+the game recorder and the Elo update are all unchanged — the spec
+`{"type": "ogs", "bot_id": 1195517}` is just another opponent.
+
+- **`ogs_socket.py`** — OGS's realtime API is NOT socket.io: it is a plain
+  WebSocket at `wss://online-go.com` framing messages as JSON arrays
+  (`["command", data, request_id?]` out, `[command_or_id, data, error]` back).
+  `OGSSocket` wraps that with a synchronous API for this project's threaded
+  match loop. Events pushed on connect (`active-bots`) need `latch()`, armed
+  before the triggering action — a handler registered afterwards misses them.
+- **`ogs_bots.py`** — the roster, which OGS pushes as `active-bots` to any
+  client, including an unauthenticated one, so listing opponents needs no
+  credentials. Cached at `data/ogs_bots.json` (15 min TTL, stale cache used if
+  OGS is unreachable). `playability()` ports OGS's own compatibility check, so
+  a bot is greyed out here for the same reason as on their site.
+  `ranking_to_elo()` converts an OGS rank to this project's Elo scale (500 =
+  30k, 100 per rank) — the raw glicko numbers are a different scale entirely.
+- **`ogs_rest.py`** — OAuth2 sign-in and the three calls that cannot go over
+  the socket: challenge a bot, withdraw a challenge, read a game.
+- **`ogs.py`** — `OGSPlayer`. Challenges for the colour the match runner
+  assigned, waits for the bot to accept (with `challenge/keepalive`), then
+  exchanges moves. OGS is authoritative, so it refuses to start a game whose
+  size/colour/handicap differ from the match, and aborts if a move OGS reports
+  is illegal on our board rather than letting the runner turn it into a pass.
+- **`ogs_coords.py`** — OGS packs coordinates as two letters, x first
+  (`(3, 15)` → `"pd"`, pass `".."`); game records use `[x, y, time_ms]`.
+
+Credentials live in `ogs_credentials.json` (gitignored) or `OGS_USERNAME` /
+`OGS_PASSWORD` / `OGS_CLIENT_ID` / `OGS_CLIENT_SECRET`, from an application
+registered at https://online-go.com/oauth2/applications/ (Confidential +
+Resource owner password-based). **OGS shows the client secret once, on the page
+right after the application is created** — the value on the edit page
+afterwards is a `pbkdf2_` hash and never works. `python scripts/ogs_probe.py`
+checks the whole path (sign-in, socket token, roster) without playing a game.
+
+OGS asks that engine-driven accounts be registered as bot accounts; matches
+default to unranked and are capped at `MAX_OGS_GAMES` per series.
 
 ### Concurrency
 

@@ -556,6 +556,8 @@ class Trainer:
                     stop_checker=self._check_force_stop,
                     num_workers=self.config.training.num_parallel_workers,
                     restrict_eye_fill=self.config.training.restrict_eye_fill,
+                    restrict_self_atari=self.config.training.restrict_self_atari,
+                    self_atari_max_stones=self.config.training.self_atari_max_stones,
                     resign_enabled=resign_on,
                     resign_threshold=self.config.training.resign_threshold,
                     resign_consecutive=self.config.training.resign_consecutive,
@@ -687,6 +689,8 @@ class Trainer:
                         restrict_eye_fill=self.config.training.restrict_eye_fill,
                         c_puct=self.config.mcts.c_puct,
                         fpu_reduction=self.config.mcts.fpu_reduction,
+                        restrict_self_atari=self.config.training.restrict_self_atari,
+                        self_atari_max_stones=self.config.training.self_atari_max_stones,
                     )
                     eval_seconds = round(time.time() - eval_start, 2)
 
@@ -872,6 +876,8 @@ class Trainer:
                 restrict_eye_fill=cfg.restrict_eye_fill,
                 c_puct=self.config.mcts.c_puct,
                 fpu_reduction=self.config.mcts.fpu_reduction,
+                restrict_self_atari=cfg.restrict_self_atari,
+                self_atari_max_stones=cfg.self_atari_max_stones,
             )
         except Exception as e:
             # Never let a gate failure take down training — fall back to

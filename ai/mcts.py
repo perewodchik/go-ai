@@ -74,11 +74,23 @@ class MCTSNode:
     A node in the MCTS search tree.
     
     Each node represents a game state and tracks statistics for each
-    child action (move). We DON'T store child states explicitly — they're
-    created on-demand during expansion to save memory.
-    
+    child action (move).
+
+    LAZY STATE MATERIALISATION
+
+    A node created during expansion holds only the action that reaches it and
+    its prior; `state` stays None until the search actually selects it. The
+    previous version built a full GameState for every legal move the moment a
+    node was expanded — 3,233 of them per 96-simulation search on a mid-game
+    9x9 board, of which at most 96 could ever be visited. Around 97% of that
+    work, and all the memory behind it, was discarded.
+
+    The saving is bigger than one board copy each: GameState.copy() also copies
+    the superko hash-history set, which grows with every move played, so the
+    cost of the abandoned children rose as games got longer.
+
     Attributes:
-        state: The GameState at this node.
+        state: The GameState at this node, or None until `ensure_state()` runs.
         parent: Parent MCTSNode (None for root).
         parent_action: The action that led from parent to this node.
         children: Dict mapping action → child MCTSNode.
@@ -86,20 +98,50 @@ class MCTSNode:
         value_sum: Sum of all backpropagated values through this node.
         prior: Prior probability from the neural network (P(s,a) for this action).
         is_expanded: Whether we've run the neural network on this state.
+        terminal_value: Cached result for a finished position, so a terminal
+            node is scored once instead of on every visit.
     """
-    
-    def __init__(self, state: GameState, parent: Optional['MCTSNode'] = None,
+
+    __slots__ = ('state', 'parent', 'parent_action', 'prior', 'children',
+                 'visit_count', 'value_sum', 'is_expanded', 'terminal_value')
+
+    def __init__(self, state: Optional[GameState], parent: Optional['MCTSNode'] = None,
                  parent_action: Optional[Tuple[int, int]] = None, prior: float = 0.0):
         self.state = state
         self.parent = parent
         self.parent_action = parent_action
         self.prior = prior
-        
+
         self.children: Dict[Tuple[int, int], 'MCTSNode'] = {}
         self.visit_count = 0
         self.value_sum = 0.0
         self.is_expanded = False
-    
+        self.terminal_value: Optional[float] = None
+
+    def ensure_state(self) -> GameState:
+        """
+        Materialise this node's position, deriving it from the parent the first
+        time it is needed.
+
+        The move is known to be legal: it came from `get_legal_moves()` on the
+        parent's own position, and since `rules.apply_move` and
+        `rules.get_legal_moves` now share one simulation, they cannot disagree.
+        A failure here means the tree is being built from a position that has
+        drifted from its parent, which would silently corrupt every policy
+        target derived from this subtree — so it is raised, not swallowed.
+        """
+        if self.state is None:
+            state = self.parent.state.copy()
+            if self.parent_action == MOVE_PASS:
+                state.play_pass()
+            elif not state.play_move(self.parent_action[0], self.parent_action[1]):
+                raise RuntimeError(
+                    f"MCTS child move {self.parent_action} was legal at expansion "
+                    f"but illegal on materialisation — tree state is inconsistent"
+                )
+            self.state = state
+        return self.state
+
     @property
     def q_value(self) -> float:
         """
@@ -163,7 +205,9 @@ class MCTS:
                  c_puct: float = 1.5, dirichlet_alpha: float = 0.3,
                  dirichlet_epsilon: float = 0.25, device: str = "cpu",
                  fpu_reduction: float = 0.35,
-                 restrict_eye_fill: bool = False):
+                 restrict_eye_fill: bool = False,
+                 restrict_self_atari: bool = False,
+                 self_atari_max_stones: int = 1):
         self.network = network
         self.num_simulations = num_simulations
         self.c_puct = c_puct
@@ -177,6 +221,11 @@ class MCTS:
         # move is never expanded, never given a prior, never visited, and never
         # appears in the policy target. See game/eyes.py.
         self.restrict_eye_fill = restrict_eye_fill
+        # Same mechanism, different rule: hide moves that walk a group larger
+        # than self_atari_max_stones into atari for nothing. See
+        # game/self_atari.py — this one is a heuristic, not a theorem.
+        self.restrict_self_atari = restrict_self_atari
+        self.self_atari_max_stones = self_atari_max_stones
         # Root evaluation from the most recent search(), expressed from the
         # perspective of the player to move at the root (∈ [-1, +1]). Used for
         # win-rate tracking. Updated by every search() call.
@@ -217,6 +266,9 @@ class MCTS:
         # and the restriction is a property of THIS searcher, not of the game.
         if self.restrict_eye_fill:
             root_state.restrict_eye_fill = True
+        if self.restrict_self_atari:
+            root_state.restrict_self_atari = True
+            root_state.self_atari_max_stones = self.self_atari_max_stones
         root = MCTSNode(root_state)
 
         # Expand root node
@@ -230,14 +282,20 @@ class MCTS:
         for _ in range(self.num_simulations):
             node = root
 
-            # SELECT: walk down tree picking best child
+            # SELECT: walk down tree picking best child. Each child's position
+            # is built the first time the search commits to it, so the nodes
+            # that are never selected never cost a board copy.
             while node.is_expanded and node.children and not node.state.is_over:
                 node = node.best_child(self.c_puct, self.fpu_reduction)
+                node.ensure_state()
 
             # If game is over at this node, use actual result
             if node.state.is_over:
-                # Value from perspective of the node's current player
-                value = self._terminal_value(node.state)
+                # Scoring a finished position is not free, and a terminal node
+                # is revisited many times over a search, so keep the answer.
+                if node.terminal_value is None:
+                    node.terminal_value = self._terminal_value(node.state)
+                value = node.terminal_value
             else:
                 # EXPAND: evaluate with neural network
                 value = self._expand(node, allow_pass=allow_pass,
@@ -345,25 +403,18 @@ class MCTS:
             # Fallback: uniform over legal moves (shouldn't happen normally)
             masked_policy = legal_mask / legal_mask.sum()
         
-        # Create child nodes for each legal action
+        # Create child nodes for each legal action. No board work happens here:
+        # a child is an action plus a prior until the search selects it (see
+        # MCTSNode.ensure_state).
         for action in all_actions:
             if action == MOVE_PASS:
                 prior = masked_policy[action_size - 1]
             else:
                 prior = masked_policy[action[0] * state.board_size + action[1]]
-            
-            # Create child state
-            child_state = state.copy()
-            if action == MOVE_PASS:
-                child_state.play_pass()
-            else:
-                success = child_state.play_move(action[0], action[1])
-                if not success:
-                    continue  # Skip if move somehow failed
-            
-            child = MCTSNode(child_state, parent=node, parent_action=action, prior=prior)
-            node.children[action] = child
-        
+
+            node.children[action] = MCTSNode(
+                None, parent=node, parent_action=action, prior=prior)
+
         node.is_expanded = True
         return value
     

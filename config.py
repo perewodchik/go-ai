@@ -256,6 +256,23 @@ class TrainingConfig:
     # Default False = identical behaviour to before this setting existed.
     restrict_eye_fill: bool = False
 
+    # When True, the bot may not play a move that captures nothing and leaves
+    # the group it joins on a single liberty, provided that group is larger
+    # than self_atari_max_stones. Enforced the same way as restrict_eye_fill —
+    # the move is removed from the action set, so MCTS never expands it, never
+    # gives it a prior and never puts it in a policy target.
+    #
+    # UNLIKE restrict_eye_fill THIS IS NOT PROVABLY SAFE. It is a tuned
+    # assumption: self-atari is genuinely correct in nakade, seki manipulation,
+    # eye-space reduction and ko-threat creation. The promotion gate CANNOT
+    # detect over-restriction, because candidate and champion both play under
+    # the filter — validate it with the twin-model A/B in HEURISTICS.md.
+    # Default False = identical behaviour to before this setting existed.
+    restrict_self_atari: bool = False
+    # Sacrifices of at most this many stones stay playable, which is what keeps
+    # throw-ins — the main small-group tesuji — available.
+    self_atari_max_stones: int = 1
+
     # --- Mercy rule (self-play resignation) -------------------------------
     # Stop a self-play game once one side's own search says it is lost, instead
     # of paying a full MCTS search per move for a decided endgame. Self-play
@@ -374,6 +391,8 @@ class Config:
             collapse_guard_enabled=_model_default(model_info.training, "collapse_guard_enabled"),
             collapse_auto_stop=_model_default(model_info.training, "collapse_auto_stop"),
             restrict_eye_fill=_model_default(model_info.training, "restrict_eye_fill"),
+            restrict_self_atari=_model_default(model_info.training, "restrict_self_atari"),
+            self_atari_max_stones=_model_default(model_info.training, "self_atari_max_stones"),
             resign_enabled=_model_default(model_info.training, "resign_enabled"),
             resign_threshold=_model_default(model_info.training, "resign_threshold"),
             resign_consecutive=_model_default(model_info.training, "resign_consecutive"),

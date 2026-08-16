@@ -154,24 +154,6 @@ body {
     -webkit-text-fill-color: transparent;
 }
 
-/* Marks a page that is a work-in-progress replacement for a live one
-   (/dashboard_new), so it is never mistaken for the page it will replace. */
-.page-title-tag {
-    display: inline-block;
-    vertical-align: middle;
-    margin-left: 0.5rem;
-    padding: 0.15rem 0.55rem;
-    border-radius: 999px;
-    font-size: 0.7rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--accent-light);
-    background: rgba(200, 149, 108, 0.15);
-    border: 1px solid rgba(200, 149, 108, 0.35);
-    -webkit-text-fill-color: var(--accent-light);
-}
-
 /* ---- Dashboard (New Layout) ---- */
 .dash-layout {
     display: grid;
@@ -651,9 +633,48 @@ body {
 /* ---- Play page ---- */
 .play-container { max-width: 1200px; margin: 0 auto; }
 
+/* Every view on the Play page is a "← Back" header followed by its content.
+   The header sits ABOVE the board (and above the setup card), so leaving is
+   a page-level action rather than something buried in a panel. */
+.play-view { display: block; }
+.play-view-narrow { max-width: 480px; margin: 0 auto; }
+.play-view-wide { max-width: 620px; margin: 0 auto; }
+
+.play-topbar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin: 1rem 0 1.1rem;
+}
+.play-back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 1.1rem;
+    font-family: inherit;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.play-back-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+.play-topbar-title {
+    font-size: 0.95rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .setup-panel {
-    max-width: 480px;
-    margin: 2rem auto;
     padding: 2rem;
 }
 
@@ -750,26 +771,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 
 .info-panel { padding: 1.25rem; min-width: 0; }
 .game-info { margin-bottom: 1.15rem; }
-
-/* One row at the top of every info panel: the way back, and what you are
-   looking at. The back button belongs here, not among the game actions. */
-.panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    margin-bottom: 0.9rem;
-    padding-bottom: 0.65rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-}
-.panel-head .play-back-link { padding: 0; }
-.panel-head-title {
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
 
 /* Both boards share one scoreboard: colour, who it is, score, captures, and a
    meta line underneath carrying the move count. */
@@ -4648,21 +4649,10 @@ details.phase-group > summary {
 .play-progress-dismiss { flex: 0 0 auto; opacity: 0.5; }
 .play-progress-dismiss:hover { opacity: 1; }
 
-.play-back-link {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    font-size: 0.82rem;
-    cursor: pointer;
-    padding: 0 0 0.6rem;
-    transition: var(--transition);
-}
-.play-back-link:hover { color: var(--accent-light); }
-
 /* ---- End-of-game / end-of-series banner ----
    Shared by the human game and the bot-vs-bot series: both end the same way,
    with a result and the two things you might do next. The way back to the
-   launcher is NOT repeated here — it lives once, in .panel-head. */
+   launcher is NOT repeated here — it lives once, in the page header. */
 .play-summary {
     margin-bottom: 1rem;
     padding: 0.9rem 1rem;
@@ -4709,7 +4699,24 @@ details.phase-group > summary {
     border-radius: var(--radius-sm);
 }
 
-#match-setup-panel { max-width: 620px; }
+/* The series result gets the celebratory treatment: centred, with the trophy
+   carrying the news and one obvious button under it. */
+.play-summary-final {
+    text-align: center;
+    padding: 1.2rem 1rem 1.1rem;
+    background: radial-gradient(circle at 50% 0%,
+                rgba(200, 149, 108, 0.22), rgba(200, 149, 108, 0.08) 70%);
+}
+.play-summary-icon {
+    font-size: 2rem;
+    line-height: 1;
+    margin-bottom: 0.45rem;
+}
+.play-summary-final .play-summary-title {
+    font-size: 1.15rem;
+    margin-bottom: 0.4rem;
+}
+.play-summary-final .play-summary-actions { margin-top: 1rem; }
 
 .match-intro {
     color: var(--text-muted);
@@ -4830,6 +4837,23 @@ details.phase-group > summary {
     padding: 0.3rem 0.15rem;
     border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
+/* A recorded game is a link to itself in Review Games. */
+.match-result-row.is-link {
+    color: inherit;
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+    padding-left: 0.35rem;
+    padding-right: 0.35rem;
+    transition: var(--transition);
+}
+.match-result-row.is-link:hover {
+    background: rgba(200, 149, 108, 0.12);
+}
+.match-result-row.is-link:hover .match-result-winner { color: var(--accent-light); }
+.match-result-row.is-link .match-result-moves::after {
+    content: " ↗";
+    color: var(--text-muted);
+}
 .match-result-row:last-child { border-bottom: none; }
 .match-result-index { color: var(--text-muted); }
 .match-result-winner { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4845,7 +4869,9 @@ details.phase-group > summary {
     .match-side-grid { grid-template-columns: 1fr; }
     .play-launcher { margin-top: 0.5rem; }
     .play-launcher-grid { grid-template-columns: 1fr; }
-    .setup-panel { margin: 1rem auto; padding: 1.25rem; }
+    .setup-panel { padding: 1.25rem; }
+    .play-topbar { margin: 0.5rem 0 0.9rem; }
+    .play-back-btn { padding: 0.5rem 0.9rem; }
     .info-panel { padding: 1rem; }
     .play-inprogress { padding: 0.85rem 0.9rem; }
     /* Name on its own line: on a phone the row cannot hold name, state and
@@ -4854,3 +4880,541 @@ details.phase-group > summary {
     .play-progress-name { flex: 1 1 100%; }
     .play-progress-btn { margin-left: auto; }
 }
+
+/* ===========================================================================
+   Fleet console (/models)
+   ---------------------------------------------------------------------------
+   A list of eight forks of the same run is scanned, not read: the eye has to
+   land on which model is training, which one is unhealthy, and which fork
+   split off where — before reading a single number. So state is encoded in
+   form (a dot, an indent, a sparkline) as well as in text, and the accent
+   colour is reserved for the model you are looking at.
+
+   Deliberately additive: index.html and dashboard.js keep every class they
+   already use, and nothing below is shared with them.
+   =========================================================================== */
+
+.fleet { display: flex; flex-direction: column; gap: 1rem; }
+
+.fleet-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+.fleet-head .page-title { margin-bottom: 0.35rem; }
+.fleet-head-left { min-width: 0; }
+.fleet-head-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+
+.fleet-totals {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem 0.45rem;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+.fleet-total-sep { color: var(--text-muted); }
+
+/* ---- live training banner ---- */
+.fleet-live {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.7rem 1rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(76, 175, 80, 0.3);
+    background: rgba(76, 175, 80, 0.08);
+}
+.live-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+    flex: 0 0 auto;
+    animation: fleet-pulse 1.8s ease-in-out infinite;
+}
+@keyframes fleet-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+
+.live-text { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; flex: 1 1 auto; }
+.live-text strong { font-size: 0.92rem; }
+.live-stage, .live-detail { font-size: 0.78rem; color: var(--text-secondary); }
+.live-detail { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-bar {
+    flex: 0 0 140px; height: 5px; border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08); overflow: hidden;
+}
+.live-bar-fill { height: 100%; background: var(--success); transition: width 0.4s ease; }
+
+.fleet-flash {
+    padding: 0.6rem 1rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    border: 1px solid var(--border-glass);
+    background: var(--bg-glass);
+    color: var(--text-secondary);
+}
+.fleet-flash.is-ok { border-color: rgba(76, 175, 80, 0.35); color: #81c784; }
+.fleet-flash.is-warn { border-color: rgba(255, 167, 38, 0.35); color: #ffb74d; }
+.fleet-flash.is-error { border-color: rgba(239, 83, 80, 0.4); color: #e57373; }
+
+/* ---- layout ---- */
+.fleet-layout {
+    display: grid;
+    grid-template-columns: minmax(300px, 400px) minmax(0, 1fr);
+    gap: 1.25rem;
+    align-items: start;
+}
+.fleet-list { padding: 0.75rem; position: sticky; top: 1rem; }
+.fleet-list-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 0.5rem; padding: 0.2rem 0.35rem 0.6rem;
+}
+.fleet-list-title { font-weight: 600; font-size: 0.95rem; }
+.fleet-sort { display: flex; gap: 0.2rem; }
+.sort-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.2rem 0.45rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.sort-btn:hover { color: var(--text-secondary); background: var(--bg-glass); }
+.sort-btn.active { color: var(--accent-light); border-color: rgba(200, 149, 108, 0.35); background: rgba(200, 149, 108, 0.12); }
+
+.fleet-rows { display: flex; flex-direction: column; gap: 0.15rem; max-height: 62vh; overflow-y: auto; }
+
+/* ---- a model row ---- */
+.fleet-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0.6rem;
+    padding-left: calc(0.6rem + var(--depth, 0) * 1.1rem);
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+.fleet-row:hover { background: var(--bg-glass); }
+.fleet-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.fleet-row.selected { background: rgba(200, 149, 108, 0.16); border-color: rgba(200, 149, 108, 0.35); }
+.fleet-row.compare-picked { background: rgba(122, 162, 200, 0.16); border-color: rgba(122, 162, 200, 0.4); }
+.fleet-row.is-untrained .row-title { color: var(--text-secondary); }
+.fleet-row.is-untrained .row-elo-value { color: var(--text-muted); }
+.fleet.is-comparing .fleet-row { cursor: copy; }
+
+.row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+.row-name { display: flex; align-items: baseline; gap: 0.35rem; min-width: 0; }
+.row-branch { color: var(--text-muted); font-size: 0.8rem; }
+.row-title {
+    font-weight: 600; font-size: 0.88rem;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.row-sub { font-size: 0.72rem; color: var(--text-muted); }
+.row-fork {
+    font-size: 0.68rem; font-weight: 700; color: var(--accent);
+    background: rgba(200, 149, 108, 0.13); border-radius: 3px; padding: 0 0.28rem;
+    cursor: help; flex: 0 0 auto;
+}
+.row-badge {
+    font-size: 0.62rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 0.05rem 0.32rem; border-radius: 3px; flex: 0 0 auto;
+}
+.row-badge.is-active { color: var(--accent-light); background: rgba(200, 149, 108, 0.18); }
+.row-badge.is-live { color: #81c784; background: rgba(76, 175, 80, 0.18); }
+
+.row-spark { flex: 0 0 auto; color: var(--text-muted); display: flex; align-items: center; }
+.row-spark.up { color: var(--success); }
+.row-spark.down { color: var(--danger); }
+.spark-empty { color: var(--text-muted); font-size: 0.8rem; width: 60px; text-align: center; display: inline-block; }
+
+.row-elo { flex: 0 0 auto; text-align: right; display: flex; flex-direction: column; line-height: 1.15; }
+.row-elo-value { font-weight: 700; font-size: 0.92rem; font-variant-numeric: tabular-nums; }
+.row-elo-delta { font-size: 0.68rem; font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.row-elo-delta.up { color: var(--success); }
+.row-elo-delta.down { color: var(--danger); }
+
+/* Health is a column, not something you find inside a chart. */
+.health-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+    background: var(--text-muted);
+}
+.health-dot.is-ok { background: var(--success); }
+.health-dot.is-warn { background: var(--warning); }
+.health-dot.is-critical { background: var(--danger); box-shadow: 0 0 7px rgba(239, 83, 80, 0.7); }
+.health-dot.is-idle { background: var(--text-muted); opacity: 0.5; }
+
+.fleet-archived { margin-top: 0.5rem; }
+.archived-group > summary {
+    cursor: pointer; padding: 0.4rem 0.6rem; font-size: 0.8rem;
+    color: var(--text-muted); font-weight: 600;
+}
+.fleet-row.is-archived { opacity: 0.65; }
+
+/* ---- detail panel ---- */
+.fleet-detail { padding: 1.5rem; display: flex; flex-direction: column; gap: 1.25rem; min-height: 60vh; }
+
+.detail-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 1rem; flex-wrap: wrap;
+}
+.detail-identity { min-width: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.detail-name { font-size: 1.45rem; margin: 0; }
+.detail-badges { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.detail-badge {
+    font-size: 0.72rem; font-weight: 600; padding: 0.15rem 0.5rem;
+    border-radius: 999px; background: var(--bg-glass);
+    border: 1px solid var(--border-glass); color: var(--text-secondary);
+}
+.lineage-line { font-size: 0.82rem; color: var(--text-secondary); }
+.lineage-line a { color: var(--accent-light); text-decoration: none; border-bottom: 1px dotted rgba(200, 149, 108, 0.5); }
+.lineage-line a:hover { color: var(--accent); }
+.muted { color: var(--text-muted); }
+
+/* The name line owns the model's STATE; the row below it owns its ACTIONS.
+   Mixing the two put a non-clickable "✓ Active" badge in a row of buttons,
+   where it read as a control that had stopped working. */
+.detail-title-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.state-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+    line-height: 1.5;
+}
+.state-pill.is-active {
+    color: var(--accent-light);
+    background: rgba(200, 149, 108, 0.16);
+    border: 1px solid rgba(200, 149, 108, 0.4);
+}
+.state-pill.is-live {
+    color: #81c784;
+    background: rgba(76, 175, 80, 0.16);
+    border: 1px solid rgba(76, 175, 80, 0.4);
+}
+.state-pill.is-archived {
+    color: var(--text-muted);
+    background: var(--bg-glass);
+    border: 1px solid var(--border-glass);
+}
+.state-pill-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor;
+    animation: fleet-pulse 1.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .state-pill-dot { animation: none; } }
+
+/* One row, one button height. The emoji-only delete control would otherwise
+   set its own line-height and stand a few pixels taller than its neighbours. */
+.detail-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.detail-actions .btn-small {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 30px;
+    padding: 0 0.75rem;
+    font-size: 0.78rem;
+    line-height: 1;
+    white-space: nowrap;
+}
+.detail-actions .btn-icon-danger { padding: 0 0.6rem; font-size: 0.85rem; }
+.detail-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+.action-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--border-glass);
+    margin: 0 0.15rem;
+    flex: 0 0 auto;
+}
+
+.detail-notes {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    padding: 0.6rem 0.75rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+    resize: vertical;
+}
+.detail-notes:focus { outline: none; border-color: rgba(200, 149, 108, 0.45); }
+.detail-notes::placeholder { color: var(--text-muted); }
+
+.health-strip {
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-glass);
+    background: var(--bg-glass);
+    padding: 0.75rem 0.9rem;
+    display: flex; flex-direction: column; gap: 0.5rem;
+}
+.health-strip.is-ok { border-color: rgba(76, 175, 80, 0.3); background: rgba(76, 175, 80, 0.07); }
+.health-strip.is-warn { border-color: rgba(255, 167, 38, 0.32); background: rgba(255, 167, 38, 0.07); }
+.health-strip.is-critical { border-color: rgba(239, 83, 80, 0.4); background: rgba(239, 83, 80, 0.09); }
+.health-head { display: flex; align-items: center; gap: 0.5rem; font-size: 0.92rem; }
+.health-reasons { list-style: none; display: flex; flex-direction: column; gap: 0.25rem; margin: 0; padding: 0; }
+.health-reason { font-size: 0.82rem; color: var(--text-secondary); padding-left: 0.9rem; position: relative; line-height: 1.5; }
+.health-reason::before { content: '·'; position: absolute; left: 0.2rem; }
+.health-reason.is-critical { color: #e57373; }
+.health-reason.is-warn { color: #ffb74d; }
+
+.vitals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.6rem;
+}
+.vital {
+    display: flex; flex-direction: column; gap: 0.1rem;
+    padding: 0.6rem 0.75rem;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-sm);
+}
+.vital-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+.vital-value { font-size: 1.15rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.vital-note { font-size: 0.7rem; color: var(--text-muted); }
+
+.detail-section { display: flex; flex-direction: column; gap: 0.6rem; }
+.detail-section-title {
+    font-size: 0.95rem; font-weight: 600; margin: 0;
+    display: flex; align-items: baseline; gap: 0.5rem;
+}
+.section-note { font-size: 0.75rem; color: var(--text-muted); font-weight: 400; }
+
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; }
+.chart-box {
+    height: 150px; padding: 0.5rem;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-sm);
+}
+.chart-box-wide { height: 200px; grid-column: 1 / -1; }
+
+/* ---- head to head ---- */
+.h2h-row {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    font-size: 0.85rem;
+}
+.h2h-row:last-of-type { border-bottom: none; }
+.h2h-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.h2h-record { font-weight: 700; font-variant-numeric: tabular-nums; }
+.h2h-record.is-win { color: var(--success); }
+.h2h-record.is-loss { color: var(--danger); }
+.h2h-record.is-draw { color: var(--warning); }
+.h2h-note { font-size: 0.75rem; color: var(--text-muted); }
+.h2h-big {
+    display: flex; align-items: center; justify-content: center; gap: 1rem;
+    padding: 0.8rem; font-size: 0.9rem;
+    background: rgba(0, 0, 0, 0.2); border-radius: var(--radius-sm);
+}
+.h2h-big strong { font-size: 1.5rem; font-variant-numeric: tabular-nums; color: var(--accent-light); }
+
+.match-watch {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.5rem 0.7rem; margin-top: 0.5rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(200, 149, 108, 0.3);
+    background: rgba(200, 149, 108, 0.08);
+    font-size: 0.82rem;
+}
+.match-watch.is-done { border-color: var(--border-glass); background: var(--bg-glass); }
+.match-watch-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.match-watch-score { font-weight: 700; font-variant-numeric: tabular-nums; }
+.match-watch a { text-decoration: none; }
+
+/* ---- config, generated from PARAM_BOUNDS ----------------------------------
+   Twenty-seven settings in one block is a wall unless three things are true:
+   it is obviously a block you opened (chevron + panel), the group headings
+   separate it into readable runs, and each row puts its label and its value on
+   different lines so the eye reads a column of values rather than a hedge of
+   label-value-label-value. */
+.config-section {
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.12);
+    overflow: hidden;
+    gap: 0;
+}
+.config-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.7rem 0.9rem;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    transition: background 0.15s ease;
+}
+.config-summary::-webkit-details-marker { display: none; }
+.config-summary:hover { background: var(--bg-glass); }
+.config-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.config-summary-title { font-size: 0.95rem; font-weight: 600; }
+.config-chevron {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    transition: transform 0.18s ease;
+    display: inline-block;
+}
+.config-section[open] > .config-summary { border-bottom: 1px solid var(--border-glass); }
+.config-section[open] .config-chevron { transform: rotate(90deg); color: var(--accent); }
+.config-summary .section-note strong { color: var(--accent-light); font-weight: 700; }
+@media (prefers-reduced-motion: reduce) { .config-chevron { transition: none; } }
+
+.config-body { padding: 0.5rem 0.9rem 0.9rem; }
+
+/* Which slice of the settings is listed. */
+.config-filter { display: flex; gap: 0.3rem; padding: 0.3rem 0 0.2rem; }
+.filter-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--border-glass);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.filter-pill:hover { color: var(--text-primary); background: var(--bg-glass); }
+.filter-pill.active {
+    color: var(--accent-light);
+    background: rgba(200, 149, 108, 0.14);
+    border-color: rgba(200, 149, 108, 0.4);
+}
+.filter-count { font-variant-numeric: tabular-nums; opacity: 0.75; }
+
+.config-group { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 1rem; }
+.config-group-title {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    font-weight: 700;
+    white-space: nowrap;
+}
+/* Hairline running out from the heading, so groups read as bands. */
+.config-group-title::after {
+    content: '';
+    flex: 1 1 auto;
+    height: 1px;
+    background: var(--border-glass);
+}
+
+.config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 0.4rem; }
+.config-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    padding: 0.45rem 0.6rem;
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid transparent;
+    min-width: 0;
+}
+.config-item .config-key {
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+    line-height: 1.35;
+}
+.config-item .config-val {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+}
+/* Booleans are not quantities — they read as state, so they look like state. */
+.config-item .config-val.is-bool { font-size: 0.82rem; }
+.config-item .config-val.is-on { color: var(--success); }
+.config-item .config-val.is-off { color: var(--text-muted); }
+
+.config-item.is-changed {
+    background: rgba(200, 149, 108, 0.1);
+    border-color: rgba(200, 149, 108, 0.28);
+}
+.config-item.is-changed .config-key { color: var(--accent-light); }
+.config-item.is-changed .config-val { color: var(--accent-light); }
+.config-item.is-changed .config-val.is-off { color: var(--accent-light); }
+.config-was {
+    font-size: 0.63rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---- compare ---- */
+.scroll-x { overflow-x: auto; }
+.compare-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+.compare-table th, .compare-table td {
+    padding: 0.4rem 0.6rem; text-align: left;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.compare-table th.num, .compare-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.compare-table thead th { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.compare-table td:first-child { color: var(--text-secondary); }
+
+.model-form-subtitle { font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 0.8rem; line-height: 1.5; }
+.delete-impact {
+    font-size: 0.88rem; line-height: 1.6; color: var(--text-secondary);
+    background: rgba(239, 83, 80, 0.08);
+    border: 1px solid rgba(239, 83, 80, 0.3);
+    border-radius: var(--radius-sm);
+    padding: 0.8rem 0.9rem; margin-bottom: 1rem;
+}
+.empty-hint { color: var(--text-muted); font-size: 0.85rem; text-align: center; padding: 0.6rem 0; }
+
+@media (max-width: 900px) {
+    .fleet-layout { grid-template-columns: 1fr; }
+    .fleet-list { position: static; }
+    .fleet-rows { max-height: none; }
+    .live-bar { flex-basis: 80px; }
+}
+
+/* Footer of a paged games list: what is loaded, and how to load more. */
+.games-list-note {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    text-align: center;
+    padding: 0.5rem 0;
+    margin: 0;
+}
+.games-list-note a { color: var(--accent-light); text-decoration: none; }
+.games-list-note a:hover { text-decoration: underline; }
+
+.games-load-more {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.7rem 0 0.4rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    margin-top: 0.4rem;
+}
+.games-load-more .btn-small { min-width: 190px; }
+.games-load-more .games-list-note { padding: 0; }

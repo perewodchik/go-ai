@@ -66,60 +66,208 @@ def get_adjacent_opponent_groups(board: Board, row: int, col: int,
     return seen_groups
 
 
+class MoveSimulation:
+    """
+    Everything a caller needs to know about a hypothetical move, worked out
+    without touching the board.
+
+    Attributes:
+        is_legal: Whether the move may be played.
+        error: Why not, when it may not.
+        captured: Positions of opponent stones the move removes.
+        new_hash: Zobrist hash of the resulting position.
+        ko_point: The ko point the move creates, or None.
+        own_size: Stones in the group the move would belong to (itself plus any
+            friendly groups it joins). Only populated when `need_group_facts`
+            was requested AND the move captures nothing — see `simulate_move`.
+        own_liberties: Liberties that group would have. Same condition.
+    """
+
+    __slots__ = ('is_legal', 'error', 'captured', 'new_hash', 'ko_point',
+                 'own_size', 'own_liberties')
+
+    def __init__(self, is_legal: bool, error: str = "",
+                 captured: FrozenSet[Tuple[int, int]] = frozenset(),
+                 new_hash: Optional[int] = None,
+                 ko_point: Optional[Tuple[int, int]] = None,
+                 own_size: Optional[int] = None,
+                 own_liberties: Optional[Set[Tuple[int, int]]] = None):
+        self.is_legal = is_legal
+        self.error = error
+        self.captured = captured
+        self.new_hash = new_hash
+        self.ko_point = ko_point
+        self.own_size = own_size
+        self.own_liberties = own_liberties
+
+
+def simulate_move(board: Board, color: int, row: int, col: int,
+                  ko_point: Optional[Tuple[int, int]] = None,
+                  board_history_hashes: Optional[Set[int]] = None,
+                  need_group_facts: bool = False) -> MoveSimulation:
+    """
+    Work out the full consequences of a move without copying or mutating
+    anything. This is the single hot path of the whole engine — `is_legal_move`,
+    `apply_move` and `get_legal_moves` all go through it, and a 96-simulation
+    search calls it around 8,000 times.
+
+    It used to answer by brute force: copy the board, place the stone, re-derive
+    every adjacent group, remove the dead ones and read the result back. That
+    made it 58% of search time, and `apply_move` paid for the whole thing twice
+    — once to validate, once to actually play.
+
+    Everything below is derived from adjacency instead, using two facts that
+    hold because (row, col) is empty and orthogonally adjacent to the groups in
+    question:
+
+      * (row, col) is necessarily a liberty of every adjacent group. So an
+        adjacent OPPONENT group is captured exactly when it has 1 liberty, and
+        an adjacent FRIENDLY group keeps the merged group alive exactly when it
+        has more than 1 — no post-move board needed to count them.
+      * Zobrist hashing is XOR of per-(point, colour) values, so the resulting
+        hash is the current hash XOR the placed stone XOR each captured stone.
+        That gives an exact superko check with no board copy at all.
+
+    `need_group_facts` additionally reports the size and liberties of the group
+    the move would create, which is what the self-atari filter needs. Those are
+    filled in only when the move could actually BE a self-atari:
+
+      * it captures nothing (a capture is exempt from the rule, and it also
+        frees points whose ownership would have to be re-derived), and
+      * it has at most one empty neighbour. Every empty neighbour of the played
+        point is a liberty of the resulting group, so two of them already put
+        the group on two liberties and no amount of group-walking can change
+        that.
+
+    Otherwise both stay None, which `is_pointless_self_atari` reads as "not a
+    self-atari". That second test is what keeps the filter cheap: it rejects the
+    large majority of points — anything with elbow room — before a single group
+    is walked.
+    """
+    size = board.size
+
+    # Rule 1: Must be on the board
+    if not (0 <= row < size and 0 <= col < size):
+        return MoveSimulation(False, "Position is off the board")
+
+    grid = board.grid
+
+    # Rule 2: Must be empty
+    if grid[row, col] != EMPTY:
+        return MoveSimulation(False, "Position is already occupied")
+
+    # Rule 3: Simple ko check (before any work)
+    if ko_point is not None and (row, col) == ko_point:
+        return MoveSimulation(False, "Ko rule violation: cannot recapture immediately")
+
+    opp = opponent(color)
+
+    neighbours = board.neighbors(row, col)
+    empty_neighbours = 0          # Each one is a liberty of the resulting group
+    captured = set()              # Opponent stones this move removes
+    opponent_seen = set()         # Opponent stones already accounted for
+    friendly_seen = set()         # Friendly stones already accounted for
+    friendly_alive = False        # Some adjacent friendly group has another liberty
+    friendly_neighbours = []      # Seeds of the groups this move would join
+    friendly_walked = []          # Groups already resolved, kept for reuse below
+
+    for nr, nc in neighbours:
+        value = grid[nr, nc]
+        if value == EMPTY:
+            empty_neighbours += 1
+        elif value == opp:
+            if (nr, nc) in opponent_seen:
+                continue
+            group = board.get_group(nr, nc)
+            opponent_seen |= group
+            # One liberty means that liberty is (row, col) — see the docstring.
+            if board.liberty_count(group) == 1:
+                captured |= group
+        else:
+            # Recording the seed is free; walking the group is not, so keep the
+            # early exit once the move is already known not to be suicide.
+            friendly_neighbours.append((nr, nc))
+            if friendly_alive or (nr, nc) in friendly_seen:
+                continue
+            group = board.get_group(nr, nc)
+            friendly_seen |= group
+            friendly_walked.append(group)
+            if board.liberty_count(group) > 1:
+                friendly_alive = True
+
+    # Rule 4: Suicide — legal if the move captures, if the stone has a liberty
+    # of its own, or if it merges with a group that has one elsewhere.
+    if not captured and not empty_neighbours and not friendly_alive:
+        return MoveSimulation(
+            False, "Suicide: move would leave your group with no liberties")
+
+    zobrist = board.zobrist.table
+    new_hash = board.board_hash ^ zobrist[(row * size + col, color)]
+    for cr, cc in captured:
+        new_hash ^= zobrist[(cr * size + cc, opp)]
+
+    # Rule 5: Superko — the resulting board must not repeat a previous state
+    if board_history_hashes is not None and new_hash in board_history_hashes:
+        return MoveSimulation(
+            False, "Superko violation: this board position has occurred before")
+
+    # Ko is created when a lone stone captures exactly one stone and the point
+    # it captured becomes its only liberty: no friendly neighbour to merge with
+    # (so the group is one stone) and no empty neighbour (so the captured point
+    # is the sole liberty).
+    new_ko_point = None
+    if len(captured) == 1 and not friendly_neighbours and not empty_neighbours:
+        new_ko_point = next(iter(captured))
+
+    own_size = None
+    own_liberties = None
+    if need_group_facts and not captured and empty_neighbours <= 1:
+        # Only now is it worth resolving the groups this move would join, and
+        # the suicide check above has usually already walked some of them —
+        # reuse those rather than paying for the same flood fill twice.
+        seen = set(friendly_seen)
+        groups = list(friendly_walked)
+        for nr, nc in friendly_neighbours:
+            if (nr, nc) in seen:
+                continue
+            group = board.get_group(nr, nc)
+            seen |= group
+            groups.append(group)
+
+        own_size = 1 + sum(len(g) for g in groups)
+        liberties = set()
+        for group in groups:
+            liberties |= board.get_liberties(group)
+        for nr, nc in neighbours:
+            if grid[nr, nc] == EMPTY:
+                liberties.add((nr, nc))
+        # (row, col) is a liberty of every adjacent friendly group right now,
+        # but the stone being placed there occupies it.
+        liberties.discard((row, col))
+        own_liberties = liberties
+
+    return MoveSimulation(True, "", frozenset(captured), new_hash, new_ko_point,
+                          own_size, own_liberties)
+
+
 def is_legal_move(board: Board, color: int, row: int, col: int,
                   ko_point: Optional[Tuple[int, int]] = None,
                   board_history_hashes: Optional[Set[int]] = None) -> Tuple[bool, str]:
     """
     Check if placing a stone at (row, col) is legal.
-    
+
     Args:
         board: Current board state.
         color: Color to play (BLACK or WHITE).
         row, col: Position to check.
         ko_point: If set, this position is forbidden (simple ko).
         board_history_hashes: Set of all previous board hashes (superko).
-    
+
     Returns:
         (is_legal, error_message) tuple.
     """
-    # Rule 1: Must be on the board
-    if not board.is_on_board(row, col):
-        return False, "Position is off the board"
-    
-    # Rule 2: Must be empty
-    if board.grid[row, col] != EMPTY:
-        return False, "Position is already occupied"
-    
-    # Rule 3: Simple ko check (fast path before the expensive simulation)
-    if ko_point is not None and (row, col) == ko_point:
-        return False, "Ko rule violation: cannot recapture immediately"
-    
-    # To check suicide and superko, we simulate the move on a copy
-    test_board = board.copy()
-    test_board.place_stone(row, col, color)
-    
-    # Check captures — opponent groups that now have 0 liberties
-    captured_any = False
-    for nr, nc in test_board.neighbors(row, col):
-        if test_board.grid[nr, nc] == opponent(color):
-            group = test_board.get_group(nr, nc)
-            if test_board.liberty_count(group) == 0:
-                test_board.remove_group(group)
-                captured_any = True
-    
-    # Rule 4: Suicide check — if we didn't capture anything,
-    # our own group must have at least 1 liberty
-    if not captured_any:
-        own_group = test_board.get_group(row, col)
-        if test_board.liberty_count(own_group) == 0:
-            return False, "Suicide: move would leave your group with no liberties"
-    
-    # Rule 5: Superko check — resulting board must not repeat any previous state
-    if board_history_hashes is not None:
-        if test_board.board_hash in board_history_hashes:
-            return False, "Superko violation: this board position has occurred before"
-    
-    return True, ""
+    sim = simulate_move(board, color, row, col, ko_point, board_history_hashes)
+    return sim.is_legal, sim.error
 
 
 def apply_move(board: Board, color: int, row: int, col: int,
@@ -144,52 +292,34 @@ def apply_move(board: Board, color: int, row: int, col: int,
     Returns:
         MoveResult with capture info and new ko point.
     """
-    # Validate
-    legal, error = is_legal_move(board, color, row, col, ko_point, board_history_hashes)
-    if not legal:
-        return MoveResult(is_legal=False, error=error)
-    
-    # Place the stone
+    # One simulation answers legality, captures and the new ko point together.
+    # This function used to validate by simulating the move on a copy and then
+    # redo the identical work on the real board — every child node in the search
+    # tree paid for the move twice.
+    sim = simulate_move(board, color, row, col, ko_point, board_history_hashes)
+    if not sim.is_legal:
+        return MoveResult(is_legal=False, error=sim.error)
+
     board.place_stone(row, col, color)
-    
-    # Capture opponent groups with no liberties
-    total_captured = 0
-    all_captured_positions = set()
-    opp = opponent(color)
-    
-    for nr, nc in board.neighbors(row, col):
-        if board.grid[nr, nc] == opp:
-            group = board.get_group(nr, nc)
-            if board.liberty_count(group) == 0:
-                removed = board.remove_group(group)
-                all_captured_positions |= group
-                total_captured += removed
-    
-    # Detect ko: if we captured exactly 1 stone, the captured position
-    # becomes the ko point (opponent can't immediately recapture there).
-    # This only applies to single-stone captures where we also placed
-    # a single stone into atari.
-    new_ko_point = None
-    if total_captured == 1:
-        captured_pos = next(iter(all_captured_positions))
-        # Verify it's actually a ko: our placed stone must have exactly
-        # 1 liberty (the position we just captured) to form a ko shape.
-        own_group = board.get_group(row, col)
-        if len(own_group) == 1 and board.liberty_count(own_group) == 1:
-            new_ko_point = captured_pos
-    
+    if sim.captured:
+        # The dead stones are already known exactly, so there is no need to
+        # rediscover them by re-scanning neighbours for zero-liberty groups.
+        board.remove_group(sim.captured)
+
     return MoveResult(
         is_legal=True,
-        captured_stones=all_captured_positions,
-        captured_count=total_captured,
-        ko_point=new_ko_point
+        captured_stones=set(sim.captured),
+        captured_count=len(sim.captured),
+        ko_point=sim.ko_point
     )
 
 
 def get_legal_moves(board: Board, color: int,
                     ko_point: Optional[Tuple[int, int]] = None,
                     board_history_hashes: Optional[Set[int]] = None,
-                    restrict_eye_fill: bool = False) -> List[Tuple[int, int]]:
+                    restrict_eye_fill: bool = False,
+                    restrict_self_atari: bool = False,
+                    self_atari_max_stones: int = 1) -> List[Tuple[int, int]]:
     """
     Return all legal moves for a given color.
 
@@ -207,18 +337,49 @@ def get_legal_moves(board: Board, color: int,
             game/eyes.py for the exact definition and why it is safe. Rule
             legality (is_legal_move / apply_move) is deliberately untouched, so
             a human, a stored game record or a replay is never affected by it.
+        restrict_self_atari: Optional playing restriction (NOT a rule of Go).
+            When True, moves that capture nothing and leave the mover's group on
+            a single liberty are left out, provided that group is larger than
+            `self_atari_max_stones`. See game/self_atari.py — unlike the eye
+            rule this one is a tuned assumption, not a theorem.
+        self_atari_max_stones: Sacrifices up to this many stones stay playable,
+            which is what keeps throw-ins available.
     """
-    forbidden = set()
+    eye_forbidden = set()
     if restrict_eye_fill:
         from game.eyes import forbidden_eye_fills
-        forbidden = forbidden_eye_fills(board, color)
+        eye_forbidden = forbidden_eye_fills(board, color)
+
+    if restrict_self_atari:
+        from game.self_atari import is_pointless_self_atari
 
     moves = []
+    self_atari_removed = []
     for r in range(board.size):
         for c in range(board.size):
-            if (r, c) in forbidden:
+            if (r, c) in eye_forbidden:
                 continue
-            legal, _ = is_legal_move(board, color, r, c, ko_point, board_history_hashes)
-            if legal:
-                moves.append((r, c))
+            sim = simulate_move(board, color, r, c, ko_point, board_history_hashes,
+                                need_group_facts=restrict_self_atari)
+            if not sim.is_legal:
+                continue
+            if restrict_self_atari and is_pointless_self_atari(
+                    sim, self_atari_max_stones):
+                self_atari_removed.append((r, c))
+                continue
+            moves.append((r, c))
+
+    # If the self-atari filter removed EVERY option, give the moves back.
+    #
+    # This guard is deliberately not applied to the eye rule. Filling your own
+    # last two eyes is provably useless, so when that is all there is, passing
+    # really is at least as good and the empty list is the right answer (MCTS
+    # falls back to pass — see ai/mcts.py::_expand). Self-atari has no such
+    # proof, and a position where every single move trips it is precisely the
+    # tactical situation — capturing race, seki, filled endgame — where the
+    # assumption behind the rule is least reliable. Forcing a pass there would
+    # be the filter overriding the search on the evidence it is weakest at.
+    if not moves and self_atari_removed:
+        return self_atari_removed
+
     return moves

@@ -48,6 +48,9 @@ MAX_CONCURRENT_MATCHES = 2
 MAX_GAMES = 50
 MAX_SIMULATIONS = 2000
 MAX_MOVE_DELAY = 5.0
+# A series against an OGS bot ties up someone else's engine and our own OGS
+# account; a handful of games is a series, twenty is an imposition.
+MAX_OGS_GAMES = 5
 
 _estimator = ScoreEstimator()
 
@@ -117,6 +120,7 @@ def list_opponents():
             'elo': RANDOM_BOT_ELO,
             'note': 'Elo anchor — its own rating never changes',
         },
+        'ogs': _ogs_opponents(),
         'player_types': PLAYER_TYPES,
         'active_model_id': mgr.get_active_model_id(),
         'limits': {
@@ -126,6 +130,58 @@ def list_opponents():
             'max_concurrent': MAX_CONCURRENT_MATCHES,
         },
     })
+
+
+def _ogs_opponents() -> dict:
+    """
+    The live bot roster from online-go.com.
+
+    Listing them needs no OGS account (the roster is public), so the picker can
+    show them even before credentials are set up — `credentials_ok` says
+    whether a game could actually be started, so the UI can explain the
+    difference instead of failing at the challenge.
+    """
+    from ai.online.ogs_bots import registry
+    from ai.online.ogs_socket import OGSSocketError
+
+    try:
+        # Short timeout: this call renders a picker, so a dead connection has
+        # to fail fast and let the page say so.
+        bots = registry.list_bots(timeout=8.0)
+    except (OGSSocketError, OSError) as exc:
+        return {'available': False, 'bots': [], 'error': str(exc),
+                'credentials_ok': False}
+
+    ready, credential_error = _ogs_credentials_state()
+    return {
+        'available': True,
+        'credentials_ok': ready,
+        'credentials_error': credential_error,
+        'fetched_at': registry.fetched_at,
+        'bots': [{
+            'type': 'ogs',
+            'bot_id': bot.id,
+            'name': bot.username,
+            'rank': bot.rank,
+            'ranking': round(bot.ranking, 2),
+            # Their strength on OUR scale, so it reads next to a model's Elo.
+            'elo': round(bot.elo, 1),
+            'ogs_rating': round(bot.rating, 1),
+            'board_sizes': bot.allowed_board_sizes,
+            'settings_published': bot.settings_published,
+            'accepting': bot.accepting_challenges,
+        } for bot in bots],
+    }
+
+
+def _ogs_credentials_state():
+    """(usable, why_not) for the stored OGS credentials — never the values."""
+    from ai.online.ogs_rest import OGSAuthError, OGSCredentials
+    try:
+        OGSCredentials.load()
+    except OGSAuthError as exc:
+        return False, str(exc)
+    return True, None
 
 
 def _board_settings(specs, mgr):
@@ -218,13 +274,20 @@ def new_match():
     except (ValueError, RuntimeError) as exc:
         return jsonify({'error': str(exc)}), 400
 
+    # Games against OGS are real games on a public server against someone
+    # else's bot, played on their clock: keep the series short and never add
+    # our own delay on top of theirs.
+    against_ogs = any(s.get('type') == 'ogs' for s in (spec_a, spec_b))
+    max_games = MAX_OGS_GAMES if against_ogs else MAX_GAMES
+
     config = MatchConfig(
         board_size=settings['board_size'],
         komi=settings['komi'],
         scoring_method=settings['ruleset'],
-        num_games=int(_clamp(data.get('num_games', 4), 1, MAX_GAMES, 4)),
+        num_games=int(_clamp(data.get('num_games', 4), 1, max_games, 1 if against_ogs else 4)),
         alternate_colors=bool(data.get('alternate_colors', True)),
-        move_delay=_clamp(data.get('move_delay', 0), 0, MAX_MOVE_DELAY, 0.0),
+        move_delay=0.0 if against_ogs else _clamp(data.get('move_delay', 0), 0,
+                                                  MAX_MOVE_DELAY, 0.0),
         record_games=bool(data.get('record_games', True)),
         update_ratings=bool(data.get('update_ratings', True)),
     )

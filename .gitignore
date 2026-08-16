@@ -1,0 +1,12 @@
+# OGS credentials — an account password and an OAuth2 client secret live here.
+# Never commit this file.
+ogs_credentials.json
+
+# Local caches fetched from other services (refetchable, not source).
+data/ogs_bots.json
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.pytest_cache/

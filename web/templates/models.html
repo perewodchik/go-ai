@@ -1,0 +1,163 @@
+{#
+  models.html — The model fleet console, served at /models.
+
+  The dashboard at / answers "what is my model?" — one model, its config, three
+  links. This page answers the questions that appear once a workspace has eight
+  models that are forks of each other: which one is actually best, what did this
+  fork change, and is that one still healthy.
+
+  Everything except the modals is rendered by models.js from
+  /models/api/summary. Nothing is server-rendered into the fleet itself: the
+  page has to stay live while training runs, and a Jinja snapshot cannot.
+  index.html is deliberately left alone until this page replaces it.
+#}
+{% extends "base.html" %}
+{% block title %}Go AI — Models{% endblock %}
+
+{% block content %}
+<div class="fleet">
+
+    <div class="fleet-head">
+        <div class="fleet-head-left">
+            <h1 class="page-title">Models</h1>
+            <div id="fleet-totals" class="fleet-totals"></div>
+        </div>
+        <div class="fleet-head-actions">
+            <button id="btn-compare-mode" class="btn-small" title="Select two models to compare their settings, curves and head-to-head record">⇄ Compare</button>
+            <button id="btn-create-model" class="btn-small btn-accent">+ New Model</button>
+        </div>
+    </div>
+
+    <!-- Live training banner. Hidden unless a run is actually going. -->
+    <div id="fleet-live" class="fleet-live" style="display:none;"></div>
+
+    <div class="fleet-layout">
+        <div class="fleet-list glass">
+            <div class="fleet-list-head">
+                <span class="fleet-list-title">Fleet</span>
+                <div class="fleet-sort" id="fleet-sort">
+                    <button class="sort-btn" data-sort="lineage" title="Group forks under the run they came from">Lineage</button>
+                    <button class="sort-btn" data-sort="elo" title="Highest Elo first">Elo</button>
+                    <button class="sort-btn" data-sort="iterations" title="Most iterations first">Iters</button>
+                    <button class="sort-btn" data-sort="recent" title="Most recently trained first">Recent</button>
+                </div>
+            </div>
+            <div id="fleet-rows" class="fleet-rows">
+                <p class="empty-hint">Loading models…</p>
+            </div>
+            <div id="fleet-archived" class="fleet-archived"></div>
+        </div>
+
+        <div class="fleet-detail glass" id="fleet-detail">
+            <div class="no-model-state">
+                <div class="no-model-icon">🧬</div>
+                <h2>No model selected</h2>
+                <p>Pick a model on the left, or create one to start training.</p>
+                <button id="btn-create-model-alt" class="btn-primary">+ Create Your First Model</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create / Edit Model Modal (shared with the fork flow) -->
+<div id="create-model-modal" class="modal" style="display:none;">
+    <div class="modal-content glass create-model-form">
+        <h2 id="model-form-title">Create New Model</h2>
+        <p id="model-form-subtitle" class="model-form-subtitle" style="display:none;"></p>
+        <div class="form-group">
+            <label>Model Name</label>
+            <input type="text" id="new-model-name" placeholder="e.g. Aggressive 9×9" autocomplete="off">
+        </div>
+        <div class="form-group" id="model-notes-group">
+            <label>Notes <small class="model-list-meta">— what is this run for?</small></label>
+            <input type="text" id="new-model-notes" placeholder="e.g. same as parent but 200 sims" autocomplete="off">
+        </div>
+        <div class="form-row form-row-3">
+            <div class="form-group">
+                <label>Board Size</label>
+                <select id="new-model-board-size">
+                    <option value="7">7×7</option>
+                    <option value="9" selected>9×9</option>
+                    <option value="13">13×13</option>
+                    <option value="15">15×15</option>
+                    <option value="19">19×19</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Komi</label>
+                <input type="number" id="new-model-komi" value="6.5" step="0.5" min="0" max="20">
+            </div>
+            <div class="form-group">
+                <label>Ruleset</label>
+                <select id="new-model-ruleset">
+                    <option value="chinese">Chinese</option>
+                    <option value="japanese">Japanese</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-group net-size-group">
+            <label>Network Size · <span id="net-size-params" class="net-size-params">…</span></label>
+            <input type="range" id="new-model-net-size" min="0" max="4" step="1" value="1">
+            <div class="net-size-meta">
+                <strong id="net-size-label">Small</strong>
+                <span id="net-size-note" class="model-list-meta"></span>
+            </div>
+            <span id="net-size-locked" class="model-form-warning" style="display:none;">
+                Network size is frozen after creation — the saved weights depend on it.
+            </span>
+        </div>
+        <details class="advanced-toggle" open>
+            <summary>Advanced Training Settings</summary>
+            <div id="modal-param-categories" class="param-categories-container"></div>
+        </details>
+        <p id="model-form-warning" class="model-form-warning" style="display:none;"></p>
+        <div class="modal-actions">
+            <button id="btn-cancel-create" class="btn-secondary">Cancel</button>
+            <button id="btn-confirm-create" class="btn-primary">Create Model</button>
+        </div>
+    </div>
+</div>
+
+<!-- Delete confirmation — states the measured cost of the deletion -->
+<div id="delete-model-modal" class="modal" style="display:none;">
+    <div class="modal-content glass delete-model-form">
+        <h2>Delete model</h2>
+        <p id="delete-impact" class="delete-impact"></p>
+        <div class="form-group">
+            <label>Type the model name to confirm</label>
+            <input type="text" id="delete-confirm-name" autocomplete="off" placeholder="model name">
+        </div>
+        <div class="modal-actions">
+            <button id="btn-cancel-delete" class="btn-secondary">Cancel</button>
+            <button id="btn-confirm-delete" class="btn-danger" disabled>Delete permanently</button>
+        </div>
+    </div>
+</div>
+
+<!-- Run a match between two models -->
+<div id="match-modal" class="modal" style="display:none;">
+    <div class="modal-content glass">
+        <h2>Run a match</h2>
+        <p id="match-modal-intro" class="model-form-subtitle"></p>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Games <span id="match-games-value" class="config-val">4</span></label>
+                <input type="range" id="match-games" min="2" max="20" step="2" value="4">
+            </div>
+            <div class="form-group">
+                <label>Simulations per move <span id="match-sims-value" class="config-val">model default</span></label>
+                <input type="range" id="match-sims" min="0" max="400" step="25" value="0">
+            </div>
+        </div>
+        <p id="match-modal-warning" class="model-form-warning" style="display:none;"></p>
+        <div class="modal-actions">
+            <button id="btn-cancel-match" class="btn-secondary">Cancel</button>
+            <button id="btn-confirm-match" class="btn-primary">Start match</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/models.js') }}"></script>
+{% endblock %}

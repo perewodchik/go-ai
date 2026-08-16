@@ -436,6 +436,10 @@ function addLogEntry(data, append = false) {
 }
 
 // ---- Games List ----
+// The training sidebar is a live view of the run in progress, not an archive
+// — older iterations live on the Review page, which pages through them.
+const GAMES_ITERATIONS = 3;
+
 function escapeAttr(str) {
     return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
                       .replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -507,8 +511,11 @@ function gamesPhaseBadge(phase) {
 
 async function loadGamesList() {
     try {
-        const res = await fetch('/training/api/games?include_recorded=0');
-        const groupedGames = await res.json();
+        // Only the iterations you are actually watching. A long run has
+        // thousands of stored games, and the sidebar showed every one of them.
+        const res = await fetch(`/training/api/games?include_recorded=0&iterations=${GAMES_ITERATIONS}`);
+        const payload = await res.json();
+        const groupedGames = payload.groups || [];
         const list = document.getElementById('games-list');
         if (!list) return;
         list.innerHTML = '';
@@ -586,6 +593,17 @@ async function loadGamesList() {
 
             list.appendChild(details);
         });
+
+        // Say what is NOT here, so a missing iteration reads as a deliberate
+        // cut-off rather than as data that went missing.
+        const page = payload.pagination || {};
+        if (page.has_more) {
+            const note = document.createElement('p');
+            note.className = 'games-list-note';
+            note.innerHTML = `Showing the last ${page.returned} iterations &middot; ` +
+                `<a href="/training/review">review all ${page.total_iterations}</a>`;
+            list.appendChild(note);
+        }
     } catch (e) { /* ignore */ }
 }
 

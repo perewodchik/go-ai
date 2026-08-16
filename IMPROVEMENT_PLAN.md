@@ -21,13 +21,15 @@ claim is a judgement call it says so.
 | B6 | Gate and random-eval searches ignore configured `c_puct` / `fpu_reduction` | plumbing | Medium | ✅ fixed |
 | B7 | `allow_pass=False` is applied at every tree depth, not just the root | bug | Low-Medium | ✅ fixed |
 | B8 | `total_games` counts games that a force-stop cancelled | cosmetic | Low | ✅ fixed |
-| P1 | `Board.neighbors()` — 152k calls/search, ~33% of search time | perf | **High** | Phase 3 |
-| P2 | MCTS builds a `GameState` for every legal move; ≤3% are ever visited | perf | **High** | Phase 3 |
-| P3 | Move legality is computed twice for every child | perf | Medium | Phase 3 |
-| P4 | Terminal nodes are fully re-scored on every visit | perf | Low | Phase 3 |
+| P1 | `Board.neighbors()` — 152k calls/search, ~33% of search time | perf | **High** | ✅ fixed |
+| P2 | MCTS builds a `GameState` for every legal move; ≤3% are ever visited | perf | **High** | ✅ fixed |
+| P3 | Move legality is computed twice for every child | perf | Medium | ✅ fixed |
+| P4 | Terminal nodes are fully re-scored on every visit | perf | Low | ✅ fixed |
 
-Phases 1 and 2 are **implemented and tested** (345 tests pass, up from 297).
-See "What shipped" at the end of this document.
+Phases 1–4 are **implemented and tested** (440 tests pass, up from 297).
+Phase 4 is the self-atari filter (§7), shipped off by default — and the
+measurement that came with it contradicts HEURISTICS.md's ranking of it. See
+"What shipped" at the end of this document.
 
 Plus the two things you asked about: **17-plane history input** (§6) and
 **prevent self-atari** (§7).
@@ -539,6 +541,154 @@ flat `iter_000001_game_0000.json` layout that `migrate_legacy_layout` moves game
 out of, and sliced the *first* 20 games — always iteration 1, played by an
 untrained network and the longest a model ever produces. It now reads through
 `ai/game_store` and measures the most recent 50.
+
+## What shipped (Phase 3)
+
+**`game/board.py`** — precomputed adjacency (`neighbour_table`), built once per
+board size and shared by every board including copies. `get_group`,
+`get_liberties` and `liberty_count` bind the table and grid locally instead of
+calling back through `self.neighbors()` per stone (P1).
+
+**`game/rules.py`** — new `simulate_move()` answers legality, captures, the
+resulting Zobrist hash and the new ko point from adjacency alone: no board copy,
+no stone placement, no post-move re-derivation. `is_legal_move` is now a thin
+wrapper over it, and `apply_move` reuses the same simulation instead of
+validating and then redoing the identical work on the real board (P3).
+
+Two facts make it exact, both resting on (row, col) being empty and adjacent to
+the groups involved:
+
+- (row, col) is necessarily a liberty of every adjacent group, so an opponent
+  group is captured exactly when it has **1** liberty, and a friendly group
+  keeps the merged group alive exactly when it has **more than 1**. No post-move
+  board is needed to count them.
+- Zobrist hashing is XOR of per-(point, colour) values, so the resulting hash is
+  the current hash XOR the placed stone XOR each captured stone — an exact
+  superko check with no board copy.
+
+**`ai/mcts.py`** — children hold `(action, prior)` and materialise their position
+only when the search selects them (`MCTSNode.ensure_state`), plus `__slots__`
+and cached terminal values (P2, P4).
+
+### Measured
+
+The machine was running a training job at load 260 while this was verified, so
+wall-clock is not comparable; these are the load-independent numbers. Same setup
+as the original profile — 9x9, 40 stones, one 96-simulation search:
+
+| operation | before | after | |
+|---|---|---|---|
+| `simulate_move` / `is_legal_move` | 11,090 | 7,953 | 1.4x fewer |
+| `GameState.copy` | 3,233 | 97 | **33x fewer** |
+| `Board.copy` | 11,090 | 97 | **114x fewer** |
+| `network.predict` | 97 | 97 | unchanged |
+
+`predict` staying at exactly 97 is the important one: the search performs the
+same number of expansions and therefore the same amount of thinking. Only the
+waste is gone.
+
+A same-process CPU-time A/B of the old rules implementation against the new one
+(both under identical load) measures **1.43x** on legality checks, on top of the
+neighbour-table gain.
+
+**Final wall-clock, `tests/benchmark_search.py` on an idle machine** (four
+96-simulation searches at 0, 20, 40 and 60 stones):
+
+| | before | after | |
+|---|---|---|---|
+| four searches | 1.079 s | **0.547 s** | **1.97x faster** |
+| moves/sec, one worker | 3.71 | **7.31** | |
+| `get_legal_moves` | 0.785 ms | 0.327 ms | 2.4x faster |
+| neural network's share of search | ~30% | **~55%** | |
+
+The last row is the durable result: the rules engine no longer dominates
+self-play, so the network is now roughly half the cost and further engine work
+has much less headroom. Any future speedup has to come from the network side
+(batched evaluation) or from playing fewer wasted moves (the mercy rule).
+
+### How this was kept honest
+
+Rewriting the referee is the kind of change that passes every hand-written test
+and is still wrong in a snapback, a multi-group capture or a superko that only
+triggers after a particular capture. `tests/test_rules_equivalence.py` keeps a
+verbatim copy of the ORIGINAL simulate-everything implementation as an oracle
+and fuzzes thousands of positions from random and contact-biased playouts,
+comparing the legality verdict for every point, the exact captured set, the
+resulting board hash and the ko point. The oracle is deliberately not tidied —
+it is the old code, kept as evidence.
+
+`tests/test_mcts_lazy_expansion.py` pins the laziness itself: that unvisited
+children really do stay unmaterialised (otherwise the optimisation could vanish
+silently), that a materialised child's position is exactly parent-plus-one-move,
+that `restrict_eye_fill` is still inherited at every depth, and that a cached
+terminal score equals a freshly computed one.
+
+`tests/benchmark_search.py` is committed but excluded from the pytest suite by
+its filename. Run it before and after any further performance work.
+
+## What shipped (Phase 4 — self-atari filter)
+
+Two new settings, **both off by default**: `restrict_self_atari` and
+`self_atari_max_stones` (1–4, default 1). Full plumbing per the HEURISTICS.md
+recipe — `param_bounds` → `TrainingParams` → `Config.from_model` → trainer →
+self-play / gate / random-eval workers → live-tuning API → play-vs-human →
+info page. Applied to self-play and **both** sides of the gate; never to the
+random bot, which is the Elo anchor.
+
+Implementation is in `game/self_atari.py`; the filter runs in
+`rules.get_legal_moves` and propagates through `GameState.copy()`, so a blocked
+move is never expanded, never given a prior, and never appears in a policy
+target at any depth.
+
+**It never simulates anything itself.** `simulate_move(need_group_facts=True)`
+retains the merged group's size and liberties from the walk it already does for
+legality, reusing the flood fills the suicide check performed. Two early-outs
+keep it off the hot path: a capturing move is exempt, and a move with two or
+more empty neighbours provably has two liberties.
+
+**One deliberate departure from the spec**: if the filter would remove every
+legal move it hands them back rather than forcing a pass. The eye rule
+deliberately does not get this guard — filling your own last two eyes is
+provably useless, so passing really is at least as good. Self-atari has no such
+proof, and a position where every move trips it is where the assumption is
+weakest.
+
+### Measured — and the prediction in HEURISTICS.md did not hold
+
+HEURISTICS.md called this "the best sample-efficiency lever". Checking every
+move of 60 stored self-play games per model against the filter, at the moment it
+was played:
+
+| phase | share of played moves that are pointless self-atari |
+|---|---|
+| first half — where training samples come from | **0.3 – 0.4%** |
+| late game — past the sample cutoff | **5.5 – 7.1%** |
+
+The moves it removes are overwhelmingly in the tail that produces **no training
+data at all**. Overall incidence is 2.5–4.7% of moves, but only 1.8–2.2% land
+inside the training window, and in the opening these networks already almost
+never play one.
+
+The cost, meanwhile, is paid on every move: ~15% on `get_legal_moves`, which is
+~80% of search time — roughly **12% of self-play throughput**.
+
+**So: a marginal trade for these models, not the headline win.** The late-game
+tail it targets is better handled by the mercy rule, which deletes that phase
+outright instead of filtering moves inside it, and costs nothing per move. Turn
+on `resign_enabled` first. Reach for `restrict_self_atari` only if the twin-model
+A/B shows it earning its 12% — and remember the gate cannot tell you, because
+both sides play under the filter.
+
+### Tests
+
+`tests/test_self_atari.py` (21) and `tests/test_self_atari_plumbing.py` (13).
+Every hand-built shape asserts its own preconditions against an oracle that
+plays the move on a real board and reads the result back, so a test cannot
+quietly stop testing what its name says. The over-restriction cases are the
+point: throw-in, snapback, ko capture, connection-to-safety, the `k` boundary,
+the other colour, and "never empties the move list". Fuzzing over real positions
+confirms every blocked move satisfies all three conditions against a real board
+(30+ seen) and that no capturing move is ever blocked (20+ seen).
 
 ### A finding that fell out of repairing that test
 

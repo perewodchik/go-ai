@@ -46,7 +46,9 @@ def _eval_worker(kwargs: dict) -> int:
     mcts = MCTS(network=network, num_simulations=num_simulations, device=device,
                 c_puct=kwargs.get('c_puct', 1.5),
                 fpu_reduction=kwargs.get('fpu_reduction', 0.35),
-                restrict_eye_fill=kwargs.get('restrict_eye_fill', False))
+                restrict_eye_fill=kwargs.get('restrict_eye_fill', False),
+                restrict_self_atari=kwargs.get('restrict_self_atari', False),
+                self_atari_max_stones=kwargs.get('self_atari_max_stones', 1))
     random_bot = RandomBot(pass_probability=0.05)
     scorer = get_scorer("chinese")
     
@@ -126,6 +128,8 @@ def evaluate_against_random(
     restrict_eye_fill: bool = False,
     c_puct: float = 1.5,
     fpu_reduction: float = 0.35,
+    restrict_self_atari: bool = False,
+    self_atari_max_stones: int = 1,
 ) -> float:
     """
     Play games against the random bot and return win rate.
@@ -157,6 +161,8 @@ def evaluate_against_random(
             'restrict_eye_fill': restrict_eye_fill,
             'c_puct': c_puct,
             'fpu_reduction': fpu_reduction,
+            'restrict_self_atari': restrict_self_atari,
+            'self_atari_max_stones': self_atari_max_stones,
         })
 
     wins = 0
@@ -225,6 +231,8 @@ def _play_gate_game(
     restrict_eye_fill: bool = False,
     c_puct: float = 1.5,
     fpu_reduction: float = 0.35,
+    restrict_self_atari: bool = False,
+    self_atari_max_stones: int = 1,
 ) -> int:
     """
     Play one candidate-vs-champion game and record it. Returns 1 if the
@@ -242,10 +250,14 @@ def _play_gate_game(
     # filter here would measure the filter instead of the networks.
     current_mcts = MCTS(network=current_network, num_simulations=num_simulations,
                         device=device, c_puct=c_puct, fpu_reduction=fpu_reduction,
-                        restrict_eye_fill=restrict_eye_fill)
+                        restrict_eye_fill=restrict_eye_fill,
+                        restrict_self_atari=restrict_self_atari,
+                        self_atari_max_stones=self_atari_max_stones)
     opponent_mcts = MCTS(network=opponent_network, num_simulations=num_simulations,
                          device=device, c_puct=c_puct, fpu_reduction=fpu_reduction,
-                         restrict_eye_fill=restrict_eye_fill)
+                         restrict_eye_fill=restrict_eye_fill,
+                         restrict_self_atari=restrict_self_atari,
+                         self_atari_max_stones=self_atari_max_stones)
     scorer = get_scorer("chinese")
 
     state = GameState(board_size=board_size, komi=komi)
@@ -327,6 +339,8 @@ def evaluate_against_checkpoint(
     restrict_eye_fill: bool = False,
     c_puct: float = 1.5,
     fpu_reduction: float = 0.35,
+    restrict_self_atari: bool = False,
+    self_atari_max_stones: int = 1,
 ) -> float:
     """
     Play the promotion-gate match between the candidate (`current_network`) and
@@ -363,6 +377,8 @@ def evaluate_against_checkpoint(
             'restrict_eye_fill': restrict_eye_fill,
             'c_puct': c_puct,
             'fpu_reduction': fpu_reduction,
+            'restrict_self_atari': restrict_self_atari,
+            'self_atari_max_stones': self_atari_max_stones,
         }
 
     workers = max(1, min(num_games, num_workers, os.cpu_count() or 4))

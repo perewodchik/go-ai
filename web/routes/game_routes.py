@@ -55,10 +55,11 @@ def _load_opponent(model_id: str) -> dict:
     other model is loaded (and cached) by ai.model_loader, exactly as a bot-vs-bot
     match loads it.
 
-    `restrict_eye_fill` comes from the chosen model's config so a bot playing a
-    human is subject to the restriction it was trained under. It never applies
-    to the human's own moves — those go through play_move(), which the
-    restriction deliberately does not touch.
+    The move restrictions (`restrict_eye_fill`, `restrict_self_atari`) come from
+    the chosen model's config so a bot playing a human is subject to the same
+    restrictions it was trained under. They never apply to the human's own
+    moves — those go through play_move(), which the restrictions deliberately
+    do not touch.
 
     Raises ValueError if the model does not exist.
     """
@@ -86,6 +87,8 @@ def _load_opponent(model_id: str) -> dict:
         'scoring_method': info.ruleset,
         'c_puct': config.mcts.c_puct,
         'restrict_eye_fill': bool(config.training.restrict_eye_fill),
+        'restrict_self_atari': bool(config.training.restrict_self_atari),
+        'self_atari_max_stones': int(config.training.self_atari_max_stones),
         'games_dir': config.paths.games_dir,
         'default_simulations': config.mcts.num_simulations,
         'config': config,
@@ -565,6 +568,8 @@ def _session_mcts(sess: dict) -> MCTS:
         c_puct=sess.get('c_puct', 1.5),
         device="cpu",   # unbatched single positions: CPU beats MPS here
         restrict_eye_fill=sess.get('restrict_eye_fill', False),
+        restrict_self_atari=sess.get('restrict_self_atari', False),
+        self_atari_max_stones=sess.get('self_atari_max_stones', 1),
     )
 
 

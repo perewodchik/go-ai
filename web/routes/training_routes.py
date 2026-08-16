@@ -4,6 +4,7 @@ training_routes.py — Routes for training control and monitoring.
 
 import os
 import json
+from typing import Optional
 from flask import Blueprint, render_template, jsonify, request
 
 import sys
@@ -17,6 +18,7 @@ from ai.game_store import (
     PHASE_PROMOTION,
     PHASE_SELF_PLAY,
     delete_saved_game,
+    iter_game_files,
     load_game_files,
     load_human_game_files,
     load_match_game_files,
@@ -100,6 +102,68 @@ PHASE_LABELS = {
 }
 
 
+# A stored game carries its full move list, its per-move win-rate curve and
+# (from the replay endpoint) its board states. None of that is used by a list
+# of games — the client refetches the whole record when you open one. On a
+# 92-iteration model those three keys are 23 MB of a 25 MB response, so the
+# list strips them and the sidebar ships ~75 KB instead.
+LIST_OMITTED_FIELDS = ('moves', 'win_rates', 'states')
+
+# Iteration groups returned when a client does not say how many it wants.
+DEFAULT_ITERATION_PAGE = 5
+MAX_ITERATION_PAGE = 50
+
+
+def _empty_pagination() -> dict:
+    return {
+        'limit': DEFAULT_ITERATION_PAGE, 'returned': 0,
+        'newest_iteration': None, 'oldest_iteration': None,
+        'remaining': 0, 'has_more': False, 'total_iterations': 0,
+    }
+
+
+def _iteration_page_args():
+    """
+    (limit, before) for a games request.
+
+    Both come from the browser, so both are clamped: an unbounded `iterations`
+    would put the whole history back into one response, which is the problem
+    the paging exists to solve.
+    """
+    try:
+        limit = int(request.args.get('iterations', DEFAULT_ITERATION_PAGE))
+    except (TypeError, ValueError):
+        limit = DEFAULT_ITERATION_PAGE
+    limit = max(1, min(MAX_ITERATION_PAGE, limit))
+
+    before = request.args.get('before')
+    try:
+        before = int(before) if before not in (None, '') else None
+    except (TypeError, ValueError):
+        before = None
+
+    return limit, before
+
+
+def _strip_bulk(record: dict) -> dict:
+    """Drop the fields a list never reads, in place."""
+    for key in LIST_OMITTED_FIELDS:
+        record.pop(key, None)
+    return record
+
+
+def _list_record(path: str) -> Optional[dict]:
+    """Read one game record for a LIST response, without its bulk fields."""
+    try:
+        with open(path) as fh:
+            record = json.load(fh)
+    except (json.JSONDecodeError, IOError, OSError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    return _strip_bulk(record)
+
+
 @training_bp.route('/api/games')
 def list_games():
     """
@@ -114,11 +178,23 @@ def list_games():
     own — they belong to no iteration, and they're what the user is most
     likely looking for when they open the review page.
 
-    Every group carries a `kind` so the client can tell the two shapes apart.
+    Every group carries a `kind` so the client can tell the shapes apart.
+
+    PAGING. A long-running model has thousands of stored games and nobody
+    scrolls to iteration 3. Only the newest `iterations` groups are returned,
+    and — the part that actually costs time — only those groups' files are
+    opened at all. The directory walk that decides which iterations exist does
+    not parse a single JSON file.
+
+        iterations=N   how many iteration groups to return (default 5, max 50)
+        before=I       only iterations older than I, for "load more"
+
+    Recorded and match games belong to no iteration, so they are returned with
+    the first page only; a `before` request would otherwise repeat them.
     """
     trainer = _require_trainer()
     if not trainer:
-        return jsonify([])
+        return jsonify({'groups': [], 'pagination': _empty_pagination()})
 
     games_dir = trainer.config.paths.games_dir
     migrate_legacy_layout(games_dir)
@@ -133,12 +209,18 @@ def list_games():
     else:
         include_recorded = param_val.lower() not in ('0', 'false', 'no', 'off')
 
+    limit, before = _iteration_page_args()
+    # "Load more" asks for older iterations only. The un-iterated groups came
+    # with the first page and must not be sent again.
+    if before is not None:
+        include_recorded = False
+
     if include_recorded:
         recorded = []
         for game_file, data in load_human_game_files(games_dir):
             data['filename'] = game_file.rel_path
             data['phase'] = PHASE_HUMAN
-            recorded.append(annotate_resignation(data))
+            recorded.append(annotate_resignation(_strip_bulk(data)))
 
         if recorded:
             result.append({
@@ -155,7 +237,7 @@ def list_games():
         for game_file, data in load_match_game_files(games_dir):
             data['filename'] = game_file.rel_path
             data['phase'] = PHASE_MATCH
-            matches.append(annotate_resignation(data))
+            matches.append(annotate_resignation(_strip_bulk(data)))
 
         if matches:
             by_match = {}
@@ -182,12 +264,27 @@ def list_games():
                 'total_games': len(matches),
             })
 
+    # Which iterations exist, and which of them this page covers. This walk
+    # only reads directory entries — the JSON parsing below is what costs, and
+    # it now runs over one page of iterations instead of every game on disk.
+    files_by_iteration = {}
+    for game_file in iter_game_files(games_dir):
+        files_by_iteration.setdefault(game_file.iteration, []).append(game_file)
+
+    all_iterations = sorted(files_by_iteration, reverse=True)
+    older = [i for i in all_iterations if before is None or i < before]
+    selected = older[:limit]
+
     grouped = {}
-    for game_file, data in load_game_files(games_dir):
-        data['filename'] = game_file.rel_path
-        data['phase'] = game_file.phase
-        annotate_resignation(data)
-        grouped.setdefault(game_file.iteration, {}).setdefault(game_file.phase, []).append(data)
+    for iteration in selected:
+        for game_file in files_by_iteration[iteration]:
+            data = _list_record(game_file.abs_path)
+            if data is None:
+                continue
+            data['filename'] = game_file.rel_path
+            data['phase'] = game_file.phase
+            annotate_resignation(data)
+            grouped.setdefault(iteration, {}).setdefault(game_file.phase, []).append(data)
 
     # Metrics supply the per-iteration Elo and the gate outcome.
     metrics = trainer.get_metrics_history()
@@ -250,7 +347,19 @@ def list_games():
             'total_games': sum(p['count'] for p in phases),
         })
 
-    return jsonify(result)
+    return jsonify({
+        'groups': result,
+        'pagination': {
+            'limit': limit,
+            'returned': len(selected),
+            'newest_iteration': selected[0] if selected else None,
+            # The cursor a "load more" passes back as `before`.
+            'oldest_iteration': selected[-1] if selected else None,
+            'remaining': max(0, len(older) - len(selected)),
+            'has_more': len(older) > len(selected),
+            'total_iterations': len(all_iterations),
+        },
+    })
 
 
 @training_bp.route('/api/games/<path:rel_path>', methods=['DELETE'])
@@ -902,6 +1011,7 @@ def apply_params():
     for key in ('gate_enabled', 'gate_games', 'gate_threshold',
                 'gate_simulations', 'gate_stall_warning',
                 'num_parallel_workers', 'restrict_eye_fill',
+                'restrict_self_atari', 'self_atari_max_stones',
                 'resign_enabled', 'resign_threshold', 'resign_consecutive',
                 'resign_min_move_factor', 'resign_both_sides',
                 'resign_playout_fraction'):

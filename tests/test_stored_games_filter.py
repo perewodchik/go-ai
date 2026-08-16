@@ -1,5 +1,8 @@
 """
 test_stored_games_filter.py — Tests for filtering recorded human games in the stored games API.
+
+The endpoint returns {groups, pagination}; these tests only care about the
+groups. Paging itself is covered in test_games_paging.py.
 """
 
 import os
@@ -70,7 +73,7 @@ class TestStoredGamesFilter(unittest.TestCase):
         """Default GET /training/api/games includes recorded human games for backward compatibility / review."""
         res = self.client.get('/training/api/games')
         self.assertEqual(res.status_code, 200)
-        data = res.get_json()
+        data = res.get_json()['groups']
 
         kinds = [group.get('kind') for group in data]
         self.assertIn('recorded', kinds)
@@ -84,7 +87,7 @@ class TestStoredGamesFilter(unittest.TestCase):
         """GET /training/api/games?include_recorded=1 explicitly includes recorded games."""
         res = self.client.get('/training/api/games?include_recorded=1')
         self.assertEqual(res.status_code, 200)
-        data = res.get_json()
+        data = res.get_json()['groups']
 
         kinds = [group.get('kind') for group in data]
         self.assertIn('recorded', kinds)
@@ -94,7 +97,7 @@ class TestStoredGamesFilter(unittest.TestCase):
         """GET /training/api/games?include_recorded=0 excludes recorded human games (for training stored games browser)."""
         res = self.client.get('/training/api/games?include_recorded=0')
         self.assertEqual(res.status_code, 200)
-        data = res.get_json()
+        data = res.get_json()['groups']
 
         kinds = [group.get('kind') for group in data]
         self.assertNotIn('recorded', kinds)
@@ -106,7 +109,7 @@ class TestStoredGamesFilter(unittest.TestCase):
         """GET /training/api/games?include_recorded=false excludes recorded human games."""
         res = self.client.get('/training/api/games?include_recorded=false')
         self.assertEqual(res.status_code, 200)
-        data = res.get_json()
+        data = res.get_json()['groups']
 
         kinds = [group.get('kind') for group in data]
         self.assertNotIn('recorded', kinds)
@@ -116,7 +119,7 @@ class TestStoredGamesFilter(unittest.TestCase):
         """GET /training/api/games?include_human=0 excludes recorded human games."""
         res = self.client.get('/training/api/games?include_human=0')
         self.assertEqual(res.status_code, 200)
-        data = res.get_json()
+        data = res.get_json()['groups']
 
         kinds = [group.get('kind') for group in data]
         self.assertNotIn('recorded', kinds)

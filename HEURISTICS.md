@@ -14,7 +14,7 @@ previous behaviour exactly.
 | Heuristic | Verdict | Status |
 |---|---|---|
 | Own-two-eye fill (`restrict_eye_fill`) | Keep — provably safe, small win | **Implemented** |
-| No pointless self-atari | **Build** — best sample-efficiency lever | Not implemented |
+| No pointless self-atari | Built — but **measured smaller than predicted**, see below | **Implemented** |
 | Mercy rule / resignation in self-play | Keep — best throughput lever | **Implemented** |
 | Never fill *any* true eye | Skip — unprovable, marginal | Not implemented |
 | No moves in own Benson pass-alive region | Skip — safe but net-negative cost | Not implemented |
@@ -126,11 +126,51 @@ Notes that only became clear once it was built and measured:
 
 ## Worth building
 
-### 1. No pointless self-atari
+### 1. No pointless self-atari — **now implemented, and the prediction was wrong**
+
+Built as specified (`restrict_self_atari`, `self_atari_max_stones`), see
+`game/self_atari.py`. The reasoning below is kept because the *rule* is sound;
+what did not survive contact with measurement is the claim that this is the
+best sample-efficiency lever.
+
+**Measured on the stored self-play games of every trained model** (60 games
+each, checking each move against the filter at the moment it was played):
+
+| model | moves | self-atari played | of those, inside the training window |
+|---|---|---|---|
+| night-model | 6,629 | 4.72% | 1.78% |
+| hero-of-time | 6,208 | 4.03% | 1.80% |
+| hot-boi | 3,934 | 2.47% | 2.24% |
+
+Split by phase, the picture is decisive:
+
+| phase | share of moves that are pointless self-atari |
+|---|---|
+| first half (where training samples come from) | **0.3 – 0.4%** |
+| late game (past the sample cutoff) | **5.5 – 7.1%** |
+
+**The moves this filter removes are overwhelmingly in the tail that produces no
+training data at all.** In the opening and midgame — the only phase whose
+policy targets are kept — these networks already almost never play a pointless
+self-atari, so there is very little garbage left to remove from the target.
+
+**The cost is paid everywhere.** `restrict_self_atari` adds ~15% to
+`get_legal_moves`, which is ~80% of search time, so roughly 12% of self-play
+throughput — on every move of every game, including the opening where it finds
+almost nothing.
+
+**Conclusion**: on current evidence this is a marginal trade for these models,
+not the headline win. The late-game tail it targets is better addressed by the
+**mercy rule**, which deletes that whole phase instead of filtering moves within
+it, and costs nothing per move. Enable `resign_enabled` first; only reach for
+`restrict_self_atari` if the A/B rig shows it earning its 12%.
+
+The original reasoning, for the record:
 
 **Why**: highest expected sample-efficiency gain, because unlike eye-filling it
 is *frequent* in exactly the weak-network regime that matters. Removes a large
 share of the bad moves from both the search budget and the policy target.
+(Frequent — yes. In the phase that matters — no.)
 
 **Safety basis**: a tuned assumption, not a proof. Legitimate self-atari
 includes throw-ins, snapbacks, nakade placement, ko captures, eye-space
@@ -147,7 +187,25 @@ placing the stone and resolving captures:
 Condition 1 exempts every ko capture and most snapbacks. Condition 3 exempts
 throw-ins, which are the main small-group tesuji.
 
-**Implementation strategy**
+**Implementation notes** (as built)
+
+- `game/self_atari.py` holds the rule; the filter runs inside
+  `rules.get_legal_moves` next to `restrict_eye_fill` and propagates through
+  `GameState.copy()`, so it holds at every depth of the search.
+- It never simulates anything itself. `rules.simulate_move` already walks the
+  played point's neighbours for legality; `need_group_facts=True` makes it
+  retain the merged group's size and liberty set from that same walk, reusing
+  the flood fills the suicide check already performed. Two early-outs keep it
+  off the hot path: a move that captures is exempt, and a move with two or more
+  empty neighbours provably has two liberties, so neither needs any group work.
+- **One deliberate departure from the spec below**: if the filter would remove
+  *every* legal move, it hands them back rather than forcing a pass. The eye
+  rule does not get this guard and should not — filling your own last two eyes
+  is provably useless, so passing really is at least as good there. Self-atari
+  has no such proof, and a position where every move trips it (capturing race,
+  seki, filled endgame) is exactly where the assumption is least reliable.
+
+**Implementation strategy** (original plan)
 
 - New module `game/self_atari.py`, mirroring the shape of `game/eyes.py`
   (module docstring carrying the rationale, one scan function, one point

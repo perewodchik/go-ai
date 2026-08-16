@@ -296,10 +296,11 @@ class TestPlayerSpecs:
         with pytest.raises(ValueError):
             create_player({'type': 'telepathy'}, {})
 
-    def test_ogs_is_recognised_but_not_implemented_yet(self):
-        # The seam for online play exists; the implementation does not. This
-        # asserts the failure is the explicit one, not an unknown-type error.
-        with pytest.raises(NotImplementedError):
+    def test_ogs_needs_a_bot_to_play(self):
+        # Online play is implemented (see tests/test_ogs_player.py); a spec
+        # that names no bot fails on that, not as an unknown opponent type.
+        # Offline: the failure happens before anything reaches the network.
+        with pytest.raises(ValueError, match="bot_id"):
             create_player({'type': 'ogs'}, {'board_size': 9})
 
     def test_random_player_produces_legal_moves(self):

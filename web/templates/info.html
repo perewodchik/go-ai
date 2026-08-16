@@ -446,6 +446,45 @@
             <div class="param-meta">Applied to self-play and both sides of gate matches &nbsp;·&nbsp; Never applied to random eval bot anchor.</div>
         </section>
 
+        <!-- No Pointless Self-Atari -->
+        <section id="self-atari-param" class="param-card glass" data-category="restrictions" data-keywords="self atari restrict_self_atari sacrifice throw-in snapback nakade seki liberty heuristic">
+            <div class="param-head">
+                <h3 class="param-name">No Pointless Self-Atari (`restrict_self_atari`)</h3>
+                <span class="rec-pill">Default: Off (Pure RL)</span>
+            </div>
+            <p class="param-desc">
+                Forbids moves that capture <strong>nothing</strong> and leave the group they join on a <strong>single liberty</strong>, when that group is larger than <code>self_atari_max_stones</code> (default 1). A weak network plays these constantly, and each one burns a search slot to hand over stones.
+            </p>
+            <div class="param-meta" style="border-left: 3px solid var(--warn, #e0a800); padding-left: 0.7rem; margin: 0.6rem 0;">
+                <strong>This one is not a theorem.</strong> Unlike No Own-Eye Filling, there is no proof behind it — self-atari is genuinely correct in nakade, seki manipulation, eye-space reduction and ko threats. The exemptions cover most of those, but "most" is the honest word.
+            </div>
+            <details class="param-details">
+                <summary class="details-summary">View Exemptions & Why the Gate Cannot Validate It</summary>
+                <div style="margin-top: 0.8rem;">
+                    <p class="param-desc"><strong>What stays playable:</strong></p>
+                    <ul class="param-desc">
+                        <li><strong>Anything that captures</strong> — including every ko capture and most snapbacks. If the move takes stones off the board it is doing something.</li>
+                        <li><strong>Throw-ins</strong> up to <code>self_atari_max_stones</code> — sacrificing one stone to wreck an eye space is ordinary good play.</li>
+                        <li><strong>Every move, when it would block them all</strong> — if the filter empties the move list it hands the moves back rather than forcing a pass. A position where every move is self-atari is exactly where the assumption is least reliable.</li>
+                    </ul>
+                    <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                        <div class="tradeoff-col tradeoff-up">
+                            <span class="tradeoff-tag">On (Filter Active)</span>
+                            Sharper policy targets and more search budget on real moves — the largest sample-efficiency lever available, because self-atari is frequent in exactly the weak-network regime that matters.
+                        </div>
+                        <div class="tradeoff-col tradeoff-down">
+                            <span class="tradeoff-tag">Off (Pure AlphaZero)</span>
+                            The network learns liberty counting from outcomes alone. Fully comparable with legacy runs.
+                        </div>
+                    </div>
+                    <p class="param-desc" style="margin-top: 0.8rem;">
+                        <strong>The promotion gate is blind to this setting's cost.</strong> Candidate and champion both play under the filter, so the gate measures relative strength <em>under the handicap</em> — the gate Elo ladder keeps climbing even if the filter is removing moves the model needed. Expect a discontinuous step in <em>win rate vs random</em> at the iteration you switch it on, since only the network is filtered there. The only valid test is training two models from identical weights, one filtered and one not, then playing them head-to-head with the filter <strong>off for both sides</strong>.
+                    </p>
+                </div>
+            </details>
+            <div class="param-meta">Applied to self-play and both sides of gate matches &nbsp;·&nbsp; Never applied to random eval bot anchor &nbsp;·&nbsp; Never affects human moves, replays or stored games.</div>
+        </section>
+
         <!-- Mercy Rule / Resignation -->
         <section id="mercy-rule-param" class="param-card glass" data-category="resign" data-keywords="mercy rule resign resignation threshold playout false resign throughput speed hopeless">
             <div class="param-head">

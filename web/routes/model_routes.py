@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, request
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+import model_stats
 from model_manager import ModelManager
 from config import (
     NETWORK_PRESETS, NETWORK_PRESET_ORDER, DEFAULT_NETWORK_PRESET,
@@ -143,6 +144,178 @@ def list_models():
     return jsonify([m.to_dict() for m in models])
 
 
+# ---------------------------------------------------------------------------
+# Fleet view (dashboard)
+#
+# Everything below reads models WITHOUT going through the trainer. Switching
+# the trainer to another model rebuilds its config and reloads weights.pt, so a
+# page that describes eight models cannot ask the trainer about them — see
+# model_stats.py.
+# ---------------------------------------------------------------------------
+
+def _training_state():
+    """Which model is training right now, and how far along."""
+    from web.app import trainer
+    if not trainer or not trainer.is_running:
+        return {'model_id': None, 'is_running': False}
+    stage = getattr(trainer, 'current_stage', {}) or {}
+    return {
+        'model_id': trainer.model_id,
+        'is_running': True,
+        'stage': stage.get('stage'),
+        'stage_name': stage.get('stage_name'),
+        'percent': stage.get('percent'),
+        'iteration': getattr(trainer, 'iteration', None),
+        'detail': stage.get('detail'),
+    }
+
+
+@model_bp.route('/api/summary')
+def fleet_summary():
+    """
+    One row per model, plus the relationships between them.
+
+    This is the whole fleet table in a single request: per-model stats, the
+    fork graph, the head-to-head matrix and the fleet totals. The training
+    params ride along on each row so the client can diff two forks without
+    another round trip.
+    """
+    mgr = _get_manager()
+    infos = mgr.list_models()
+    active_id = mgr.get_active_model_id()
+    training = _training_state()
+
+    rows = []
+    for info in infos:
+        row = model_stats.summarize(info)
+        row['is_active'] = (info.id == active_id)
+        row['is_training'] = (info.id == training['model_id'])
+        rows.append(row)
+
+    lineage = model_stats.lineage(infos)
+    live = [r for r in rows if not r.get('archived')]
+    return jsonify({
+        'models': rows,
+        'lineage': lineage,
+        'head_to_head': model_stats.head_to_head(),
+        'active_model_id': active_id,
+        'training': training,
+        'totals': {
+            'models': len(live),
+            'archived': len(rows) - len(live),
+            'families': len({lineage[r['id']]['root'] for r in live}) if live else 0,
+            'iterations': sum(r['iterations_logged'] for r in rows),
+            'games_on_disk': sum(r['games_on_disk'] for r in rows),
+            'bytes_on_disk': sum(r['bytes_on_disk'] for r in rows),
+            'train_seconds': sum(r['total_train_seconds'] for r in rows),
+        },
+    })
+
+
+# Series the dashboard charts. Restricting the field list keeps a client from
+# turning this into an arbitrary log dump.
+HISTORY_FIELDS = (
+    'elo', 'gate_elo', 'total_loss', 'policy_loss', 'value_loss',
+    'gate_win_rate', 'win_rate_vs_random', 'buffer_size', 'elapsed_seconds',
+    'resign_rate', 'false_resign_rate', 'pass_rate_black', 'pass_rate_white',
+    'value_std_black', 'value_std_white', 'learning_rate', 'total_games',
+)
+
+
+@model_bp.route('/api/<model_id>/history')
+def model_history(model_id):
+    """Per-iteration series for one model's charts."""
+    mgr = _get_manager()
+    if not mgr.get_model(model_id):
+        return jsonify({'error': 'Model not found'}), 404
+
+    requested = (request.args.get('fields') or 'elo,total_loss,gate_win_rate')
+    fields = [f for f in requested.split(',') if f in HISTORY_FIELDS]
+    if not fields:
+        return jsonify({'error': 'No known fields requested'}), 400
+
+    return jsonify(model_stats.history(model_id, fields))
+
+
+@model_bp.route('/api/head_to_head')
+def head_to_head():
+    """Win matrix over every stored bot vs bot game."""
+    return jsonify(model_stats.head_to_head())
+
+
+@model_bp.route('/api/<model_id>/meta', methods=['POST'])
+def set_model_meta(model_id):
+    """
+    Notes and archive state.
+
+    Deliberately not part of /update: neither field changes how training runs,
+    so neither is worth making the user stop a run to edit.
+    """
+    data = request.get_json() or {}
+    mgr = _get_manager()
+
+    notes = data.get('notes')
+    if notes is not None:
+        notes = str(notes)[:2000]
+
+    archived = data.get('archived')
+    if archived is not None:
+        archived = bool(archived)
+        if archived and mgr.get_active_model_id() == model_id:
+            return jsonify({'error': 'Cannot archive the active model — '
+                                     'activate another model first'}), 400
+
+    info = mgr.set_meta(model_id, notes=notes, archived=archived)
+    if not info:
+        return jsonify({'error': 'Model not found'}), 404
+    return jsonify(info.to_dict())
+
+
+@model_bp.route('/api/<model_id>/fork', methods=['POST'])
+def fork_model(model_id):
+    """
+    Fork a model: copy it, then optionally change the hyperparameters.
+
+    A fork is what /copy always was in practice — the point of copying a run is
+    to try something different from here. Doing it in one call means the fork
+    never briefly exists with the parent's settings, and the fork's own
+    training log starts where the parent's left off, which is what makes the
+    lineage reconstructible later.
+    """
+    data = request.get_json() or {}
+    new_name = (data.get('name') or '').strip()
+    if not new_name:
+        return jsonify({'error': 'Name is required'}), 400
+
+    mgr = _get_manager()
+    parent = mgr.get_model(model_id)
+    if not parent:
+        return jsonify({'error': 'Source model not found'}), 404
+
+    from web.app import trainer
+    if trainer and trainer.is_running and trainer.model_id == model_id:
+        return jsonify({'error': 'Stop training before forking this model'}), 400
+
+    info = mgr.copy_model(model_id, new_name)
+    if not info:
+        return jsonify({'error': 'Source model not found'}), 404
+
+    training_params = _collect_training_params(data)
+    notes = data.get('notes')
+    if training_params or notes is not None:
+        mgr.update_model(info.id, training_params=training_params or None)
+        if notes is not None:
+            mgr.set_meta(info.id, notes=str(notes)[:2000])
+        info = mgr.get_model(info.id)
+
+    model_stats.invalidate_caches()
+    return jsonify({
+        'model': info.to_dict(),
+        'forked_from': {'id': parent.id, 'name': parent.name,
+                        'iteration': parent.iteration},
+    }), 201
+
+
 @model_bp.route('/api/active')
 def get_active():
     mgr = _get_manager()
@@ -175,6 +348,7 @@ def create_model():
         return jsonify({'error': net_err}), 400
 
     mgr = _get_manager()
+    model_stats.invalidate_caches()
     info = mgr.create_model(
         name=name,
         board_size=board_size,
@@ -295,6 +469,7 @@ def copy_model(model_id):
     info = mgr.copy_model(model_id, new_name)
     if not info:
         return jsonify({'error': 'Source model not found'}), 404
+    model_stats.invalidate_caches()
     return jsonify(info.to_dict()), 201
 
 
@@ -308,6 +483,7 @@ def delete_model(model_id):
 
     if not mgr.delete_model(model_id):
         return jsonify({'error': 'Model not found'}), 404
+    model_stats.invalidate_caches()
 
     # If deleted model was active, clear trainer
     from web.app import clear_trainer

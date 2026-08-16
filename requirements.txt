@@ -10,5 +10,10 @@ eventlet>=0.35
 # Faster CPU/MPS inference for self-play
 onnxruntime>=1.16
 
+# Playing on OGS (online-go.com): its realtime API is a plain WebSocket with
+# JSON-array framing, and its REST API is used for auth and challenges.
+websockets>=12.0
+requests>=2.31
+
 # Testing
 pytest>=7.0

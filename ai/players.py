@@ -240,7 +240,7 @@ class RemotePlayer(Player):
 # A "spec" is the JSON the browser sends to describe one side of a match, e.g.
 #   {"type": "model", "model_id": "hero-of-time", "num_simulations": 200}
 #   {"type": "random"}
-#   {"type": "ogs", "username": "...", ...}     (not implemented yet)
+#   {"type": "ogs", "bot_id": 1195517, "ranked": false}
 #
 # Adding a new opponent kind means adding one factory here; nothing in the
 # match loop or the API needs to change.
@@ -288,8 +288,8 @@ PLAYER_TYPES = [
      'note': 'Any model in this workspace'},
     {'type': 'random', 'label': 'Random bot', 'available': True,
      'note': 'Elo anchor at 500 — its own rating never moves'},
-    {'type': 'ogs', 'label': 'OGS opponent', 'available': False,
-     'note': 'Online play against OGS — planned'},
+    {'type': 'ogs', 'label': 'OGS bot', 'available': True,
+     'note': 'A live bot on online-go.com — needs OGS credentials'},
 ]
 
 

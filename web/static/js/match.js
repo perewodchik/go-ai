@@ -109,6 +109,22 @@
         baseline.appendChild(randomOpt);
         select.appendChild(baseline);
 
+        // Live bots on online-go.com. Listing them needs no account; playing
+        // one does, which syncSides() explains rather than failing at start.
+        const ogs = opponents.ogs || {};
+        if (ogs.available && (ogs.bots || []).length) {
+            const online = document.createElement('optgroup');
+            online.label = 'Online — OGS bots';
+            ogs.bots.forEach(bot => {
+                const opt = document.createElement('option');
+                opt.value = JSON.stringify({ type: 'ogs', bot_id: bot.bot_id });
+                opt.textContent = `${bot.name} — ${bot.rank} on OGS`;
+                opt.dataset.ogsId = bot.bot_id;
+                online.appendChild(opt);
+            });
+            select.appendChild(online);
+        }
+
         (opponents.player_types || [])
             .filter(t => !t.available)
             .forEach(t => {
@@ -147,21 +163,59 @@
         return (opponents.models || []).find(m => m.model_id === spec.model_id) || null;
     }
 
+    function ogsBotFor(spec) {
+        if (!spec || spec.type !== 'ogs') return null;
+        const bots = (opponents.ogs || {}).bots || [];
+        return bots.find(b => b.bot_id === spec.bot_id) || null;
+    }
+
     /** Describe each side under its picker, and warn about invalid pairings. */
     function syncSides() {
         const specA = selectedSpec('match-player-a');
         const specB = selectedSpec('match-player-b');
         const modelA = modelFor(specA);
         const modelB = modelFor(specB);
+        const ogsA = ogsBotFor(specA);
+        const ogsB = ogsBotFor(specB);
 
-        el('match-player-a-meta').textContent = sideDescription(specA, modelA);
-        el('match-player-b-meta').textContent = sideDescription(specB, modelB);
+        el('match-player-a-meta').textContent = sideDescription(specA, modelA, ogsA);
+        el('match-player-b-meta').textContent = sideDescription(specB, modelB, ogsB);
+
+        // The board a match is played on comes from whichever side is a model.
+        const boardSize = (modelA || modelB || {}).board_size;
+        const ogs = opponents.ogs || {};
 
         let warning = '';
+        let invalid = false;
+
         if (modelA && modelB && modelA.board_size !== modelB.board_size) {
             warning = `${modelA.name} plays ${modelA.board_size}×${modelA.board_size} and ` +
                       `${modelB.name} plays ${modelB.board_size}×${modelB.board_size} — ` +
                       'they cannot play each other.';
+            invalid = true;
+        } else if ((ogsA || ogsB) && !modelA && !modelB) {
+            warning = 'An OGS bot needs one of your models on the other side.';
+            invalid = true;
+        } else if (ogsA && ogsB) {
+            warning = 'Two OGS bots would play each other on OGS, not here.';
+            invalid = true;
+        } else if ((ogsA || ogsB) && !ogs.credentials_ok) {
+            warning = ogs.credentials_error ||
+                      'Playing an OGS bot needs OGS credentials on this machine.';
+            invalid = true;
+        } else if ((ogsA || ogsB) && boardSize) {
+            const bot = ogsA || ogsB;
+            if (bot.board_sizes && !bot.board_sizes.includes(boardSize)) {
+                warning = `${bot.name} does not play ${boardSize}×${boardSize} — ` +
+                          `it plays ${bot.board_sizes.join(', ')}.`;
+                invalid = true;
+            } else if (!bot.accepting) {
+                warning = `${bot.name} is not accepting new challenges right now.`;
+                invalid = true;
+            } else {
+                warning = `Games against ${bot.name} are played on online-go.com, ` +
+                          'unranked, on their clock. Only your model\'s Elo moves.';
+            }
         } else if (modelA && modelB && modelA.model_id === modelB.model_id) {
             warning = 'A model playing itself: the games are recorded and shown, ' +
                       'but no Elo changes — a mirror match says nothing about strength.';
@@ -174,13 +228,38 @@
         box.textContent = warning;
         box.style.display = warning ? '' : 'none';
 
-        const invalid = !!(modelA && modelB && modelA.board_size !== modelB.board_size);
         el('match-start').disabled = invalid;
+        syncOGSLimits(!!(ogsA || ogsB));
     }
 
-    function sideDescription(spec, model) {
+    /**
+     * An OGS series is capped and runs on OGS's clock, so the two controls that
+     * do not apply are taken out of the way rather than silently ignored.
+     */
+    function syncOGSLimits(isOGS) {
+        const games = el('match-games');
+        const delayGroup = el('match-delay')?.closest('.form-group');
+        if (!games) return;
+
+        const cap = isOGS ? 5 : 20;
+        games.max = cap;
+        if (Number(games.value) > cap) {
+            games.value = cap;
+            el('match-games-label').textContent = games.value;
+        }
+        if (delayGroup) delayGroup.hidden = isOGS;
+    }
+
+    function sideDescription(spec, model, ogsBot) {
         if (!spec) return '';
         if (spec.type === 'random') return 'Uniform random legal moves · fixed 500 Elo';
+        if (spec.type === 'ogs') {
+            if (!ogsBot) return '';
+            const sizes = ogsBot.board_sizes ? ogsBot.board_sizes.join(', ') : 'any size';
+            return `Live on OGS · ${ogsBot.rank} (≈${Math.round(ogsBot.elo)} Elo here) · ` +
+                   `plays ${sizes}` +
+                   (ogsBot.settings_published ? '' : ' · publishes no settings');
+        }
         if (spec.type !== 'model') return '';
         if (!model) return '';
         return `${model.board_size}×${model.board_size} · komi ${model.komi} · ` +
@@ -359,7 +438,12 @@
     function specFromPlayer(player) {
         if (!player) return null;
         if (player.kind === 'model') {
-            return { type: 'model', model_id: player.model_id };
+            return {
+                type: 'model',
+                model_id: player.model_id,
+                // Same search strength, or the rematch is not the same match.
+                num_simulations: player.num_simulations,
+            };
         }
         return { type: player.kind || 'random' };
     }
@@ -578,8 +662,16 @@
 
         list.innerHTML = '';
         results.slice().reverse().forEach(result => {
-            const row = document.createElement('div');
+            // A recorded game is a link straight to itself in Review Games;
+            // one that was not recorded stays a plain row.
+            const saved = (result.saved_as || [])[0];
+            const row = document.createElement(saved ? 'a' : 'div');
             row.className = 'match-result-row';
+            if (saved) {
+                row.href = `/training/review?game=${encodeURIComponent(saved)}`;
+                row.title = 'Open this game in Review Games';
+                row.classList.add('is-link');
+            }
 
             let outcome;
             if (result.winner === 1) outcome = `⚫ ${result.black_name}`;

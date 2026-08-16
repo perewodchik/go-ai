@@ -54,19 +54,36 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
+// ---------------------------------------------------------------------------
+// Games list
+//
+// Recorded games and bot vs bot matches are loaded whole — there are tens of
+// them, and they are what the page is usually opened for. Training iterations
+// are not: a long run has hundreds, holding thousands of games, so they arrive
+// a page at a time and older ones are fetched only when asked for.
+// ---------------------------------------------------------------------------
+
+const ITERATIONS_PER_PAGE = 5;
+
+// Cursor for "load older": the oldest iteration currently on screen.
+let oldestLoadedIteration = null;
+
 async function loadGamesList() {
     const list = document.getElementById('review-games-list');
+    oldestLoadedIteration = null;
     try {
-        const res = await fetch('/training/api/games?include_recorded=1');
-        const groupedGames = await res.json();
+        const res = await fetch(
+            `/training/api/games?include_recorded=1&iterations=${ITERATIONS_PER_PAGE}`);
+        const payload = await res.json();
+        const groups = payload.groups || [];
         list.innerHTML = '';
 
-        if (groupedGames.length === 0) {
+        if (groups.length === 0) {
             list.innerHTML = '<p style="color: var(--text-muted); text-align: center;">No games available.</p>';
             return;
         }
 
-        groupedGames.forEach((group, groupIdx) => {
+        groups.forEach((group, groupIdx) => {
             // Recorded human games are a flat list, not an iteration of phases.
             if (group.kind === 'recorded') {
                 list.appendChild(buildRecordedGroup(group, groupIdx === 0));
@@ -79,45 +96,118 @@ async function loadGamesList() {
                 return;
             }
 
-            const details = document.createElement('details');
-            details.className = 'iteration-group';
-            if (groupIdx === 0) details.open = true;
-
-            const summary = document.createElement('summary');
-            summary.innerHTML = `
-                <span>Iteration ${group.iteration}</span>
-                <span class="group-note">${group.total_games} games</span>
-            `;
-            details.appendChild(summary);
-
-            // Second level: one collapsible section per phase of the iteration.
-            (group.phases || []).forEach((phase, phaseIdx) => {
-                const phaseEl = document.createElement('details');
-                phaseEl.className = 'phase-group';
-                // Open the promotion section by default on the newest iteration —
-                // it's the match that decided whether the model moved forward.
-                if (groupIdx === 0 && (phaseIdx === 0 || phase.phase === 'promotion')) {
-                    phaseEl.open = true;
-                }
-
-                const phaseSummary = document.createElement('summary');
-                phaseSummary.innerHTML = `
-                    <span>${phase.label} <span class="group-note">${phase.count}</span></span>
-                    ${phaseSummaryBadge(phase)}
-                `;
-                phaseEl.appendChild(phaseSummary);
-
-                phase.games.forEach(game => {
-                    phaseEl.appendChild(buildGameItem(game, phase.phase));
-                });
-
-                details.appendChild(phaseEl);
-            });
-
-            list.appendChild(details);
+            list.appendChild(buildIterationGroup(group, groupIdx === 0));
         });
+
+        renderLoadMore(payload.pagination || {});
     } catch (e) {
         list.innerHTML = '<p style="color: var(--text-muted); text-align: center;">Error loading games.</p>';
+    }
+}
+
+/** One collapsible iteration, with a phase section per training phase. */
+function buildIterationGroup(group, open) {
+    const details = document.createElement('details');
+    details.className = 'iteration-group';
+    if (open) details.open = true;
+
+    const summary = document.createElement('summary');
+    summary.innerHTML = `
+        <span>Iteration ${group.iteration}</span>
+        <span class="group-note">${group.total_games} games</span>
+    `;
+    details.appendChild(summary);
+
+    (group.phases || []).forEach((phase, phaseIdx) => {
+        const phaseEl = document.createElement('details');
+        phaseEl.className = 'phase-group';
+        // Open the promotion section by default on the newest iteration —
+        // it's the match that decided whether the model moved forward.
+        if (open && (phaseIdx === 0 || phase.phase === 'promotion')) {
+            phaseEl.open = true;
+        }
+
+        const phaseSummary = document.createElement('summary');
+        phaseSummary.innerHTML = `
+            <span>${phase.label} <span class="group-note">${phase.count}</span></span>
+            ${phaseSummaryBadge(phase)}
+        `;
+        phaseEl.appendChild(phaseSummary);
+
+        phase.games.forEach(game => {
+            phaseEl.appendChild(buildGameItem(game, phase.phase));
+        });
+
+        details.appendChild(phaseEl);
+    });
+
+    return details;
+}
+
+/**
+ * The footer of the list: how much history is loaded, and a button for more.
+ * Rebuilt on every page so it always sits at the bottom.
+ */
+function renderLoadMore(pagination) {
+    const list = document.getElementById('review-games-list');
+    const existing = document.getElementById('games-load-more');
+    if (existing) existing.remove();
+
+    oldestLoadedIteration = pagination.oldest_iteration ?? oldestLoadedIteration;
+    if (!pagination.has_more) {
+        if (pagination.total_iterations) {
+            const done = document.createElement('p');
+            done.id = 'games-load-more';
+            done.className = 'games-list-note';
+            done.textContent = `All ${pagination.total_iterations} iterations loaded.`;
+            list.appendChild(done);
+        }
+        return;
+    }
+
+    const wrap = document.createElement('div');
+    wrap.id = 'games-load-more';
+    wrap.className = 'games-load-more';
+
+    const button = document.createElement('button');
+    button.className = 'btn-small';
+    const step = Math.min(ITERATIONS_PER_PAGE, pagination.remaining);
+    button.textContent = `Load ${step} older iteration${step === 1 ? '' : 's'}`;
+    button.addEventListener('click', () => loadOlderIterations(button));
+
+    const note = document.createElement('span');
+    note.className = 'games-list-note';
+    note.textContent = `${pagination.remaining} older iteration${pagination.remaining === 1 ? '' : 's'} not loaded`;
+
+    wrap.appendChild(button);
+    wrap.appendChild(note);
+    list.appendChild(wrap);
+}
+
+/** Fetch the next page of older iterations and append them to the list. */
+async function loadOlderIterations(button) {
+    if (oldestLoadedIteration === null || oldestLoadedIteration === undefined) return;
+
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Loading…';
+    try {
+        const res = await fetch('/training/api/games'
+            + `?include_recorded=0&iterations=${ITERATIONS_PER_PAGE}`
+            + `&before=${encodeURIComponent(oldestLoadedIteration)}`);
+        const payload = await res.json();
+        const list = document.getElementById('review-games-list');
+        const anchor = document.getElementById('games-load-more');
+
+        (payload.groups || []).forEach(group => {
+            if (group.kind !== 'iteration') return;
+            list.insertBefore(buildIterationGroup(group, false), anchor);
+        });
+
+        renderLoadMore(payload.pagination || {});
+    } catch (e) {
+        button.disabled = false;
+        button.textContent = label;
     }
 }
 

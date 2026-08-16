@@ -464,8 +464,9 @@ function gamesPhaseBadge(phase) {
 
 async function loadGamesList() {
     try {
-        const res = await fetch('/training/api/games?include_recorded=0');
-        const groupedGames = await res.json();
+        // The endpoint pages its iterations now; this page shows the newest few.
+        const res = await fetch('/training/api/games?include_recorded=0&iterations=3');
+        const groupedGames = (await res.json()).groups || [];
         const list = document.getElementById('games-list');
         if (!list) return;
         list.innerHTML = '';

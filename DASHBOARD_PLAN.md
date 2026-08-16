@@ -6,7 +6,7 @@ and every `models/*/config.json` + `models/*/logs/training_log.jsonl` on this
 machine.
 
 Every number below is **measured from the current `models/` directory**, not
-estimated. The scaffold (§0) is already in place: `/dashboard_new` serves a copy
+estimated. The scaffold (§0) is already in place: `/models` (built as `/dashboard_new`) serves a copy
 of the live dashboard so the redesign can land without touching `/`.
 
 ---
@@ -35,10 +35,10 @@ page.
 
 ## 0. Scaffold (done)
 
-* `web/templates/dashboard_new.html` — copy of `index.html`, tagged `new` in the
-  page title so the two are never confused.
-* `web/static/js/dashboard_new.js` — copy of `dashboard.js`.
-* `web/app.py` — routes `/dashboard_new` and `/dashboard_new/`.
+* `web/templates/models.html` — began as a copy of `index.html`.
+* `web/static/js/models.js` — began as a copy of `dashboard.js`.
+* `web/app.py` — routes `/models` and `/models/`; `/dashboard_new`, the name it
+  was built under, 301s to the new one.
 
 Both routes render the same 8 models and behave identically today. The redesign
 lands in these two files; `/` keeps working the whole time.
@@ -270,7 +270,12 @@ Rules the layout follows:
 
 ## 4. Implementation plan
 
-### Phase 1 — data layer (no UI)
+**Status: phases 1–6 are built and live at `/models`. Phase 7 (cutover)
+is deliberately NOT done — `/` still serves the original dashboard unchanged,
+and will until you decide to migrate.**
+
+
+### Phase 1 — data layer (no UI)  ✅ built
 
 Everything the redesign needs must be readable **without switching the active
 model** (a switch rebuilds `Trainer`, reloads weights and is not free).
@@ -301,10 +306,10 @@ head-to-head dedupe; health thresholds; `summarize()` on a model with no
 
 **Deliverable:** the numbers in §2 of this document, reproducible from an API.
 
-### Phase 2 — fleet table
+### Phase 2 — fleet table  ✅ built
 
-Replace the model list in `dashboard_new.html` with a table rendered by
-`dashboard_new.js` from `/models/api/summary`:
+Replace the model list in `models.html` with a table rendered by
+`models.js` from `/models/api/summary`:
 
 * columns: name (nested by lineage) · iterations · Elo + sparkline · health · last trained · size
 * sortable; sort preference persisted in `localStorage`
@@ -314,16 +319,16 @@ Replace the model list in `dashboard_new.html` with a table rendered by
 
 Removes: the archive card, the three nav-duplicating action cards.
 
-### Phase 3 — live state
+### Phase 3 — live state  ✅ built
 
-Subscribe `dashboard_new.js` to the existing `training_update` socket event:
+Subscribe `models.js` to the existing `training_update` socket event:
 
 * a fleet-header banner naming the model currently training and its stage
 * live `iteration` / `elo` / `games` on that model's row
 * the activate/delete/edit controls disable themselves with an explanatory
   tooltip instead of failing with an `alert` after the click
 
-### Phase 4 — detail column
+### Phase 4 — detail column  ✅ built
 
 * **Identity**: name, board, komi, ruleset, network preset + parameter count,
   created, forked-from `<parent> @ iteration N`.
@@ -335,7 +340,7 @@ Subscribe `dashboard_new.js` to the existing `training_update` socket event:
   values plus the 4 extra keys, with non-default values highlighted. Deletes the
   hard-coded 8-row grid and the D4 problem permanently.
 
-### Phase 5 — comparison
+### Phase 5 — comparison  ✅ built
 
 * **Head-to-head panel** in the detail column: record vs every other model, from
   `/models/api/head_to_head`, each result linking to the game in the review page.
@@ -346,7 +351,7 @@ Subscribe `dashboard_new.js` to the existing `training_update` socket event:
 This is the feature the current dashboard most conspicuously lacks, and it is
 almost entirely wiring to code that already exists.
 
-### Phase 6 — lifecycle
+### Phase 6 — lifecycle  ✅ built
 
 * **Fork** replaces Copy: dialog states parent and iteration, offers to change
   hyperparameters at fork time (the reason forks exist), defaults the name to
@@ -359,12 +364,11 @@ almost entirely wiring to code that already exists.
 * **Notes**: a `notes` field on `ModelInfo`, editable inline — why this fork
   exists, in the user's own words.
 
-### Phase 7 — cutover
+### Phase 7 — cutover  ⏸ not started (by request)
 
-1. `/` renders `dashboard_new.html`; old template moves to `/dashboard_old`.
+1. `/` renders `models.html`; the old template moves to `/dashboard_old`.
 2. One week of both, then delete `index.html` + `dashboard.js` and rename
-   `dashboard_new.*` → `dashboard.*` (keeping `/dashboard_new` as an alias so
-   bookmarks survive).
+   the old `dashboard.*` files (the `/models` route and its redirect stay).
 3. Remove the `/training_old` archive card and, if it is equally unused, the
    route itself.
 

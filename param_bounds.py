@@ -201,6 +201,32 @@ PARAM_BOUNDS = {
         "type": "bool",
         "hint": "On = bot may never fill one of its own two eyes (killing a live group)",
     },
+    "restrict_self_atari": {
+        "key": "restrict_self_atari",
+        "order": 20,
+        "label": "No Pointless Self-Atari",
+        "category": "restrictions",
+        "category_label": "Move Restrictions",
+        "min": 0,
+        "max": 1,
+        "step": 1,
+        "default": False,
+        "type": "bool",
+        "hint": "On = bot may not walk a group into atari for nothing (heuristic, not a rule)",
+    },
+    "self_atari_max_stones": {
+        "key": "self_atari_max_stones",
+        "order": 30,
+        "label": "Sacrifice Size Allowed",
+        "category": "restrictions",
+        "category_label": "Move Restrictions",
+        "min": 1,
+        "max": 4,
+        "step": 1,
+        "default": 1,
+        "type": "int",
+        "hint": "Self-ataris up to this many stones stay legal — keeps throw-ins playable",
+    },
     # --- Mercy rule (self-play resignation) --------------------------------
     # Ends a decided self-play game early instead of paying an MCTS search per
     # move for an endgame nobody can lose. Self-play only — never the gate or

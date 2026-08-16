@@ -45,10 +45,17 @@ class GameState:
             two eyes (see game/eyes.py). It deliberately does NOT affect
             is_legal()/play_move(), so humans, replays and stored games behave
             identically whether it is set or not.
+        restrict_self_atari: Optional bot-only restriction, same mechanism.
+            When True, get_legal_moves() hides moves that capture nothing and
+            leave the mover's group on one liberty (see game/self_atari.py).
+        self_atari_max_stones: Sacrifice size that stays playable under that
+            restriction.
     """
 
     def __init__(self, board_size: int = 9, komi: float = 6.5,
-                 restrict_eye_fill: bool = False):
+                 restrict_eye_fill: bool = False,
+                 restrict_self_atari: bool = False,
+                 self_atari_max_stones: int = 1):
         self.board = Board(board_size)
         self.board_size = board_size
         self.komi = komi
@@ -62,6 +69,8 @@ class GameState:
         self.winner: Optional[int] = None
         self.resign_color: Optional[int] = None
         self.restrict_eye_fill = restrict_eye_fill
+        self.restrict_self_atari = restrict_self_atari
+        self.self_atari_max_stones = self_atari_max_stones
 
     def copy(self) -> 'GameState':
         """Deep copy the entire game state."""
@@ -79,9 +88,11 @@ class GameState:
         new.winner = self.winner
         new.resign_color = self.resign_color
         # Carried through every copy on purpose: MCTS builds its whole tree out
-        # of copies, so this is what keeps the restriction in force at every
+        # of copies, so this is what keeps the restrictions in force at every
         # depth of the search rather than only at the root.
         new.restrict_eye_fill = self.restrict_eye_fill
+        new.restrict_self_atari = self.restrict_self_atari
+        new.self_atari_max_stones = self.self_atari_max_stones
         return new
     
     @property
@@ -98,6 +109,8 @@ class GameState:
             self.board, self.current_player,
             self.ko_point, self.board_hash_history,
             restrict_eye_fill=self.restrict_eye_fill,
+            restrict_self_atari=self.restrict_self_atari,
+            self_atari_max_stones=self.self_atari_max_stones,
         )
     
     def is_legal(self, row: int, col: int) -> bool:
@@ -187,9 +200,13 @@ class GameState:
         komi = self.komi
         size = self.board_size
         restrict = self.restrict_eye_fill
+        restrict_sa = self.restrict_self_atari
+        sa_max = self.self_atari_max_stones
 
         # Reset to initial state
-        self.__init__(board_size=size, komi=komi, restrict_eye_fill=restrict)
+        self.__init__(board_size=size, komi=komi, restrict_eye_fill=restrict,
+                      restrict_self_atari=restrict_sa,
+                      self_atari_max_stones=sa_max)
         
         # Replay
         for color, move in history:

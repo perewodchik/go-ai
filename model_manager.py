@@ -55,6 +55,11 @@ class TrainingParams:
     # Opt-in heuristic: forbid the bot from filling one of its own two eyes.
     # False reproduces the behaviour of every model created before it existed.
     restrict_eye_fill: bool = False
+    # Opt-in heuristic (NOT a theorem, unlike restrict_eye_fill): forbid moves
+    # that walk a group larger than self_atari_max_stones into atari for
+    # nothing. See game/self_atari.py for what it can cost.
+    restrict_self_atari: bool = False
+    self_atari_max_stones: int = 1
     # --- Mercy rule (self-play resignation) ---
     # Off by default; see config.TrainingConfig for what each one does.
     resign_enabled: bool = False
@@ -92,6 +97,14 @@ class ModelInfo:
     training: TrainingParams = field(default_factory=TrainingParams)
     network: NetworkParams = field(default_factory=NetworkParams)
     created_at: str = ""
+    # Why this model exists — free text the user writes on the dashboard. Forks
+    # of a run are otherwise distinguishable only by their names, which is what
+    # made a directory of eight near-identical models hard to read.
+    notes: str = ""
+    # Retired models stay on disk and keep their games; they are just folded
+    # away in the model list. Default False, so every existing config.json
+    # loads unarchived.
+    archived: bool = False
     # Live state (updated by trainer, saved to config.json)
     elo: float = 500.0
     kyu_rank: str = "30k"
@@ -240,6 +253,25 @@ class ModelManager:
         info.total_games = total_games
         self._save_config(info)
 
+    def set_meta(self, model_id: str, notes: Optional[str] = None,
+                 archived: Optional[bool] = None) -> Optional[ModelInfo]:
+        """
+        Update the fields that describe a model rather than configure it.
+
+        Separate from `update_model` on purpose: notes and archive state say
+        nothing about how training runs, so they stay editable while the model
+        is training — unlike hyperparameters, which do not.
+        """
+        info = self.get_model(model_id)
+        if not info:
+            return None
+        if notes is not None:
+            info.notes = notes
+        if archived is not None:
+            info.archived = bool(archived)
+        self._save_config(info)
+        return info
+
     def rename_model(self, model_id: str, new_name: str) -> Optional[ModelInfo]:
         """Rename a model (display name only, slug stays the same)."""
         info = self.get_model(model_id)
@@ -302,6 +334,10 @@ class ModelManager:
             info.id = new_slug
             info.name = new_name
             info.created_at = datetime.now().isoformat()
+            # The copy is a new thing: it inherits weights and history, not the
+            # parent's description or its retirement.
+            info.notes = ""
+            info.archived = False
             self._save_config(info)
         return info
 
