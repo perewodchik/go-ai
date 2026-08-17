@@ -108,13 +108,28 @@ def _collect_training_params(data: dict) -> dict:
 
 @model_bp.route('/api/param_bounds')
 def get_param_bounds():
-    """Return centralized parameter bounds & categories for UI sliders."""
+    """
+    Return centralized parameter bounds & categories for UI sliders.
+
+    `hardware` rides along because two of the panels' warnings are about this
+    machine and not about the parameters: how many workers there are cores for,
+    and how much disk a game count will cost at the current recording settings.
+    """
+    import device_info
+    from param_bounds import (BYTES_PER_STORED_GAME_9X9,
+                              RECORDING_VOLUME_WARN_GAMES)
+
     return jsonify({
         'bounds': PARAM_BOUNDS,
         'categories': CATEGORIES,
         # The pools cap workers at the core count, so the UI needs it to work
         # out how games actually get dealt out.
         'cpu_count': os.cpu_count() or 4,
+        'hardware': device_info.summary(),
+        'storage': {
+            'bytes_per_game_9x9': BYTES_PER_STORED_GAME_9X9,
+            'warn_games': RECORDING_VOLUME_WARN_GAMES,
+        },
     })
 
 

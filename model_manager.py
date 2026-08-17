@@ -62,8 +62,15 @@ class TrainingParams:
     # gate measuring at 50 sims for exactly the runs meant to benefit.
     gate_simulations: int = 200
     gate_stall_warning: int = 5
-    # Worker processes shared by self-play, the gate, and the random-bot eval.
-    num_parallel_workers: int = 4
+    # Worker processes shared by self-play and the promotion gate.
+    #
+    # None, not a number: the right value is a property of the MACHINE, not of
+    # the model, and a config.json is opened on whichever machine it lands on.
+    # Left unset it resolves through Config.from_model to
+    # device_info.recommended_workers() for the current host — so a model
+    # created on a 4-core laptop uses 18 workers on a 20-thread desktop without
+    # anyone editing it. Set it explicitly to pin a value.
+    num_parallel_workers: Optional[int] = None
     # --- Game recording ---
     # Whether each phase writes its full game records to disk. Off keeps every
     # statistic (those come from games/index.jsonl) and loses only the replay.

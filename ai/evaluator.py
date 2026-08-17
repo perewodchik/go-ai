@@ -149,7 +149,13 @@ def _play_gate_game(
 
 
 def _gate_worker(kwargs: dict) -> int:
-    """Worker for parallel promotion-gate games. Returns 1 if candidate won."""
+    """
+    Worker for parallel promotion-gate games. Returns 1 if candidate won.
+
+    The thread cap is also applied once per process by
+    `worker_pool._init_worker`; it is repeated here because this function is
+    called directly by tests, outside any pool.
+    """
     import torch
     torch.set_num_threads(1)
     return _play_gate_game(**kwargs)
@@ -179,11 +185,18 @@ def evaluate_against_checkpoint(
     Play the promotion-gate match between the candidate (`current_network`) and
     the reigning champion (`opponent_network`). Returns the candidate's win rate.
 
-    Games are independent, so they are played across a process pool the same
-    way self-play is — the gate is the most expensive phase of an iteration
-    (two MCTS searches per move instead of one), so running it sequentially was
-    leaving most of the machine idle. `num_workers=1` forces the old in-process
-    path, which is also the automatic fallback if the pool cannot be created.
+    Games are independent, so they are played across the shared process pool
+    (`ai/worker_pool.py`) the same way self-play is — the gate is the most
+    expensive phase of an iteration (two MCTS searches per move instead of one),
+    so running it sequentially was leaving most of the machine idle.
+    `num_workers=1` forces the old in-process path, which is also the automatic
+    fallback if the pool cannot be created.
+
+    A win rate is computed over the games that were actually DECIDED. A worker
+    that dies is excluded from the denominator rather than counted as a
+    candidate loss: a crashed process is not evidence about a network, and
+    treating it as one lets an unrelated failure (an OOM, a killed pool) reject
+    a candidate that was never measured.
 
     Every game is recorded to `games_dir` (when given) under the iteration's
     `promotion/` directory, tagged with which side each network played, so the
@@ -197,6 +210,8 @@ def evaluate_against_checkpoint(
 
     import concurrent.futures
     import os
+
+    from ai import worker_pool
 
     def _task(game_idx: int) -> dict:
         return {
@@ -222,7 +237,8 @@ def evaluate_against_checkpoint(
     if workers > 1:
         try:
             wins = 0
-            completed = 0
+            completed = 0   # games that produced a verdict
+            failed = 0      # workers that died — never a verdict
             active_futures = {}  # future -> game_idx
             next_task_idx = 0
 
@@ -230,49 +246,68 @@ def evaluate_against_checkpoint(
                 if not progress_callback:
                     return
                 active_nums = sorted([idx + 1 for idx in active_futures.values()])
+                # PROGRESS counts every resolved slot, including a game whose
+                # worker died. The win rate below deliberately does not — but a
+                # progress bar that stalls one game short for the rest of the
+                # match is just a broken progress bar.
+                resolved = completed + failed
                 try:
-                    progress_callback(completed, num_games, active_games=active_nums, num_workers=workers, candidate_wins=wins)
+                    progress_callback(resolved, num_games, active_games=active_nums, num_workers=workers, candidate_wins=wins)
                 except TypeError:
                     try:
-                        progress_callback(completed, num_games, active_nums, workers)
+                        progress_callback(resolved, num_games, active_nums, workers)
                     except TypeError:
-                        progress_callback(completed, num_games)
+                        progress_callback(resolved, num_games)
 
-            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-                while next_task_idx < min(workers, num_games):
-                    f = executor.submit(_gate_worker, _task(next_task_idx))
-                    active_futures[f] = next_task_idx
-                    next_task_idx += 1
+            # Shared, long-lived pool — deliberately not a `with` block, which
+            # would tear down every worker interpreter at the end of the gate
+            # and pay to start them again next iteration.
+            executor = worker_pool.get_executor(workers)
 
-                _notify_progress()
+            while next_task_idx < min(workers, num_games):
+                f = executor.submit(_gate_worker, _task(next_task_idx))
+                active_futures[f] = next_task_idx
+                next_task_idx += 1
 
-                while active_futures:
-                    if stop_checker and stop_checker():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        break
+            _notify_progress()
 
-                    done, _ = concurrent.futures.wait(
-                        set(active_futures.keys()), timeout=0.1,
-                        return_when=concurrent.futures.FIRST_COMPLETED,
-                    )
-                    for future in done:
-                        game_idx = active_futures.pop(future)
-                        try:
-                            wins += future.result()
-                        except Exception as e:
-                            print(f"Gate worker failed: {e}")
+            while active_futures:
+                if stop_checker and stop_checker():
+                    for pending in active_futures:
+                        pending.cancel()
+                    active_futures.clear()
+                    break
 
+                done, _ = concurrent.futures.wait(
+                    set(active_futures.keys()), timeout=0.1,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    game_idx = active_futures.pop(future)
+                    try:
+                        wins += future.result()
                         completed += 1
+                    except Exception as e:
+                        # NOT counted as a candidate loss — see the docstring.
+                        failed += 1
+                        print(f"Gate worker failed: {e}")
 
-                        if next_task_idx < num_games and not (stop_checker and stop_checker()):
-                            new_f = executor.submit(_gate_worker, _task(next_task_idx))
-                            active_futures[new_f] = next_task_idx
-                            next_task_idx += 1
+                    if next_task_idx < num_games and not (stop_checker and stop_checker()):
+                        new_f = executor.submit(_gate_worker, _task(next_task_idx))
+                        active_futures[new_f] = next_task_idx
+                        next_task_idx += 1
 
-                        _notify_progress()
+                    _notify_progress()
 
-            # Score against the games that actually finished, so an interrupted
-            # or partially failed match is not read as a pile of losses.
+            if failed:
+                print(f"Gate: {failed} of {failed + completed} games failed to "
+                      f"complete and were excluded from the win rate")
+
+            # Score against the games that actually produced a result, so an
+            # interrupted or partially failed match is not read as a pile of
+            # losses. A match where NOTHING completed returns 0.0, which the
+            # trainer treats as a rejection — the safe direction, since the
+            # champion is kept.
             return wins / max(completed, 1)
         except Exception as e:
             print(f"Gate pool unavailable ({e}); falling back to sequential")

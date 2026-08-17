@@ -12,6 +12,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from console import use_utf8_console
+
 
 def main():
     from web.app import create_app, socketio
@@ -21,6 +23,11 @@ def main():
                         help='Port to run on (defaults to $PORT, else 5000)')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     args = parser.parse_args()
+
+    # Before the first print: the banner below contains an emoji, and on a
+    # cp1252 Windows console printing it raises rather than degrading — which
+    # would kill the process before socketio.run() ever binds the port.
+    use_utf8_console()
 
     app = create_app()
     print(f"\n🎯 Go AI server starting on http://localhost:{args.port}")

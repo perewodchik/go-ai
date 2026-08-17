@@ -493,17 +493,19 @@
         <section id="parallel-workers" class="param-card glass" data-category="compute" data-keywords="parallel workers compute cpu multiprocessing cores process pool">
             <div class="param-head">
                 <h3 class="param-name">Parallel Workers <span class="param-sub">all game-playing phases</span></h3>
-                <span class="rec-pill">Recommended: 4–6</span>
+                <span class="rec-pill">Recommended: your core count, minus a couple</span>
             </div>
             <p class="param-desc">
-                Governs the CPU `ProcessPoolExecutor` size used across all three game-playing phases: 
-                <strong>Self-play</strong>, <strong>Promotion Gate</strong>, and <strong>Random Bot Eval</strong>.
+                Governs the shared CPU process pool used by both game-playing phases:
+                <strong>Self-play</strong> and the <strong>Promotion Gate</strong>.
+                The slider's maximum is <strong>this machine's logical core count</strong>, not a
+                fixed number — the pool clamps itself to the cores and to the game count anyway.
             </p>
             <details class="param-details">
                 <summary class="details-summary">View Concurrency Mechanics & Core Scaling</summary>
                 <div class="tradeoff-grid" style="margin-top: 0.8rem;">
                     <div class="tradeoff-col tradeoff-up">
-                        <span class="tradeoff-tag">More (6–8)</span>
+                        <span class="tradeoff-tag">More</span>
                         A batch finishes only when its slowest game completes; utilizing all cores (Performance + Efficiency) significantly shortens wall-clock time.
                     </div>
                     <div class="tradeoff-col tradeoff-down">
@@ -512,10 +514,20 @@
                     </div>
                 </div>
                 <div class="param-sub-info">
-                    <strong>MPS GPU Isolation:</strong> Workers run on CPU using the CPU-resident champion model. The PyTorch MPS/CUDA training network is never pickled into worker processes, avoiding MPS concurrency limits.
+                    <strong>This is a CPU number, even on a GPU machine.</strong> Workers run on CPU
+                    using the CPU-resident champion model — one MCTS at batch size 1 is faster on a
+                    core than through a GPU launch, and N workers cannot share one GPU without N
+                    contexts and N copies of the weights. The CUDA/MPS training network is never
+                    pickled into a worker; the GPU's job is the gradient steps, in the main process.
+                </div>
+                <div class="param-sub-info">
+                    <strong>The pool is shared and long-lived.</strong> It is created once per
+                    training run rather than once per phase: on Windows (and macOS) a worker is a
+                    fresh interpreter that must import torch, so rebuilding an 18-worker pool twice
+                    an iteration costs more than the games it runs.
                 </div>
             </details>
-            <div class="param-meta">Range: 1–8 &nbsp;·&nbsp; Default: 4 &nbsp;·&nbsp; Memory: ~350 MB per active worker process.</div>
+            <div class="param-meta">Range: 1–(cores on this machine) &nbsp;·&nbsp; Default: cores − 2 &nbsp;·&nbsp; Memory: ~350 MB per active worker process.</div>
         </section>
 
         <!-- Promotion Gate Parameters Summary -->

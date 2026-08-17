@@ -35,7 +35,9 @@ from typing import List, Optional, Callable, Dict
 from collections import deque
 from datetime import datetime
 
+import device_info
 from config import Config, elo_to_rank, simulations_for_board
+from ai import worker_pool
 from ai.network import GoNetwork
 from ai.self_play import run_self_play_batch, TrainingSample
 from ai.evaluator import (evaluate_against_checkpoint, performance_elo_gap,
@@ -165,17 +167,47 @@ class Trainer:
         ).to("cpu")
         self.eval_network.eval()
         
+        # Which device the GRADIENT STEPS run on. Self-play and the gate always
+        # run on CPU workers regardless — see ai/worker_pool.py.
+        #
+        # `is_available()` is a claim, not a guarantee: a CUDA build with too
+        # old a driver, or an MPS build hitting an unimplemented op, both fail
+        # at the first real forward pass. So the claim is tested with THIS
+        # model's real network before it is believed, and the reason for any
+        # fallback is kept — a silent demotion to CPU is the difference between
+        # a two-hour run and a two-day one, and it should never be invisible.
         device = config.training.device
-        # MPS doesn't support all operations; fallback gracefully
+        self.device_note = ""
         try:
             self.network = self.network.to(device)
             test_input = torch.randn(1, config.network.num_input_planes,
                                       config.board.size, config.board.size).to(device)
             self.network(test_input)  # Test forward pass
             self.device = device
-        except Exception:
+        except Exception as e:
             self.device = "cpu"
             self.network = self.network.to("cpu")
+            if device != "cpu":
+                self.device_note = (
+                    f"{device} was requested but failed a test forward pass "
+                    f"({e}) — training on CPU.")
+
+        # Hardware description for the UI badge (name, VRAM, core counts). Read
+        # once here so a status poll never touches the CUDA driver.
+        self.hardware = device_info.summary()
+        if self.device != device_info.detect().torch_device:
+            # The badge must describe what is actually running, not what the
+            # machine has. A demoted run says CPU — including in the sentence
+            # that explains the GPU/CPU split, which would otherwise claim the
+            # gradient steps are on a device nothing is using.
+            dev = self.hardware['device']
+            dev['torch_device'] = self.device
+            dev['kind'] = self.device
+            dev['label'] = self.device.upper()
+            dev['is_gpu'] = False
+            self.hardware['roles'] = device_info.roles_for(dev['label'])
+        if self.device_note:
+            self.hardware['device']['note'] = self.device_note
         
         # Optimizer
         self.optimizer = optim.Adam(
@@ -591,7 +623,10 @@ class Trainer:
         
         self._set_stage('self_play', 'Starting Training', 1, 0, 0, [], 0, 'Initializing iteration')
         self._emit('training_started', 'Training started')
-        
+        self._emit_hardware_banner()
+        self._warn_recording_volume()
+
+
         try:
             while not self._stop_requested and not self._force_stop_requested:
                 if max_iterations and self.iteration >= max_iterations:
@@ -813,6 +848,11 @@ class Trainer:
             raise
         finally:
             self.is_running = False
+            # Hand the worker interpreters back. They are kept alive ACROSS
+            # iterations (starting ~18 of them costs seconds on a spawn
+            # platform) but not across runs — that would be gigabytes of idle
+            # resident memory for as long as the server is up.
+            worker_pool.shutdown(wait=False)
             if self._force_stop_requested:
                 # Reload clean weights from disk from last saved completed iteration
                 self._try_load_weights()
@@ -826,6 +866,68 @@ class Trainer:
                 self._set_stage('idle', 'Idle', 0, 0, 0, [], 0, f'Ready · Iteration {self.iteration} · Elo {self.elo:.0f}')
                 self._emit('training_stopped', 'Training stopped')
     
+    def _emit_hardware_banner(self) -> None:
+        """
+        Say what this run is actually using, once, at the top of the log.
+
+        Two devices are in play every iteration and conflating them is the
+        usual source of "my GPU is idle" — the gradient steps run on
+        self.device, the games run on CPU worker processes.
+        """
+        dev = self.hardware['device']
+        cpu = self.hardware['cpu']
+        workers = max(1, min(self.config.training.num_parallel_workers,
+                             cpu['logical_cores']))
+        where = dev.get('detail') or dev.get('label') or self.device.upper()
+        self._emit('info',
+                   f"🖥 Training on {where} · {workers} CPU worker"
+                   f"{'' if workers == 1 else 's'} for games "
+                   f"({cpu['logical_cores']} logical cores)")
+        if self.device_note:
+            self._emit('warning', f'⚠️ {self.device_note}')
+        elif dev.get('note'):
+            self._emit('info', dev['note'])
+
+    def _warn_recording_volume(self) -> None:
+        """
+        Warn when full game records are being written at high game volume.
+
+        Recording is per-game bytes against a per-iteration game count, so the
+        two settings that make it expensive are exactly the ones a fast machine
+        raises. Every chart on the training page is drawn from
+        games/index.jsonl, which is written either way — turning recording off
+        costs the ability to REPLAY those games and nothing else.
+        """
+        from param_bounds import (BYTES_PER_STORED_GAME_9X9,
+                                  RECORDING_VOLUME_WARN_GAMES, format_bytes)
+
+        cfg = self.config.training
+        # Per PHASE, matching the slider panel's rule exactly — the toggles are
+        # per phase, so "which one is expensive" is the actionable question, and
+        # a trainer that warned on the sum while the UI warned on each was two
+        # different rules wearing the same words.
+        phases = []
+        if cfg.record_self_play_games:
+            phases.append(('Self-play', cfg.num_self_play_games))
+        if cfg.record_gate_games and cfg.gate_enabled:
+            phases.append(('Gate', cfg.gate_games))
+
+        loud = [(label, n) for label, n in phases
+                if n >= RECORDING_VOLUME_WARN_GAMES]
+        if not loud:
+            return
+
+        area_scale = (self.config.board.size ** 2) / 81.0
+        per_iter = sum(n for _, n in phases) * BYTES_PER_STORED_GAME_9X9 * area_scale
+        detail = ', '.join(f'{label} {n} games' for label, n in loud)
+        self._emit('warning',
+                   f'⚠️ Game recording is on at high volume ({detail}) — '
+                   f'{format_bytes(per_iter)} per iteration, '
+                   f'{format_bytes(per_iter * 100)} per 100 iterations, and '
+                   f'nothing ever deletes them. Every chart is drawn from the '
+                   f'games index, not these records — turn recording off under '
+                   f'Game Recording unless you intend to replay them.')
+
     def _cpu_copy(self, source: GoNetwork) -> GoNetwork:
         """Build a CPU-resident clone of `source` for head-to-head evaluation."""
         clone = GoNetwork(
@@ -1564,6 +1666,10 @@ class Trainer:
             'kyu_rank': elo_to_rank(self.elo),
             'buffer_size': len(self.replay_buffer),
             'device': self.device,
+            # Full hardware description: what the badge says, what the tooltip
+            # explains, and the core counts the worker slider is bounded by.
+            'hardware': self.hardware,
+            'num_parallel_workers': self.config.training.num_parallel_workers,
             'current_stage': self.current_stage,
             'recent_logs': list(self.recent_logs),
             'metrics_history': self.metrics_history[-50:],  # Last 50 entries

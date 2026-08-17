@@ -1351,6 +1351,10 @@
         setFieldsDisabled(false);
 
         await initModalParams();
+        // A brand-new model has no stored preference, so the recording toggles
+        // start off when its game counts make recording expensive. Only on
+        // create — an existing model's choice is never overridden.
+        if (state.bounds) applyRecordingDefaults('modal-param', state.bounds);
         setNetLocked(false);
         await loadNetworkPresets(9);
         el('create-model-modal').style.display = 'flex';
@@ -1583,6 +1587,9 @@
         }
         el('new-model-board-size').addEventListener('change', (e) => {
             loadNetworkPresets(parseInt(e.target.value, 10) || 9);
+            // A stored game scales with board area, so the disk estimate under
+            // the recording toggles is only right for the size now selected.
+            if (state.bounds) updateStorageWarnings('modal-param', state.bounds);
             const warn = el('model-form-warning');
             if (modal.mode === 'edit' && modal.model && modal.model.iterations_logged > 0
                 && parseInt(e.target.value, 10) !== modal.model.board_size) {

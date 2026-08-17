@@ -4,10 +4,11 @@ Global configuration for the Go AI project.
 All tuneable parameters live here. Change board size, network architecture,
 training hyperparameters, and paths in one place.
 
-NOTE ON M2 MACBOOK AIR:
-- PyTorch MPS backend is used when available (Apple Silicon GPU)
-- Expect ~5-10 self-play games/min on 9x9 with 200 MCTS simulations
-- Visible improvement within 2-4 hours, ~15-20 kyu in 8-12 hours
+DEVICE:
+- The training device (CUDA / MPS / CPU) is detected in device_info.py, which
+  also owns the worker-count policy. See its module docstring for why the
+  worker count is a CPU number even on a GPU machine.
+- Expect ~5-10 self-play games/min on 9x9 with 200 MCTS simulations on an M2.
 """
 
 import os
@@ -15,14 +16,17 @@ import torch
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+import device_info
+
 
 def _get_device() -> str:
-    """Pick the best available device: MPS (Apple Silicon) > CUDA > CPU."""
-    if torch.backends.mps.is_available():
-        return "mps"
-    elif torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+    """
+    Pick the best available device: CUDA > MPS > CPU.
+
+    Delegates to device_info.detect() so the string here, the badge in the web
+    UI and the hardware report all come from one probe.
+    """
+    return device_info.detect().torch_device
 
 
 @dataclass
@@ -193,12 +197,19 @@ class TrainingConfig:
     
     # Self-play
     num_self_play_games: int = 5           # Games per iteration before training (Reduced for faster iterations)
-    # Worker processes for EVERY game-playing phase — self-play, the promotion
-    # gate, and the random-bot eval. All three play independent games on CPU,
-    # so they share one setting. Capped at the CPU count and at the number of
-    # games in that phase. (M2 has 4P+4E cores; 6 measures faster than 4 there,
-    # since 4 workers leave the E-cores idle while stragglers hold up the batch.)
-    num_parallel_workers: int = 4
+    # Worker processes for EVERY game-playing phase — self-play and the
+    # promotion gate. Both play independent games on CPU, so they share one
+    # setting. Capped at the CPU count and at the number of games in that phase.
+    #
+    # The default is derived from THIS machine rather than hardcoded: a model
+    # config that stores no value (or a null) should run well on whatever
+    # hardware it is opened on, and 4 workers on a 20-thread desktop leaves
+    # most of the machine idle. device_info.recommended_workers() reserves a
+    # couple of cores for the server and trainer threads.
+    #
+    # Evaluated at class-creation time, so this stays a plain int default and
+    # `_model_default` can keep reading it off __dataclass_fields__.
+    num_parallel_workers: int = device_info.recommended_workers()
     
     # Replay buffer
     replay_buffer_size: int = 50_000       # Max training samples to keep

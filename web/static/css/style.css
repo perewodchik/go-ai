@@ -457,6 +457,21 @@ body {
 }
 .param-slider-warn[hidden] { display: none; }
 
+/* Stronger than the amber "this wastes a worker" note: `is-danger` marks a
+   setting that will keep costing disk for as long as the run lasts. */
+.param-slider-warn.is-danger {
+    color: #ff8a80;
+    background: rgba(244, 67, 54, 0.1);
+    border-color: rgba(244, 67, 54, 0.32);
+}
+
+/* The toggle groups lay their children out in a column, so a warning appended
+   after the label has to span the full width rather than sit beside it. */
+.param-toggle-group .param-slider-warn {
+    width: 100%;
+    margin-top: 0.4rem;
+}
+
 /* Boolean params render as a toggle rather than a range input. */
 .param-toggle {
     display: flex;
@@ -4074,6 +4089,41 @@ details.phase-group > summary:not(.group-summary-2row) {
     color: #e0e0e0;
 }
 
+/* GPU-backed run. The green is evidence, not decoration: training.js only adds
+   `is-gpu` when the trainer actually resolved onto CUDA/MPS and survived a test
+   forward pass, so a machine with a card it cannot use stays grey. */
+.status-meta-badge.device-badge.is-gpu {
+    border-color: rgba(118, 255, 163, 0.45);
+    background: linear-gradient(135deg, rgba(0, 200, 83, 0.18) 0%, rgba(0, 200, 83, 0.06) 100%);
+    box-shadow: 0 0 0 1px rgba(118, 255, 163, 0.08), 0 0 12px rgba(0, 200, 83, 0.15);
+}
+
+.status-meta-badge.device-badge.is-gpu .meta-badge-v {
+    color: #76ffa3;
+    letter-spacing: 0.02em;
+}
+
+.status-meta-badge.device-badge.is-gpu .meta-badge-k::before {
+    content: '⚡';
+    margin-right: 0.25rem;
+    font-size: 0.8rem;
+    letter-spacing: 0;
+}
+
+.meta-badge-sub {
+    color: var(--text-muted);
+    font-size: 0.68rem;
+    line-height: 1;
+    max-width: 12ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.meta-badge-sub[hidden] {
+    display: none;
+}
+
 /* 5-Stage Stepper Track */
 .pipeline-stepper-wrap {
     padding: 1rem 0 0.85rem;
@@ -4382,6 +4432,147 @@ details.phase-group > summary:not(.group-summary-2row) {
     color: #81c784;
     font-style: normal;
     font-weight: 600;
+}
+
+/* ---- High-concurrency parallel view -------------------------------------
+   One pill per game is readable at 4 workers and unreadable at 20. Past
+   PARALLEL_PILL_LIMIT (training.js) the arena switches to this: a fixed
+   summary line, a worker meter that shows saturation at a glance, and one
+   small cell per game in the phase. Nothing here reflows as games finish —
+   the cells only change colour — so a 100-game phase updating twice a second
+   stays still. */
+
+.parallel-arena-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.6rem;
+}
+
+.parallel-legend {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.pl-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    white-space: nowrap;
+}
+
+.pl-item b {
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+}
+
+.pl-item i {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.pl-running i {
+    background: #66bb6a;
+    box-shadow: 0 0 6px rgba(102, 187, 106, 0.7);
+}
+
+.pl-done i {
+    background: rgba(129, 199, 132, 0.4);
+}
+
+.pl-queued i {
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.parallel-worker-meter {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.pwm-bars {
+    display: inline-flex;
+    gap: 2px;
+    align-items: flex-end;
+}
+
+.pwm-bar {
+    width: 4px;
+    height: 14px;
+    border-radius: 1px;
+    background: rgba(255, 255, 255, 0.12);
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.pwm-bar.is-busy {
+    background: #66bb6a;
+    box-shadow: 0 0 5px rgba(102, 187, 106, 0.6);
+}
+
+.pwm-count {
+    color: var(--text-primary);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+}
+
+.game-grid-wrap[hidden] {
+    display: none;
+}
+
+.active-games-grid[hidden] {
+    display: none;
+}
+
+.game-grid {
+    display: grid;
+    /* auto-fill rather than a fixed column count: the same markup has to look
+       deliberate at 20 games and at 100. */
+    grid-template-columns: repeat(auto-fill, minmax(14px, 1fr));
+    gap: 3px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.game-cell {
+    display: block;
+    height: 14px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.08);
+    transition: background 0.25s ease, box-shadow 0.25s ease;
+}
+
+.game-cell.is-done {
+    background: rgba(129, 199, 132, 0.45);
+}
+
+.game-cell.is-running {
+    background: #66bb6a;
+    box-shadow: 0 0 7px rgba(102, 187, 106, 0.75);
+    animation: spinDot 1.4s infinite ease-in-out;
+}
+
+.game-cell.is-queued {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.game-grid-caption {
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
 }
 
 /* NN Training Step Arena */

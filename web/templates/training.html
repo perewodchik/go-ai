@@ -29,13 +29,17 @@
                     <span class="meta-badge-k">Games</span>
                     <strong class="meta-badge-v" id="status-games-badge">{{ status.total_games or 0 }}</strong>
                 </div>
-                <div class="status-meta-badge workers-badge" id="status-workers-badge" title="Number of parallel worker processes">
+                <div class="status-meta-badge workers-badge" id="status-workers-badge" title="CPU worker processes playing games in parallel">
                     <span class="meta-badge-k">Workers</span>
                     <strong class="meta-badge-v" id="status-workers-count">—</strong>
                 </div>
-                <div class="status-meta-badge device-badge" title="Compute hardware">
+                <!-- Device badge. `is-gpu` is added by training.js when the run
+                     really resolved onto a GPU, so the colour is evidence and
+                     not decoration; the hardware name sits underneath. -->
+                <div class="status-meta-badge device-badge" id="status-device-wrap" title="Compute hardware">
                     <span class="meta-badge-k">Device</span>
                     <strong class="meta-badge-v" id="status-device-badge">{{ (status.device or 'CPU')|upper }}</strong>
+                    <small class="meta-badge-sub" id="status-device-name"></small>
                 </div>
             </div>
 
@@ -122,9 +126,34 @@
                     <div class="stage-progress-bar-fill" id="stage-progress-fill" style="width: 0%;"></div>
                 </div>
 
-                <!-- Parallel Games Visualizer (active during game generation phases) -->
+                <!-- Parallel Games Visualizer (active during game generation phases).
+                     Two layouts, chosen by training.js from the number of games
+                     actually in flight: a readable pill per game while there
+                     are a handful, and a worker meter + one cell per game once
+                     there are more pills than anyone can read. -->
                 <div class="parallel-games-arena" id="parallel-games-arena" style="display: none;">
+                    <div class="parallel-arena-head">
+                        <div class="parallel-legend">
+                            <span class="pl-item pl-running"><i></i><b id="pg-running">0</b> running</span>
+                            <span class="pl-item pl-done"><i></i><b id="pg-done">0</b> done</span>
+                            <span class="pl-item pl-queued"><i></i><b id="pg-queued">0</b> queued</span>
+                        </div>
+                        <div class="parallel-worker-meter" id="pg-worker-meter"
+                             title="One segment per worker process; lit while that worker is playing a game.">
+                            <span class="pwm-label">Workers</span>
+                            <span class="pwm-bars" id="pg-worker-bars"></span>
+                            <span class="pwm-count" id="pg-worker-count">0 / 0</span>
+                        </div>
+                    </div>
+
+                    <!-- Low concurrency: one pill per running game -->
                     <div class="active-games-grid" id="active-games-container"></div>
+
+                    <!-- High concurrency: one cell per game in the phase -->
+                    <div class="game-grid-wrap" id="game-grid-wrap" hidden>
+                        <div class="game-grid" id="game-grid"></div>
+                        <div class="game-grid-caption" id="game-grid-caption"></div>
+                    </div>
                 </div>
 
                 <!-- NN Training Step Readout (active during Stage 2) -->
@@ -518,6 +547,11 @@
 <!-- Lightweight action toast -->
 <div id="action-toast" class="toast" style="display:none;"></div>
 <script id="initial-status-data" type="application/json">{{ (status or {})|tojson }}</script>
+<script>
+    // Board area prices a stored game record, and the live-tuning panel has no
+    // board-size field of its own to read it from.
+    window.ACTIVE_BOARD_SIZE = {{ active_model.board_size or 9 }};
+</script>
 {% endif %}
 {% endblock %}
 

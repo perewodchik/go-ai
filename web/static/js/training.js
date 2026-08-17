@@ -50,6 +50,170 @@ function syncButtonStates(isRunning, stopRequested = false) {
     }
 }
 
+// ---- Device badge ----
+// The status payload carries a `hardware` block (see device_info.py): what the
+// gradient steps run on, plus the hardware's own name. The badge shows the
+// device the run RESOLVED onto — a CUDA build that failed its first forward
+// pass reports CPU here, because that is what is actually training.
+let lastHardware = null;
+
+function renderDeviceBadge(d, stage) {
+    const badge = document.getElementById('status-device-badge');
+    const nameEl = document.getElementById('status-device-name');
+    const wrap = document.getElementById('status-device-wrap');
+    const heroDevice = document.getElementById('t-device');
+
+    const hw = d.hardware || lastHardware;
+    if (hw) lastHardware = hw;
+
+    const dev = d.device || (stage && stage.device) || (hw && hw.device && hw.device.torch_device);
+    if (!dev) return;
+
+    const info = (hw && hw.device) || {};
+    const isGpu = Boolean(info.is_gpu) && info.torch_device === dev;
+    const label = (info.label && info.torch_device === dev) ? info.label : dev.toUpperCase();
+
+    if (badge) badge.textContent = label;
+    if (heroDevice) heroDevice.textContent = label;
+
+    if (nameEl) {
+        // Short name only — "NVIDIA GeForce RTX 3070 Ti Laptop GPU" does not fit
+        // a badge, and the vendor prefix is the least informative part of it.
+        const short = (info.name || '').replace(/^NVIDIA\s+/i, '').replace(/\s+Laptop GPU$/i, '');
+        nameEl.textContent = isGpu ? short : '';
+        nameEl.hidden = !isGpu || !short;
+    }
+
+    if (wrap) {
+        wrap.classList.toggle('is-gpu', isGpu);
+        wrap.classList.toggle('is-cpu', !isGpu);
+        const parts = [];
+        if (info.detail) parts.push(info.detail);
+        if (hw && hw.roles && hw.roles.explanation) parts.push(hw.roles.explanation);
+        if (info.note) parts.push('⚠ ' + info.note);
+        if (parts.length) wrap.title = parts.join('\n\n');
+    }
+}
+
+// ---- Parallel games visualiser ----
+// Above this many games in flight, one pill per game stops being readable and
+// starts being a wall — 20 workers produce 20 pills that reflow on every
+// update. Past it the arena switches to a worker meter plus one small cell per
+// game, which stays legible at 100.
+const PARALLEL_PILL_LIMIT = 8;
+// Above this many games in a phase, drawing a cell each is more noise than
+// signal, so the grid is dropped and the counts carry it.
+const GAME_GRID_CELL_LIMIT = 240;
+
+function renderParallelArena(stage) {
+    const total = stage.total_items || 0;
+    const active = stage.active_games || [];
+    const done = stage.completed_items || 0;
+    const workers = stage.num_workers || 0;
+
+    // Games are dealt out strictly in order, so everything up to
+    // done + running has been started and everything after it is queued.
+    const started = Math.min(total, done + active.length);
+    const queued = Math.max(0, total - started);
+
+    const setText = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val;
+    };
+    setText('pg-running', active.length);
+    setText('pg-done', done);
+    setText('pg-queued', queued);
+    setText('pg-worker-count', `${active.length} / ${workers}`);
+
+    // Worker meter: one segment per worker process, lit while it holds a game.
+    const bars = document.getElementById('pg-worker-bars');
+    if (bars) {
+        const busy = Math.min(active.length, workers);
+        if (bars.childElementCount !== workers) {
+            bars.innerHTML = Array.from({ length: workers },
+                () => '<i class="pwm-bar"></i>').join('');
+        }
+        Array.from(bars.children).forEach((bar, i) => {
+            bar.classList.toggle('is-busy', i < busy);
+        });
+    }
+
+    const pillContainer = document.getElementById('active-games-container');
+    const gridWrap = document.getElementById('game-grid-wrap');
+    const grid = document.getElementById('game-grid');
+    const caption = document.getElementById('game-grid-caption');
+
+    // Decided by the WORKER COUNT, not by how many games happen to be in
+    // flight right now: the worker count is fixed for the phase, so the layout
+    // cannot flip back to pills when the final wave runs short. The
+    // active-count clause is a safety net for a phase that somehow reports more
+    // games running than workers.
+    const dense = workers > PARALLEL_PILL_LIMIT || active.length > PARALLEL_PILL_LIMIT;
+
+    if (!dense) {
+        if (gridWrap) gridWrap.hidden = true;
+        if (pillContainer) {
+            pillContainer.hidden = false;
+            if (active.length > 0) {
+                pillContainer.innerHTML = active.map(num => `
+                    <div class="parallel-game-pill is-running">
+                        <span class="game-spin-dot"></span>
+                        <span class="game-pill-num">Game #${num}</span>
+                        <span class="game-pill-tag">Running</span>
+                    </div>
+                `).join('');
+            } else if (done >= total && total > 0) {
+                pillContainer.innerHTML =
+                    `<div class="parallel-all-done">✓ All ${total} games completed for this stage</div>`;
+            } else {
+                pillContainer.innerHTML =
+                    `<div class="parallel-waiting">Launching parallel workers...</div>`;
+            }
+        }
+        return;
+    }
+
+    if (pillContainer) {
+        pillContainer.hidden = true;
+        pillContainer.innerHTML = '';
+    }
+    if (!gridWrap || !grid) return;
+    gridWrap.hidden = false;
+
+    if (total > GAME_GRID_CELL_LIMIT) {
+        grid.innerHTML = '';
+        if (caption) {
+            caption.textContent =
+                `${active.length} games running in parallel across ${workers} workers · ` +
+                `${done} of ${total} finished`;
+        }
+        return;
+    }
+
+    // Rebuild the cells only when the phase changes size; otherwise just
+    // restyle them, so a 100-cell grid does not thrash the DOM twice a second.
+    if (grid.childElementCount !== total) {
+        grid.innerHTML = Array.from({ length: total },
+            (_, i) => `<i class="game-cell" data-num="${i + 1}"></i>`).join('');
+    }
+    const runningSet = new Set(active);
+    Array.from(grid.children).forEach((cell, i) => {
+        const num = i + 1;
+        const state = runningSet.has(num) ? 'running' : (num <= started ? 'done' : 'queued');
+        if (cell.dataset.state !== state) {
+            cell.dataset.state = state;
+            cell.className = `game-cell is-${state}`;
+            cell.title = `Game #${num} — ${state}`;
+        }
+    });
+
+    if (caption) {
+        caption.textContent =
+            `${active.length} in parallel on ${workers} workers · ` +
+            `${done} done · ${queued} queued`;
+    }
+}
+
 // ---- Live Status & Pipeline Stepper & Parallel Games Renderer ----
 function renderLiveStatus(data) {
     if (!data) return;
@@ -124,11 +288,7 @@ function renderLiveStatus(data) {
     if (workersBadge) {
         workersBadge.textContent = numWorkers > 0 ? `${numWorkers} active` : '—';
     }
-    const dev = d.device || stage.device;
-    if (dev) {
-        if (deviceBadge) deviceBadge.textContent = dev.toUpperCase();
-        if (heroDevice) heroDevice.textContent = dev.toUpperCase();
-    }
+    renderDeviceBadge(d, stage);
 
     // 3. Pipeline Stepper (5 stages)
     const stageKey = stage.stage || (isRunning ? 'self_play' : 'idle');
@@ -197,7 +357,6 @@ function renderLiveStatus(data) {
     const parallelArena = document.getElementById('parallel-games-arena');
     const nnArena = document.getElementById('nn-step-arena');
     const activeCountEl = document.getElementById('active-parallel-count');
-    const activeContainer = document.getElementById('active-games-container');
     const compSummary = document.getElementById('completed-games-summary');
     const queueSummary = document.getElementById('queued-games-summary');
 
@@ -208,27 +367,16 @@ function renderLiveStatus(data) {
         if (nnArena) nnArena.style.display = 'none';
 
         const activeGames = stage.active_games || [];
+        // Legacy summary nodes, kept in sync for the older template that still
+        // has them; the arena itself now owns these counts.
         if (activeCountEl) activeCountEl.textContent = activeGames.length;
         if (compSummary) compSummary.textContent = `✓ ${stage.completed_items || 0} finished`;
-
-        const remaining = Math.max(0, stage.total_items - (stage.completed_items || 0) - activeGames.length);
-        if (queueSummary) queueSummary.textContent = `${remaining} queued`;
-
-        if (activeContainer) {
-            if (activeGames.length > 0) {
-                activeContainer.innerHTML = activeGames.map(num => `
-                    <div class="parallel-game-pill is-running">
-                        <span class="game-spin-dot"></span>
-                        <span class="game-pill-num">Game #${num}</span>
-                        <span class="game-pill-tag">Running</span>
-                    </div>
-                `).join('');
-            } else if (stage.completed_items >= stage.total_items) {
-                activeContainer.innerHTML = `<div class="parallel-all-done">✓ All ${stage.total_items} games completed for this stage</div>`;
-            } else {
-                activeContainer.innerHTML = `<div class="parallel-waiting">Launching parallel workers...</div>`;
-            }
+        if (queueSummary) {
+            const remaining = Math.max(0, stage.total_items - (stage.completed_items || 0) - activeGames.length);
+            queueSummary.textContent = `${remaining} queued`;
         }
+
+        renderParallelArena(stage);
     } else if (stageKey === 'training' && isRunning) {
         if (parallelArena) parallelArena.style.display = 'none';
         if (nnArena) nnArena.style.display = 'block';

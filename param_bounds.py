@@ -4,7 +4,51 @@ param_bounds.py — Centralized bounds and categories for training & MCTS parame
 Edit this file if you need to adjust parameter bounds (min, max, step, category, default, label, hint).
 Both backend validation and frontend sliders (Create Model, Edit Model, Live Tuning)
 derive their configuration from this single authoritative file.
+
+ONE BOUND IS HOST-DEPENDENT. `num_parallel_workers` cannot have a fixed maximum:
+the pools cap themselves at the core count anyway, so a hardcoded 8 was simply a
+20-thread machine's slider refusing to offer 12 of its cores. Its max and
+default come from device_info, which is deliberately torch-free so importing
+this file stays cheap. Everything else here is a constant.
 """
+
+import device_info
+
+# Slider ceiling for the worker count on THIS machine. Floored at 8 so the
+# bound never gets tighter than the one this project shipped with, which also
+# means a model config carrying 8 workers stays inside the slider's range when
+# it is opened on a 4-core laptop.
+MAX_PARALLEL_WORKERS = device_info.worker_ceiling()
+DEFAULT_PARALLEL_WORKERS = device_info.recommended_workers()
+
+# --- Recording volume ------------------------------------------------------
+# Bytes one stored game costs, measured on 9x9 self-play records (~12 KB) and
+# scaled by board area for other sizes. Used by the UI to price the recording
+# toggles before the disk fills rather than after.
+BYTES_PER_STORED_GAME_9X9 = 12_000
+# Games in ONE PHASE above which leaving that phase's recording on is a bad
+# default rather than a preference. Per phase, not summed, because the toggles
+# are per phase — "which one is expensive" is the actionable question. At 20
+# workers a single iteration can produce more games than a whole afternoon used
+# to, and nothing ever deletes them.
+RECORDING_VOLUME_WARN_GAMES = 24
+
+
+def format_bytes(num_bytes: float) -> str:
+    """
+    Bytes at a human scale, unit chosen by magnitude.
+
+    Fixed units do not survive the range this is used over: one iteration of
+    gate games is half a megabyte and a thousand iterations of them is half a
+    gigabyte. Rounding the first to "0 MB" told the reader the cost was nothing
+    in the same sentence that called it a problem. Mirrors formatBytes() in
+    web/static/js/param_sliders.js.
+    """
+    if num_bytes >= 1e9:
+        return f"{num_bytes / 1e9:.{0 if num_bytes >= 1e10 else 1}f} GB"
+    if num_bytes >= 1e6:
+        return f"{num_bytes / 1e6:.{0 if num_bytes >= 1e7 else 1}f} MB"
+    return f"{max(1, round(num_bytes / 1e3))} KB"
 
 PARAM_BOUNDS = {
     "num_simulations": {
@@ -173,9 +217,10 @@ PARAM_BOUNDS = {
         "hint": "Consecutive rejections before the candidate resets to champion",
     },
     # --- Compute -----------------------------------------------------------
-    # All three game-playing phases (self-play, gate, random eval) run their
-    # games across a process pool on CPU, so one worker count governs all of
-    # them rather than each phase carrying its own knob.
+    # Both game-playing phases (self-play, gate) run their games across a
+    # process pool on CPU, so one worker count governs both rather than each
+    # phase carrying its own knob. The GPU, when there is one, trains the
+    # network in the main process — it is not what this slider scales.
     "num_parallel_workers": {
         "key": "num_parallel_workers",
         "order": 10,
@@ -183,11 +228,12 @@ PARAM_BOUNDS = {
         "category": "compute",
         "category_label": "Compute & Parallelism",
         "min": 1,
-        "max": 8,
+        "max": MAX_PARALLEL_WORKERS,
         "step": 1,
-        "default": 4,
+        "default": DEFAULT_PARALLEL_WORKERS,
         "type": "int",
-        "hint": "Games played at once in self-play, gate and eval (1 = sequential)",
+        "hint": "CPU processes playing games at once in self-play and the gate "
+                "(1 = sequential). Capped at this machine's core count.",
     },
     # --- Move restrictions -------------------------------------------------
     # Heuristics that remove moves from the bot's action set. These are NOT
@@ -343,7 +389,8 @@ PARAM_BOUNDS = {
         "step": 1,
         "default": True,
         "type": "bool",
-        "hint": "Off = keep the stats, skip the replays (~12 KB/game on 9×9)",
+        "hint": "Off = keep the stats, skip the replays (~12 KB/game on 9×9). "
+                "Turn it off at high game counts — the charts do not read these files",
     },
     "record_gate_games": {
         "key": "record_gate_games",

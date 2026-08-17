@@ -13,6 +13,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config
+from console import use_utf8_console
 from ai.trainer import Trainer
 
 
@@ -37,6 +38,10 @@ def main():
     parser.add_argument('--simulations', type=int, default=200,
                         help='MCTS simulations per move')
     args = parser.parse_args()
+
+    # Every progress line below is emoji-decorated, and on a cp1252 Windows
+    # console that raises instead of degrading. See console.py.
+    use_utf8_console()
 
     config = Config()
     config.board.size = args.board_size

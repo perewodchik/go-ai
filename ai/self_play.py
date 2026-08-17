@@ -10,15 +10,15 @@ All games contribute training samples to the replay buffer regardless.
 N is set in config (game_store_every_n, default 5).
 
 MULTIPROCESSING NOTE:
-Self-play games are independent, so `run_self_play_batch` plays them across a
-ProcessPoolExecutor. This is the only path — there is no sequential branch;
-`num_workers=1` just means a pool of one.
+Self-play games are independent, so `run_self_play_batch` plays them across the
+shared process pool in `ai/worker_pool.py`. This is the only path — there is no
+sequential branch; `num_workers=1` just means a pool of one.
 
-That is safe on Apple Silicon specifically because the trainer hands this
-function its CPU-resident champion (`device="cpu"`), not the MPS training
-network — MPS does not share across processes, but nothing here touches it.
+That is safe on any GPU because the trainer hands this function its
+CPU-resident champion (`device="cpu"`), not the training network — neither MPS
+nor CUDA shares a context across processes, but nothing here touches one.
 Worker count is `config.training.num_parallel_workers`, shared with the
-promotion gate and the random-bot eval.
+promotion gate.
 """
 
 import os
@@ -472,13 +472,20 @@ def build_self_play_task(
 
 
 def _play_worker(kwargs: dict) -> Tuple[List[TrainingSample], dict]:
-    """Worker function for multiprocessing."""
+    """
+    Worker function for multiprocessing.
+
+    The thread cap and the per-worker reseeding both live in
+    `worker_pool._init_worker`, which runs once per process rather than once
+    per game. This is kept as a belt-and-braces call because the function is
+    also invoked directly by tests, outside any pool.
+    """
     import torch
     import time
-    
+
     # Prevent PyTorch from spawning many threads per worker, which causes CPU thrashing
     torch.set_num_threads(1)
-    
+
     start_time = time.time()
     samples, record = play_self_play_game(**kwargs)
     record['elapsed_seconds'] = round(time.time() - start_time, 2)
@@ -556,10 +563,11 @@ def run_self_play_batch(
     """
     all_samples = []
     os.makedirs(games_dir, exist_ok=True)
-    
+
     import concurrent.futures
-    import multiprocessing as mp
-    
+
+    from ai import worker_pool
+
     # Never more workers than there are games to play, or cores to play them on.
     num_workers = max(1, min(num_games, os.cpu_count() or 4, num_workers))
     
@@ -607,59 +615,85 @@ def run_self_play_batch(
                 if rec is not None:
                     progress_callback(completed_games, num_games, rec)
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Submit initial batch up to num_workers
-        while next_task_idx < min(num_workers, num_games):
-            f = executor.submit(_play_worker, tasks[next_task_idx])
-            active_futures[f] = next_task_idx
-            next_task_idx += 1
+    def _finish_game(game_index: int, samples, record) -> None:
+        """Book one finished game: samples, storage, progress. Shared by both paths."""
+        nonlocal completed_games
+        record['iteration'] = iteration
+        record['game_index'] = game_index
 
-        # Initial notification of active games
-        _notify_progress(None)
+        all_samples.extend(samples)
 
-        while active_futures:
+        # Index every Nth game, and write its full record only when
+        # recording is on — the index is what the charts read, so
+        # turning recording off costs replays, not statistics.
+        if completed_games % game_store_every_n == 0:
+            save_game(games_dir, iteration, PHASE_SELF_PLAY, game_index,
+                      record, store_full=record_games)
+
+        completed_games += 1
+
+    # The pool is shared and long-lived (see ai/worker_pool.py), so this block
+    # deliberately does NOT use `with`: shutting it down here would throw away
+    # every worker interpreter between the self-play phase and the gate.
+    try:
+        executor = worker_pool.get_executor(num_workers)
+    except Exception as e:
+        # A machine that cannot start a process pool at all still has to be
+        # able to train. One game at a time, in this process.
+        print(f"Worker pool unavailable ({e}); playing self-play games sequentially")
+        for game_index in range(num_games):
             if stop_checker and stop_checker():
-                executor.shutdown(wait=False, cancel_futures=True)
                 break
+            samples, record = _play_worker(tasks[game_index])
+            _finish_game(game_index, samples, record)
+            _notify_progress(record)
+        return all_samples
 
-            done, _ = concurrent.futures.wait(
-                set(active_futures.keys()), timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
-            )
+    # Submit initial batch up to num_workers
+    while next_task_idx < min(num_workers, num_games):
+        f = executor.submit(_play_worker, tasks[next_task_idx])
+        active_futures[f] = next_task_idx
+        next_task_idx += 1
 
-            for future in done:
-                game_index = active_futures.pop(future)
+    # Initial notification of active games
+    _notify_progress(None)
 
-                try:
-                    samples, record = future.result()
-                except Exception as e:
-                    print(f"Worker failed: {e}")
-                    # Tagged so the trainer does not count a game that never
-                    # happened towards total_games or the mercy-rule denominator.
-                    samples, record = [], {'moves': [], 'winner': 0, 'num_moves': 0,
-                                           'elapsed_seconds': 0, 'failed': True}
+    while active_futures:
+        if stop_checker and stop_checker():
+            # Cancel what has not started; the games already in flight are
+            # abandoned rather than waited on — their results are simply never
+            # read. Nothing shuts the shared pool down here.
+            for pending in active_futures:
+                pending.cancel()
+            active_futures.clear()
+            break
 
-                record['iteration'] = iteration
-                record['game_index'] = game_index
+        done, _ = concurrent.futures.wait(
+            set(active_futures.keys()), timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
+        )
 
-                all_samples.extend(samples)
+        for future in done:
+            game_index = active_futures.pop(future)
 
-                # Index every Nth game, and write its full record only when
-                # recording is on — the index is what the charts read, so
-                # turning recording off costs replays, not statistics.
-                if completed_games % game_store_every_n == 0:
-                    save_game(games_dir, iteration, PHASE_SELF_PLAY, game_index,
-                              record, store_full=record_games)
+            try:
+                samples, record = future.result()
+            except Exception as e:
+                print(f"Worker failed: {e}")
+                # Tagged so the trainer does not count a game that never
+                # happened towards total_games or the mercy-rule denominator.
+                samples, record = [], {'moves': [], 'winner': 0, 'num_moves': 0,
+                                       'elapsed_seconds': 0, 'failed': True}
 
-                completed_games += 1
+            _finish_game(game_index, samples, record)
 
-                # Submit next task if available
-                if next_task_idx < num_games and not (stop_checker and stop_checker()):
-                    new_f = executor.submit(_play_worker, tasks[next_task_idx])
-                    active_futures[new_f] = next_task_idx
-                    next_task_idx += 1
+            # Submit next task if available
+            if next_task_idx < num_games and not (stop_checker and stop_checker()):
+                new_f = executor.submit(_play_worker, tasks[next_task_idx])
+                active_futures[new_f] = next_task_idx
+                next_task_idx += 1
 
-                # Report progress after game completion
-                _notify_progress(record)
+            # Report progress after game completion
+            _notify_progress(record)
 
     return all_samples
 

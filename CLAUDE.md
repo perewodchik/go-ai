@@ -152,11 +152,64 @@ the live match panel via the snapshot), `cancel()` makes Stop Match immediate
 instead of sitting out `ACCEPT_TIMEOUT`, and both `cancel()` and `close()` give
 back any game on OGS we would otherwise abandon.
 
-### Concurrency
+### Hardware — `device_info.py`
 
-Both game-playing training phases run their games across a `ProcessPoolExecutor`, sized by the single `config.training.num_parallel_workers` setting (capped at the CPU count and at that phase's game count): self-play (`run_self_play_batch`) and the promotion gate (`evaluate_against_checkpoint`). `num_workers=1` just means a pool of one.
+One root module answers every hardware question: which device the gradient
+steps run on (`detect()` — CUDA > MPS > CPU, with the reason recorded when it
+falls back), how many worker processes this machine may use
+(`worker_ceiling()` / `recommended_workers()`), and whether the GPU is actually
+faster than the CPU at the configured batch size (`benchmark()`, opt-in because
+it costs seconds of compute). It imports torch **lazily**, so `param_bounds`
+can derive its worker slider from the core count without pulling torch in.
 
-MPS is not a constraint here despite the Apple-Silicon target: `Trainer` keeps a separate CPU-resident `eval_network` (the gated champion) and hands *that* to both phases with `device="cpu"`, so the MPS training network is never pickled into a worker. Only `_train_network` uses the MPS device.
+It is the single source for `config._get_device()`, the `Device` badge on the
+training page, `/api/system`, and the `hardware` block on
+`/models/api/param_bounds`. `Trainer` re-tests the chosen device with a real
+forward pass before believing it and keeps `device_note` when it demotes to
+CPU — a silent demotion is the difference between a two-hour run and a two-day
+one.
+
+**Two devices are in play and conflating them is the usual source of "my GPU is
+idle".** The GPU trains (`_train_network`, in the main process, on a real
+batch). The games run on CPU worker processes: one MCTS at batch size 1 is
+latency-bound and faster on a core, and N workers cannot share one GPU without
+N contexts and N copies of the weights. So `num_parallel_workers` scales with
+**cores**, and its slider maximum is this host's logical core count (floored at
+8 so the bound is never tighter than the one that shipped). A model that stores
+no value — `TrainingParams.num_parallel_workers is None` — resolves to the
+current machine's recommendation, so one config.json runs well on a 4-core
+laptop and a 20-thread desktop.
+
+### Concurrency — `ai/worker_pool.py`
+
+Both game-playing phases deal their games out to **one shared, long-lived
+`ProcessPoolExecutor`**, sized by `config.training.num_parallel_workers`
+(capped at the CPU count and at that phase's game count): self-play
+(`run_self_play_batch`) and the promotion gate
+(`evaluate_against_checkpoint`). `num_workers=1` just means a pool of one.
+
+The pool used to be built and torn down inside a `with` block per phase — twice
+per iteration. `fork` makes that nearly free; Windows and macOS have no fork, so
+each worker is a fresh interpreter that must import torch (~1-3s), and the cost
+grows with exactly the setting a fast machine wants to raise. One pool now
+spans the whole run and `Trainer.train()`'s `finally` shuts it down (≈18 idle
+torch interpreters is not something to leave resident between runs).
+
+`_init_worker` **reseeds `random` / `numpy` / `torch` from OS entropy in every
+worker.** Under fork the child inherits the parent's RNG state, so
+`np.random.dirichlet` (root noise), `np.random.choice` (move sampling) and the
+jittered pass cutoff all produce the same stream in every worker — and against
+a deterministic network that makes a parallel batch of N games N copies of one
+game. The pool never had an initializer before.
+
+A gate worker that **crashes is excluded from the win rate**, not counted as a
+candidate loss: a dead process is not evidence about a network. Progress still
+counts the slot as resolved, so the bar does not stall.
+
+Neither GPU backend is a constraint here: `Trainer` keeps a separate
+CPU-resident `eval_network` (the gated champion) and hands *that* to both
+phases with `device="cpu"`, so the CUDA/MPS training network is never pickled
+into a worker.
 
 ### Data flow for a training iteration
 

@@ -68,6 +68,7 @@ function buildParamSlidersHTML(prefix, boundsData, values = {}) {
                         <span class="toggle-slider"></span>
                         <span class="param-hint" title="${spec.hint}">${spec.hint}</span>
                     </label>
+                    <div class="param-slider-warn" id="${prefix}-${spec.key}-warn" hidden></div>
                 </div>
                 `;
             }
@@ -152,23 +153,117 @@ function updateWorkerBalance(prefix, boundsData) {
     });
 }
 
+// Which phases write game records, and which game-count parameter each one is
+// priced against. The bytes are the whole argument for turning them off — see
+// the `storage` category in param_bounds.py.
+const RECORDING_PHASES = {
+    record_self_play_games: { games: 'num_self_play_games', label: 'Self-play' },
+    record_gate_games: { games: 'gate_games', label: 'Gate' },
+};
+
+function numericInputValue(prefix, key, fallback = 0) {
+    const el = document.getElementById(`${prefix}-${key}`);
+    if (!el) return fallback;
+    const val = parseFloat(el.value);
+    return Number.isFinite(val) ? val : fallback;
+}
+
+/**
+ * Bytes at a human scale, picking the unit from the magnitude.
+ *
+ * Fixed units do not work across the range this warning spans: one iteration of
+ * gate games is half a megabyte and a thousand iterations of them is half a
+ * gigabyte. Printing the first as "0 MB" told the reader the cost was nothing
+ * in the same sentence that called it a problem.
+ */
+function formatBytes(bytes) {
+    if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(bytes >= 1e10 ? 0 : 1)} GB`;
+    if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(bytes >= 1e7 ? 0 : 1)} MB`;
+    return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+}
+
+/**
+ * Price the recording toggles in megabytes.
+ *
+ * A phase that records N games per iteration costs N x ~12 KB (on 9x9) EVERY
+ * iteration, forever, and the two settings that raise N are exactly the ones a
+ * machine with twenty cores wants to raise. The charts on the training page do
+ * not read these records — they read games/index.jsonl, which is written
+ * either way — so the only thing recording buys is the ability to replay those
+ * games, and the only thing it costs is disk.
+ */
+function updateStorageWarnings(prefix, boundsData) {
+    const storage = boundsData.storage || {};
+    const bytesPerGame = storage.bytes_per_game_9x9 || 12000;
+    const warnGames = storage.warn_games || 24;
+
+    // Board size lives outside the slider set (it is a structural field on the
+    // create form), so read it when present and fall back to 9x9 pricing.
+    const boardEl = document.getElementById(`${prefix}-board_size`)
+        || document.getElementById('new-model-board-size');
+    const boardSize = boardEl
+        ? (parseInt(boardEl.value, 10) || 9)
+        : (window.ACTIVE_BOARD_SIZE || 9);
+    const areaScale = (boardSize * boardSize) / 81;
+
+    const gateOn = document.getElementById(`${prefix}-gate_enabled`);
+
+    Object.entries(RECORDING_PHASES).forEach(([key, spec]) => {
+        const warn = document.getElementById(`${prefix}-${key}-warn`);
+        const toggle = document.getElementById(`${prefix}-${key}`);
+        if (!warn || !toggle) return;
+
+        const games = Math.round(numericInputValue(prefix, spec.games, 0));
+        const phaseSkipped = key === 'record_gate_games' && gateOn && !gateOn.checked;
+
+        if (!toggle.checked || phaseSkipped || games < warnGames) {
+            warn.hidden = true;
+            warn.textContent = '';
+            warn.classList.remove('is-danger');
+            return;
+        }
+
+        // Per iteration is what the setting costs; per 1000 iterations is the
+        // number that decides whether you want it, because these files are
+        // never cleaned up and a long run is where they accumulate.
+        const perIter = games * bytesPerGame * areaScale;
+        warn.hidden = false;
+        warn.classList.add('is-danger');
+        warn.textContent =
+            `⚠ ${spec.label} records ${games} games every iteration — ` +
+            `${formatBytes(perIter)} per iteration, ${formatBytes(perIter * 100)} per 100 ` +
+            `iterations, ${formatBytes(perIter * 1000)} per 1000, and nothing ever ` +
+            `deletes them. Every chart on the training page is drawn from the games ` +
+            `index, not these files: turning this off keeps all the statistics and ` +
+            `loses only the ability to replay those games.`;
+    });
+}
+
 function bindParamSliders(prefix, boundsData) {
     if (!boundsData || !boundsData.bounds) return;
     const { bounds } = boundsData;
+
+    const refresh = () => {
+        updateWorkerBalance(prefix, boundsData);
+        updateStorageWarnings(prefix, boundsData);
+    };
 
     Object.values(bounds).forEach(spec => {
         const input = document.getElementById(`${prefix}-${spec.key}`);
         const badge = document.getElementById(`${prefix}-${spec.key}-badge`);
         if (input && badge) {
-            input.addEventListener('input', () => {
+            // Checkboxes fire `change`, ranges fire `input`; binding both keeps
+            // the two warning passes in sync whichever control moved.
+            const evt = spec.type === 'bool' ? 'change' : 'input';
+            input.addEventListener(evt, () => {
                 const raw = spec.type === 'bool' ? input.checked : input.value;
                 badge.textContent = formatParamValue(spec.key, raw, spec);
-                updateWorkerBalance(prefix, boundsData);
+                refresh();
             });
         }
     });
 
-    updateWorkerBalance(prefix, boundsData);
+    refresh();
 }
 
 function extractParamSliderValues(prefix, boundsData) {
@@ -209,4 +304,31 @@ function setParamSliderValues(prefix, boundsData, values = {}) {
     });
 
     updateWorkerBalance(prefix, boundsData);
+    updateStorageWarnings(prefix, boundsData);
+}
+
+/**
+ * Recording defaults for a NEW model, given the game counts it was created with.
+ *
+ * A model configured for 60 games an iteration should not start life writing
+ * every one of them to disk — that is a gigabyte a week for replays nobody
+ * asked for. Applied only where there is no stored value to respect (the
+ * create form), never on edit, and the toggles remain the user's to flip.
+ */
+function applyRecordingDefaults(prefix, boundsData, values = {}) {
+    const warnGames = (boundsData.storage && boundsData.storage.warn_games) || 24;
+
+    Object.entries(RECORDING_PHASES).forEach(([key, spec]) => {
+        if (values[key] !== undefined && values[key] !== null) return;  // explicit choice
+        const toggle = document.getElementById(`${prefix}-${key}`);
+        if (!toggle) return;
+        const games = Math.round(numericInputValue(prefix, spec.games, 0));
+        if (games >= warnGames) {
+            toggle.checked = false;
+            const badge = document.getElementById(`${prefix}-${key}-badge`);
+            if (badge) badge.textContent = 'Off';
+        }
+    });
+
+    updateStorageWarnings(prefix, boundsData);
 }
