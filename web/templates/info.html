@@ -157,6 +157,131 @@
             <div class="param-meta">⚠ Immutable after model creation — architecture cannot be resized mid-run.</div>
         </section>
 
+        <!-- Input Encoding / Feature Set -->
+        <section id="input-features" class="param-card glass" data-category="network" data-keywords="input features planes encoding v1_10 v2_12 history last move alphazero 17 plane locality migration">
+            <div class="param-head">
+                <div>
+                    <h3 class="param-name">Input Encoding (`input_features`)</h3>
+                    <span class="param-sub">What the network actually sees of the position</span>
+                </div>
+                <span class="rec-pill">Default: Standard (10 planes)</span>
+            </div>
+            <p class="param-desc">
+                The board is handed to the network as a stack of <strong>planes</strong> — one board-sized 0/1 grid per feature. Everything is encoded from the <em>current player's</em> point of view, so the network sees "my stones" and "their stones" rather than black and white. That halves the effective state space: one network learns both colours at once.
+            </p>
+
+            <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                <div class="tradeoff-col tradeoff-up">
+                    <span class="tradeoff-tag">Standard — 10 planes (`v1_10`)</span>
+                    Stones, liberty counts, ko point, turn colour. Every model in this project was trained with this.
+                </div>
+                <div class="tradeoff-col tradeoff-up">
+                    <span class="tradeoff-tag">Recent moves — 12 planes (`v2_12`)</span>
+                    The same 10, plus the opponent's last move and your own previous move.
+                </div>
+            </div>
+
+            <details class="param-details">
+                <summary class="details-summary">View the full plane list</summary>
+                <div style="margin-top: 0.8rem;">
+                    <div class="table-scroll">
+                    <table class="preset-table">
+                        <thead><tr><th>#</th><th>Plane</th><th>Set</th></tr></thead>
+                        <tbody>
+                            <tr><td>0</td><td>My stones</td><td>both</td></tr>
+                            <tr><td>1</td><td>Their stones</td><td>both</td></tr>
+                            <tr><td>2</td><td>My groups in atari (1 liberty)</td><td>both</td></tr>
+                            <tr><td>3</td><td>My groups with 2 liberties</td><td>both</td></tr>
+                            <tr><td>4</td><td>My groups with 3+ liberties</td><td>both</td></tr>
+                            <tr><td>5</td><td>Their groups in atari (1 liberty)</td><td>both</td></tr>
+                            <tr><td>6</td><td>Their groups with 2 liberties</td><td>both</td></tr>
+                            <tr><td>7</td><td>Their groups with 3+ liberties</td><td>both</td></tr>
+                            <tr><td>8</td><td>The ko point</td><td>both</td></tr>
+                            <tr><td>9</td><td>Turn colour (all ones if Black to play)</td><td>both</td></tr>
+                            <tr><td>10</td><td><strong>The opponent's last move</strong></td><td><strong>v2_12 only</strong></td></tr>
+                            <tr><td>11</td><td><strong>My previous move</strong></td><td><strong>v2_12 only</strong></td></tr>
+                        </tbody>
+                    </table>
+                    </div>
+                    <p class="param-desc" style="margin-top: 0.7rem;">
+                        Plane 9 exists despite the "my/their" trick because <strong>komi is not symmetric</strong> — without knowing which colour it is, the network cannot judge a close game. A <strong>pass</strong> has no location, so its history plane is simply empty.
+                    </p>
+                </div>
+            </details>
+
+            <details class="param-details">
+                <summary class="details-summary">Why 12 and not AlphaGo Zero's 17?</summary>
+                <div style="margin-top: 0.8rem;">
+                    <p class="param-desc">
+                        AlphaGo Zero used <strong>17 planes</strong>: the last 8 board positions for each colour, plus colour-to-play. Note what is <em>not</em> in that list — no liberty planes and no ko plane. Its history stack was largely how it perceived ko in the first place.
+                    </p>
+                    <p class="param-desc">
+                        This project already encodes the ko point explicitly <em>and</em> enforces full positional superko in the rules engine, so that motivation is already satisfied. Copying all 8 steps would be paying for a problem that is already solved.
+                    </p>
+                    <p class="param-desc">
+                        What history still buys here is <strong>locality</strong>. Go replies are overwhelmingly local — the answer to a move is usually near it — and "where did they just play" is the strongest hint a policy head can get for free. That signal lives almost entirely in the last one or two moves. Steps 3 through 8 of a full stack add very little that the current position does not already state.
+                    </p>
+                    <p class="param-desc">
+                        Hence <code>v2_12</code>: the part of history that carries the signal, at 2 extra planes instead of 16.
+                    </p>
+                </div>
+            </details>
+
+            <details class="param-details">
+                <summary class="details-summary">How it affects learning</summary>
+                <div style="margin-top: 0.8rem;">
+                    <p class="param-desc"><strong>What should improve.</strong> Mostly the <em>policy</em> head. Knowing where the opponent just played gives it a strong prior on where to look, which matters most in the opening and midgame — exactly the phase this project keeps training samples from (only the first <em>board size²</em> moves are stored). A sharper prior also steers MCTS into good lines sooner, so the same simulation budget searches better.</p>
+
+                    <p class="param-desc"><strong>Cost in compute: negligible.</strong> Two extra planes widen only the first convolution. The exact number of added parameters scales with filter width (32 filters: +576 · 64: +1,152 · 96: +1,728 · 128: +2,304 · 160: +2,880 — filters × 2 new planes × 3×3 kernel), and the model-creation screen shows the real figure for whatever size you pick, computed by building both networks and diffing their parameter counts rather than stated here as a fixed number. There is no extra board work: the last two moves are read straight out of the move history the game state already keeps. This is not a throughput decision.</p>
+
+                    <p class="param-desc"><strong>What to watch.</strong> History gives the <em>value</em> head more incidental cues about game phase, on top of the turn-colour plane it can already latch onto. That is the exact failure mode the collapse guard exists to catch, so keep an eye on <em>value spread</em> in the diagnostics after switching. If within-colour spread collapses toward zero, the value head has found a shortcut again.</p>
+
+                    <p class="param-desc"><strong>Honest expectation.</strong> This is a well-supported idea, not a measured result on this project. It has not been A/B'd here yet. The way to settle it is the same protocol as any other change the promotion gate cannot see: copy a model, train one twin on each encoding for the same number of iterations, then play them head-to-head.</p>
+                </div>
+            </details>
+
+            <details class="param-details">
+                <summary class="details-summary">Does it need a migration? (Yes — and there is a safe one)</summary>
+                <div style="margin-top: 0.8rem;">
+                    <p class="param-desc">
+                        <strong>You cannot simply flip this on a trained model.</strong> The plane count decides how many channels the first convolution accepts, so changing it makes the saved <code>weights.pt</code> the wrong shape. The checkpoint loader compares a stored architecture tag and <em>refuses</em> to load a mismatch — deliberately, because the alternative is a cryptic shape error or silently corrupted training. That is why the setting is frozen at model creation, next to the architecture preset.
+                    </p>
+                    <p class="param-desc">
+                        <strong>Nothing breaks for existing models.</strong> A <code>config.json</code> written before this setting existed has no such field and falls back to <code>v1_10</code>, which is exactly what it was trained with. No migration is required to keep using what you have.
+                    </p>
+                    <p class="param-desc">
+                        <strong>To move a trained model across</strong>, there is a widening migration that costs nothing in strength. Because <code>v2_12</code> <em>appends</em> its planes and leaves planes 0–9 untouched, every existing weight still addresses the right channel. The two new input weights are initialised to <strong>zero</strong>, so on the day you migrate:
+                    </p>
+                    <div class="formula-box" style="margin: 0.8rem 0;">
+                        $$\text{out} \;=\; \sum_{c<10} W_c X_c \;+\; 0 \cdot X_{10} \;+\; 0 \cdot X_{11}$$
+                    </div>
+                    <p class="param-desc">
+                        — the identical function. Same policy, same value, same Elo. The model then learns to use the new planes from a position of strength instead of from random weights. (This identity is asserted numerically in the test suite, not just argued here.)
+                    </p>
+                    <div class="tradeoff-grid" style="margin-top: 0.8rem;">
+                        <div class="tradeoff-col tradeoff-up">
+                            <span class="tradeoff-tag">Preserved</span>
+                            Weights, the gated champion, iteration count, Elo, gate Elo, total games, and every stored game.
+                        </div>
+                        <div class="tradeoff-col tradeoff-down">
+                            <span class="tradeoff-tag">Lost</span>
+                            The optimizer state (Adam re-warms in a few hundred steps) and the replay buffer — its positions were encoded with 10 planes and a stored sample does not remember which move preceded it, so it cannot be reconstructed. It refills from the next iteration's self-play.
+                        </div>
+                    </div>
+                    <p class="param-desc" style="margin-top: 0.8rem;">
+                        Stop training first; the original <code>weights.pt</code> is copied aside automatically. The migration is <strong>one-way</strong> — going back would mean discarding whatever the network learned from the new planes.
+                    </p>
+                    <div class="formula-box" style="margin: 0.8rem 0; text-align: left; font-family: var(--font-mono, monospace); font-size: 0.85rem; line-height: 1.9;">
+                        <code>python scripts/migrate_features.py --list</code><br>
+                        <code>python scripts/migrate_features.py &lt;model&gt; --to v2_12 --dry-run</code><br>
+                        <code>python scripts/migrate_features.py &lt;model&gt; --to v2_12</code>
+                    </div>
+                </div>
+            </details>
+
+            <div class="param-meta">⚠ Immutable after model creation — use the migration script to move a trained model. &nbsp;·&nbsp; Existing models default to `v1_10` and are unaffected.</div>
+        </section>
+
         <!-- Board Size -->
         <section id="board-size" class="param-card glass" data-category="mcts" data-keywords="board size grid 7x7 9x9 13x13 19x19 area dimension">
             <div class="param-head">
@@ -720,7 +845,11 @@
             <div class="formula-explanation">
                 <strong>How does MCTS anticipate opponent responses?</strong><br>
                 MCTS constructs an alternating decision tree:
-                $$\text{Root } s_0 (\text{Black}) \xrightarrow{a_1} s_1 (\text{White}) \xrightarrow{a_2} s_2 (\text{Black}) \xrightarrow{a_3} s_3 (\text{White}) \dots s_L$$
+            </div>
+            <div class="formula-box">
+                $$\text{Root } s_0 \,(\text{Black}) \xrightarrow{a_1} s_1 \,(\text{White}) \xrightarrow{a_2} s_2 \,(\text{Black}) \xrightarrow{a_3} \dots \xrightarrow{a_L} s_L$$
+            </div>
+            <div class="formula-explanation">
                 <ol style="margin-top: 0.6rem;">
                     <li><strong>Selection:</strong> From $s_0$ (Black), MCTS picks Black's move $a_1$ via PUCT. At $s_1$ (White), it simulates White's best response $a_2$ via PUCT from White's perspective.</li>
                     <li><strong>Expansion:</strong> Reaching unvisited leaf $s_L$, the neural network evaluates $f_\theta(s_L) = (\boldsymbol{p}, v)$.</li>

@@ -89,22 +89,9 @@ def create_app() -> Flask:
     app.register_blueprint(match_bp, url_prefix='/api/match')
     app.register_blueprint(api_bp, url_prefix='/api')
 
-    # Index route
+    # Primary Dashboard — Modern Model Fleet Console
     @app.route('/')
     def index():
-        from flask import render_template
-        active_model = model_manager.get_active_model()
-        models = model_manager.list_models()
-        return render_template('index.html',
-                               active_model=active_model,
-                               models=models)
-
-    # The model fleet console. Served alongside the old dashboard at / until
-    # that one is retired. Note this is a PAGE at /models; the model REST API
-    # lives under the same prefix at /models/api/... (model_routes blueprint).
-    @app.route('/models')
-    @app.route('/models/')
-    def models_page():
         from flask import render_template
         active_model = model_manager.get_active_model()
         models = model_manager.list_models()
@@ -112,12 +99,46 @@ def create_app() -> Flask:
                                active_model=active_model,
                                models=models)
 
-    # The page was built under this name; keep the old URL working.
+    # Legacy Dashboard — Preserved at /dashboard_old
+    @app.route('/dashboard_old')
+    @app.route('/dashboard_old/')
+    def dashboard_old():
+        from flask import render_template
+        active_model = model_manager.get_active_model()
+        models = model_manager.list_models()
+        return render_template('dashboard_old.html',
+                               active_model=active_model,
+                               models=models)
+
+    # Overfitting diagnostics — the one question the training charts cannot
+    # answer, because every number they plot comes from the model playing
+    # itself. Defaults to the active model; ?model=<id> inspects another.
+    @app.route('/overfitting')
+    @app.route('/overfitting/')
+    def overfitting_page():
+        from flask import render_template, request
+        models = model_manager.list_models()
+        requested = request.args.get('model')
+        active = model_manager.get_active_model()
+        selected = requested or (active.id if active else
+                                 (models[0].id if models else None))
+        return render_template('overfitting.html',
+                               models=models,
+                               selected_model=selected)
+
+    # Models route alias / redirect to primary dashboard
+    @app.route('/models')
+    @app.route('/models/')
+    def models_page():
+        from flask import redirect, url_for
+        return redirect(url_for('index'))
+
+    # Legacy alias redirect to primary dashboard
     @app.route('/dashboard_new')
     @app.route('/dashboard_new/')
     def dashboard_new():
         from flask import redirect, url_for
-        return redirect(url_for('models_page'), code=301)
+        return redirect(url_for('index'), code=301)
 
     # Info / parameter guide route
     @app.route('/info')

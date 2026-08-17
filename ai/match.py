@@ -16,10 +16,16 @@ of match, this runner is built to be WATCHED rather than to be fast:
 * both sides' ratings move after each game (`compute_pairwise_elo`), so a
   series tells you how the two bots actually compare.
 
+This runner is now the ONLY thing that moves a model's competitive Elo, and
+every move it makes is appended to that model's `elo_history.jsonl` with the
+opponent, the outcome, and the path of the recorded game — so a point on the
+Elo curve can be clicked through to the game that produced it.
+
 The gate stays parallel and headless — it is a measurement inside the training
 loop, and nobody watches it move by move.
 """
 
+import os
 import time
 import threading
 from dataclasses import dataclass, field
@@ -32,6 +38,7 @@ from game.scoring.base import get_scorer
 from ai.evaluator import compute_pairwise_elo
 from ai.game_store import save_match_game
 from ai.players import Player
+from elo_history import EloEntry, outcome_from_score
 
 
 # Match lifecycle states, as reported to the browser.
@@ -174,9 +181,21 @@ class MatchRunner:
     # --- Control ----------------------------------------------------------
 
     def stop(self) -> None:
-        """Request a stop. Takes effect before the next move."""
+        """
+        Request a stop.
+
+        Takes effect before the next move — and immediately for a player that
+        is blocked waiting on someone else, which is why the players are told
+        too: an OGS opponent can be 80 seconds into a 90 second wait for a bot
+        that is never going to accept, and nobody should have to sit that out.
+        """
         with self._lock:
             self._stop_requested = True
+        for player in (self.player_a, self.player_b):
+            try:
+                player.cancel()
+            except Exception:
+                pass
 
     def set_paused(self, paused: bool) -> None:
         with self._lock:
@@ -245,6 +264,15 @@ class MatchRunner:
             'start_rating': round(self.start_rating[slot], 1),
             'rating_delta': round(player.rating - self.start_rating[slot], 1),
         })
+        # What a networked player is waiting on. Without it, a match stalled on
+        # an opponent that never accepts looks identical to one that is
+        # thinking hard.
+        try:
+            status = player.status()
+        except Exception:
+            status = None
+        if status:
+            info['status'] = status
         return info
 
     def _ratings_apply(self) -> bool:
@@ -295,8 +323,16 @@ class MatchRunner:
             with self._lock:
                 self.status = STATUS_STOPPED if self._stop_requested else STATUS_FINISHED
         except Exception as exc:  # noqa: BLE001 — surfaced to the UI verbatim
-            self.status = STATUS_ERROR
-            self.error = str(exc)
+            # A player interrupted by stop() raises on its way out; that is the
+            # stop working, not a failure, and reporting it as an error would
+            # put a scary message on a match the user ended themselves.
+            with self._lock:
+                stopping = self._stop_requested
+            if stopping:
+                self.status = STATUS_STOPPED
+            else:
+                self.status = STATUS_ERROR
+                self.error = str(exc)
         finally:
             self.finished_at = time.time()
             for player in (self.player_a, self.player_b):
@@ -433,7 +469,9 @@ class MatchRunner:
         try:
             import torch
             with torch.no_grad():
-                _, value = self._analysis_network.predict(state.encode_for_nn(), "cpu")
+                from game.features import encode_for_network
+                _, value = self._analysis_network.predict(
+                    encode_for_network(state, self._analysis_network), "cpu")
             value_black = value if state.current_player == BLACK else -value
             rate = round(50.0 + 50.0 * float(value_black), 1)
         except Exception:
@@ -478,16 +516,21 @@ class MatchRunner:
             self.wins['draw'] += 1
             score_a = 0.5
 
-        if self._ratings_apply():
-            before_a, before_b = self.player_a.rating, self.player_b.rating
-            new_a, new_b = compute_pairwise_elo(
-                before_a, before_b, score_a, k=self.config.rating_k
+        # Rating, recording and committing happen in this order for a reason.
+        # The saved game record has to carry the rating delta, and each player's
+        # ledger entry has to carry the path of the saved record — so the numbers
+        # are COMPUTED first, the game is WRITTEN second, and the ratings are
+        # COMMITTED last, once there is a path to point them at.
+        rated = self._ratings_apply()
+        before = {'a': self.player_a.rating, 'b': self.player_b.rating}
+        after = dict(before)
+        if rated:
+            after['a'], after['b'] = compute_pairwise_elo(
+                before['a'], before['b'], score_a, k=self.config.rating_k
             )
-            self.player_a.commit_rating(new_a)
-            self.player_b.commit_rating(new_b)
             outcome.rating_delta = {
-                'a': self.player_a.rating - before_a,
-                'b': self.player_b.rating - before_b,
+                'a': after['a'] - before['a'],
+                'b': after['b'] - before['b'],
             }
 
         for observer in (black, white):
@@ -496,20 +539,96 @@ class MatchRunner:
             except Exception:
                 pass
 
+        saved_by_dir: dict = {}
         if self.config.record_games and move_list:
-            outcome.saved_as = self._save_game(game_idx, state, move_list,
-                                               color_a, color_b, outcome)
+            saved_by_dir = self._save_game(game_idx, state, move_list,
+                                           color_a, color_b, outcome,
+                                           before, after)
+            outcome.saved_as = list(saved_by_dir.values())
+
+        if rated:
+            self._commit_ratings(game_idx, score_a, before, after, saved_by_dir)
 
         with self._lock:
             self.outcomes.append(outcome)
         self._publish()
 
+    def _commit_ratings(self, game_idx: int, score_a: float, before: dict,
+                        after: dict, saved_by_dir: dict) -> None:
+        """
+        Hand each player its new rating together with the record of the game
+        that produced it.
+
+        A player with somewhere to persist appends this to its Elo ledger; one
+        without (the random bot, an OGS opponent) ignores it. The two entries
+        are mirror images — A's win is B's loss and the deltas sum to zero —
+        because `compute_pairwise_elo` moves both ratings out of the same pot.
+        """
+        score = {'a': score_a, 'b': 1.0 - score_a}
+        players = {'a': self.player_a, 'b': self.player_b}
+
+        for slot, player in players.items():
+            other = players['b' if slot == 'a' else 'a']
+            event = EloEntry(
+                new_elo=after[slot],
+                elo_delta=after[slot] - before[slot],
+                opponent_name=other.name,
+                opponent_id=other.rating_key,
+                game_outcome=outcome_from_score(score[slot]),
+                game_record_path=self._saved_path_for(player, saved_by_dir),
+                match_id=self.match_id,
+                game_index=game_idx,
+                color=self._current_colors.get(slot),
+            )
+            try:
+                player.commit_rating(after[slot], event)
+            except Exception:
+                # A ledger that cannot be written must not abort a series that
+                # is otherwise fine; the in-memory rating still moved.
+                player.rating = after[slot]
+
+    def _saved_path_for(self, player: Player, saved_by_dir: dict) -> Optional[str]:
+        """
+        Which of the saved copies of this game belongs to `player`.
+
+        The same game is written into every participating model's `games/`
+        directory as a separate file, so "the game record" is per model. A
+        player with no directory of its own (random, OGS) gets None.
+        """
+        games_dir = getattr(player, 'games_dir', None)
+        if not games_dir:
+            return None
+        target = os.path.realpath(games_dir)
+        for directory, rel in saved_by_dir.items():
+            if os.path.realpath(directory) == target:
+                return rel
+        return None
+
     def _save_game(self, game_idx: int, state: GameState, move_list: List[dict],
-                   color_a: int, color_b: int, outcome: GameOutcome) -> List[str]:
-        """Write the finished game into every participating model's games dir."""
+                   color_a: int, color_b: int, outcome: GameOutcome,
+                   before: dict, after: dict) -> dict:
+        """
+        Write the finished game into every participating model's games dir.
+
+        Returns {games_dir: relative path}, because each directory gets its own
+        file and each model's ledger has to reference its own copy.
+
+        Ratings have not been committed yet at this point (the ledger entries
+        need the paths this returns), so `before`/`after` are passed in and
+        stamped onto each side explicitly — a record that showed only the live
+        `describe()` rating would show the pre-game number with no way to tell.
+        """
         black_slot = 'a' if color_a == BLACK else 'b'
+        white_slot = 'b' if black_slot == 'a' else 'a'
         black_player = self.player_a if black_slot == 'a' else self.player_b
         white_player = self.player_b if black_slot == 'a' else self.player_a
+
+        def side(player: Player, slot: str) -> dict:
+            info = player.describe()
+            info['rating'] = round(after[slot], 1)
+            info['rating_before'] = round(before[slot], 1)
+            info['rating_after'] = round(after[slot], 1)
+            return info
 
         with self._lock:
             win_rates = list(self._win_rates)
@@ -534,15 +653,15 @@ class MatchRunner:
             'match_name': self.name,
             'game_index': game_idx,
             'num_games': self.config.num_games,
-            'black_player': black_player.describe(),
-            'white_player': white_player.describe(),
+            'black_player': side(black_player, black_slot),
+            'white_player': side(white_player, white_slot),
             'rating_delta': outcome.rating_delta,
         }
 
-        saved = []
+        saved = {}
         for games_dir in self.record_dirs:
             try:
-                saved.append(save_match_game(games_dir, dict(record)))
+                saved[games_dir] = save_match_game(games_dir, dict(record))
             except OSError:
                 continue
         return saved

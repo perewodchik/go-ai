@@ -23,6 +23,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -184,6 +185,34 @@ class TestGamesPaging(unittest.TestCase):
         res = self.client.get('/training/api/games/' + rel_path)
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.get_json()['moves'])
+
+    def test_a_game_can_be_opened_from_another_models_directory(self):
+        """
+        A game id only means something relative to a model directory. Deep
+        links from the fleet dashboard — an Elo-curve point, a head-to-head
+        example — name a model that is usually not the active one, and without
+        `?model=` they would all resolve against the active model and 404.
+        """
+        import model_manager
+
+        other_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other_dir, True)
+        model_id = 'other-model'
+        save_game(os.path.join(other_dir, model_id, 'games'),
+                  iteration=1, phase=PHASE_SELF_PLAY, index=0, record=game_record(0))
+        with open(os.path.join(other_dir, model_id, 'config.json'), 'w') as fh:
+            json.dump({'id': model_id, 'name': model_id}, fh)
+
+        rel = 'iter_000001/self-play/game_0000.json'
+        with unittest.mock.patch.object(model_manager, 'MODELS_ROOT', other_dir):
+            # The active model has no such game...
+            self.assertEqual(
+                self.client.get(f'/training/api/games/{rel}?model=only-in-theory').status_code,
+                404)
+            # ...but naming the model that owns it opens it.
+            res = self.client.get(f'/training/api/games/{rel}?model={model_id}')
+            self.assertEqual(res.status_code, 200)
+            self.assertTrue(res.get_json()['moves'])
 
 
 class TestUniteratedGamesAreNotPaged(unittest.TestCase):

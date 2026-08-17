@@ -20,9 +20,10 @@ def test_trainer_initial_stage():
     stage = status['current_stage']
     assert stage['stage'] == 'idle'
     assert stage['stage_index'] == 0
-    assert stage['total_stages'] == 5
+    assert stage['total_stages'] == 4
     assert isinstance(stage['stages_overview'], list)
-    assert len(stage['stages_overview']) == 5
+    # self-play, training, gate, checkpoint — the random-bot eval phase is gone.
+    assert len(stage['stages_overview']) == 4
 
 
 def test_trainer_set_stage_transitions():

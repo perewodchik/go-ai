@@ -412,6 +412,18 @@ const gateChart = (() => {
                     data: [],
                     backgroundColor: [],
                     borderWidth: 0,
+                    order: 2,
+                },
+                {
+                    type: 'line',
+                    label: 'Promotion rate (MA)',
+                    data: [],
+                    borderColor: '#4fc3f7',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: false,
+                    tension: 0.3,
+                    order: 1,
                 },
             ],
         },
@@ -477,13 +489,32 @@ const gateChart = (() => {
 })();
 
 /** Replace the champion-lineage chart's data from /api/gate_history points. */
-function updateGateChart(points, threshold) {
+function updateGateChart(points, threshold, maWindowSize = 10) {
     if (!gateChart) return;
+    
+    // Calculate simple moving average of promotion rate
+    const windowSize = maWindowSize;
+    const maData = [];
+    
+    for (let i = 0; i < points.length; i++) {
+        if (i < windowSize - 1) {
+            maData.push(null);
+        } else {
+            let sum = 0;
+            for (let j = 0; j < windowSize; j++) {
+                sum += points[i - j].promoted ? 1 : 0;
+            }
+            maData.push(sum / windowSize);
+        }
+    }
+
     gateChart.data.labels = points.map(p => p.iteration);
     gateChart.data.datasets[0].data = points.map(p => p.gate_win_rate);
     gateChart.data.datasets[0].backgroundColor = points.map(
         p => (p.promoted ? 'rgba(76, 175, 80, 0.75)' : 'rgba(239, 83, 80, 0.55)')
     );
+    gateChart.data.datasets[1].data = maData;
+    gateChart.data.datasets[1].label = `Promotion rate (MA ${maWindowSize})`;
     gateChart._promoted = points.map(p => p.promoted);
     gateChart.$gateThreshold = threshold ?? 0.55;
     gateChart.update('none');
@@ -554,6 +585,19 @@ const resignChart = (() => {
                     borderWidth: 1,
                     pointRadius: 0,
                     spanGaps: true,
+                    order: 2,
+                },
+                {
+                    type: 'line',
+                    label: 'Games resigned (MA)',
+                    yAxisID: 'y',
+                    data: [],
+                    borderColor: 'rgba(120, 144, 156, 1)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    spanGaps: true,
+                    borderDash: [3, 3],
                     order: 2,
                 },
             ],
@@ -636,11 +680,29 @@ const resignChart = (() => {
 /** Replace the mercy-rule chart's data from /api/resign_stats. */
 function updateResignChart(points, dangerRate) {
     if (!resignChart) return;
+    
+    const windowSize = 10;
+    const maData = [];
+    for (let i = 0; i < points.length; i++) {
+        if (i < windowSize - 1) {
+            maData.push(null);
+        } else {
+            let sum = 0;
+            for (let j = 0; j < windowSize; j++) {
+                sum += points[i - j].resign_rate;
+            }
+            maData.push(sum / windowSize);
+        }
+    }
+
     resignChart.data.labels = points.map(p => p.iteration);
     resignChart.data.datasets[0].data = points.map(p => p.resign_rate);
     resignChart.data.datasets[1].data = points.map(p => p.cum_false_rate);
     resignChart.data.datasets[2].data = points.map(p => p.cum_ci_high);
     resignChart.data.datasets[3].data = points.map(p => p.cum_ci_low);
+    if (resignChart.data.datasets[4]) {
+        resignChart.data.datasets[4].data = maData;
+    }
     resignChart._points = points;
     resignChart.$dangerRate = dangerRate ?? 0.05;
     // The card starts hidden — a model that has never used the mercy rule
@@ -666,7 +728,7 @@ const MAX_CHART_POINTS = 100;
 function upsertPoint(chart, iteration, value) {
     if (value === undefined || value === null) return;
 
-    const label = `Iter ${iteration}`;
+    const label = String(iteration);
     const labels = chart.data.labels;
     const data = chart.data.datasets[0].data;
 

@@ -32,6 +32,7 @@ from datetime import datetime
 
 from game.game_state import GameState, MOVE_PASS
 from game.board import BLACK, WHITE, opponent
+from game.features import encode_for_network
 from game.scoring.base import get_scorer
 from ai.mcts import MCTS
 from ai.network import GoNetwork
@@ -51,6 +52,7 @@ def play_self_play_game(
     temperature_threshold: int = 15,
     temperature_init: float = 1.0,
     temperature_final: float = 0.1,
+    policy_target_temperature: float = 1.0,
     device: str = "cpu",
     max_moves: int = 200,
     fpu_reduction: float = 0.35,
@@ -201,6 +203,10 @@ def play_self_play_game(
             temperature=temp,
             add_noise=True,  # Always add noise during training
             min_pass_move=min_pass_move,
+            # The label does NOT follow the play temperature down. `temp`
+            # decides which move this game plays; `policy` is what the network
+            # is taught, and it stays the full visit distribution.
+            target_temperature=policy_target_temperature,
         )
 
         # --- Mercy rule check (before the move is recorded or applied) ---
@@ -255,8 +261,9 @@ def play_self_play_game(
                     resign_evidence = evidence
                     break
 
-        # Store training data (before applying the move)
-        state_tensor = state.encode_for_nn()
+        # Store training data (before applying the move). Encoded for THIS
+        # network, so the replay buffer and the network always agree on layout.
+        state_tensor = encode_for_network(state, network)
         # Store the MCTS root evaluation alongside the position. It is the
         # per-position component of the value target (see value_target_outcome_weight)
         # and is already from this mover's perspective.
@@ -340,7 +347,28 @@ def play_self_play_game(
             # which keeps the target grounded in the actual position.
             target = w * outcome + (1.0 - w) * float(root_q)
             samples.append((state_tensor, policy, max(-1.0, min(1.0, target))))
-    
+
+    # --- Overfitting telemetry: how much of the search survives into the label ---
+    # Measured on the samples that are actually TRAINED ON, not on every position
+    # played, because the late-game filler positions dropped above have a
+    # different entropy profile and would wash out the trend.
+    #
+    # These three numbers are what makes policy-target collapse visible. A
+    # healthy 9x9 target at tau=1 sits around 1.5-2.5 nats with ~10-20 actions
+    # holding mass; a target sharpened towards one-hot drops under 0.5 nats with
+    # a support of 2-3, and the policy head that trains on it has nothing left to
+    # learn but its own argmax.
+    target_entropy = None
+    target_support = None
+    target_max_prob = None
+    if samples:
+        pol = np.asarray([s[1] for s in samples], dtype=np.float64)
+        safe = np.clip(pol, 1e-12, None)
+        target_entropy = float(np.mean(-(pol * np.log(safe)).sum(axis=1)))
+        target_support = float(np.mean((pol > 1e-6).sum(axis=1)))
+        target_max_prob = float(np.mean(pol.max(axis=1)))
+
+
     # Build game record for storage/replay
     game_record = {
         'board_size': board_size,
@@ -353,6 +381,11 @@ def play_self_play_game(
         'white_score': white_score,
         'margin': margin,
         'timestamp': datetime.now().isoformat(),
+        # --- Policy-target health (see the block that computes these) ---
+        'target_entropy': target_entropy,
+        'target_support': target_support,
+        'target_max_prob': target_max_prob,
+        'policy_target_temperature': policy_target_temperature,
         # --- Mercy rule bookkeeping ---
         # `resigned` marks a game whose outcome label is a PREDICTION rather
         # than a played-out result. `false_resign` is the payload: on playout
@@ -385,6 +418,7 @@ def build_self_play_task(
     temperature_threshold: int,
     temperature_init: float,
     temperature_final: float,
+    policy_target_temperature: float,
     device: str,
     fpu_reduction: float,
     value_target_outcome_weight: float,
@@ -421,6 +455,7 @@ def build_self_play_task(
         'temperature_threshold': temperature_threshold,
         'temperature_init': temperature_init,
         'temperature_final': temperature_final,
+        'policy_target_temperature': policy_target_temperature,
         'device': device,
         'fpu_reduction': fpu_reduction,
         'value_target_outcome_weight': value_target_outcome_weight,
@@ -460,9 +495,11 @@ def run_self_play_batch(
     temperature_threshold: int = 15,
     temperature_init: float = 1.0,
     temperature_final: float = 0.1,
+    policy_target_temperature: float = 1.0,
     device: str = "cpu",
     game_store_every_n: int = 5,
     games_dir: str = "data/games",
+    record_games: bool = True,
     iteration: int = 0,
     progress_callback: Optional[Callable] = None,
     fpu_reduction: float = 0.35,
@@ -495,9 +532,15 @@ def run_self_play_batch(
         temperature_threshold: Move number for temperature switch.
         temperature_init: Opening temperature (exploratory).
         temperature_final: Temperature after the decay window (greedy).
+        policy_target_temperature: tau for the policy LABEL. Independent of the
+            three settings above, which only decide which move gets played.
+            1.0 = AlphaZero's pi = N/sum(N). See MCTS.search.
         device: Torch device.
         game_store_every_n: Save every Nth game for replay.
         games_dir: Directory to save game records.
+        record_games: Write the full record of each stored game. False still
+            indexes every game (so the training charts are unchanged) but skips
+            the move lists, which are almost all of the bytes.
         iteration: Current training iteration (for filename).
         progress_callback: Called after each game with (game_num, total, game_record).
         stop_checker: Function returning True if training loop wants immediate stop.
@@ -530,6 +573,7 @@ def run_self_play_batch(
             temperature_threshold=temperature_threshold,
             temperature_init=temperature_init,
             temperature_final=temperature_final,
+            policy_target_temperature=policy_target_temperature,
             device=device,
             fpu_reduction=fpu_reduction,
             value_target_outcome_weight=value_target_outcome_weight,
@@ -599,9 +643,12 @@ def run_self_play_batch(
 
                 all_samples.extend(samples)
 
-                # Store every Nth game for replay in the web UI
+                # Index every Nth game, and write its full record only when
+                # recording is on — the index is what the charts read, so
+                # turning recording off costs replays, not statistics.
                 if completed_games % game_store_every_n == 0:
-                    save_game(games_dir, iteration, PHASE_SELF_PLAY, game_index, record)
+                    save_game(games_dir, iteration, PHASE_SELF_PLAY, game_index,
+                              record, store_full=record_games)
 
                 completed_games += 1
 

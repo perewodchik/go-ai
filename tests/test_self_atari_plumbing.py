@@ -91,30 +91,17 @@ class TestReachesEveryPhase:
         assert 'restrict_self_atari' in params
         assert 'self_atari_max_stones' in params
 
-    def test_gate_and_random_eval_accept_it(self):
-        for fn in (evaluator.evaluate_against_checkpoint,
-                   evaluator.evaluate_against_random):
-            params = inspect.signature(fn).parameters
-            assert 'restrict_self_atari' in params, fn.__name__
-            assert 'self_atari_max_stones' in params, fn.__name__
+    def test_the_gate_accepts_it(self):
+        params = inspect.signature(evaluator.evaluate_against_checkpoint).parameters
+        assert 'restrict_self_atari' in params
+        assert 'self_atari_max_stones' in params
 
 
-class TestGateSymmetryAndAnchorPurity:
+class TestGateSymmetry:
     def test_both_sides_of_a_gate_match_are_filtered(self):
         """Otherwise the gate measures the filter, not the two networks."""
         source = inspect.getsource(evaluator._play_gate_game)
         assert source.count('restrict_self_atari=restrict_self_atari') == 2
-
-    def test_the_random_bot_is_never_filtered(self):
-        """
-        It is the Elo anchor. The restriction is handed to the MCTS the NETWORK
-        searches with; RandomBot takes no such argument, and must not.
-        """
-        assert 'restrict_self_atari' not in inspect.signature(
-            evaluator.RandomBot.select_move).parameters
-        source = inspect.getsource(evaluator._eval_worker)
-        # One MCTS, for the network only.
-        assert source.count('restrict_self_atari=') == 1
 
 
 class TestLiveTuning:

@@ -9,6 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import model_stats
+import overfit_stats
 from model_manager import ModelManager
 from config import (
     NETWORK_PRESETS, NETWORK_PRESET_ORDER, DEFAULT_NETWORK_PRESET,
@@ -24,12 +25,14 @@ def _get_manager() -> ModelManager:
 
 
 def _estimate_params(board_size: int, num_res_blocks: int,
-                     num_filters: int, value_head_hidden: int) -> int:
+                     num_filters: int, value_head_hidden: int,
+                     input_features: str = None) -> int:
     """Exact parameter count for a given architecture + board size."""
     from ai.network import GoNetwork
+    from game.features import DEFAULT_FEATURES
     net = GoNetwork(
         board_size=board_size,
-        num_input_planes=10,
+        input_features=input_features or DEFAULT_FEATURES,
         num_res_blocks=num_res_blocks,
         num_filters=num_filters,
         value_head_hidden=value_head_hidden,
@@ -44,7 +47,18 @@ def _resolve_network_params(data: dict, board_size: int):
     Accepts either a `network_size` preset name, or explicit
     num_res_blocks/num_filters/value_head_hidden for a custom architecture
     (clamped to safe bounds). Returns (network_params_dict, error_or_None).
+
+    `input_features` names the versioned input encoding (game/features.py). It
+    is frozen here at creation because it decides input_conv.in_channels, so a
+    trained weights.pt can never be reinterpreted under a different set.
     """
+    from game.features import FEATURE_SETS, DEFAULT_FEATURES
+
+    features = data.get('input_features') or DEFAULT_FEATURES
+    if features not in FEATURE_SETS:
+        return None, (f'Invalid input features: {features}. '
+                      f'Expected one of {", ".join(sorted(FEATURE_SETS))}')
+
     preset = data.get('network_size', DEFAULT_NETWORK_PRESET)
 
     if preset == 'custom':
@@ -57,6 +71,7 @@ def _resolve_network_params(data: dict, board_size: int):
         except (TypeError, ValueError):
             return None, 'Invalid custom network architecture'
         arch['size_preset'] = 'custom'
+        arch['input_features'] = features
         return arch, None
 
     if preset not in NETWORK_PRESETS:
@@ -64,6 +79,7 @@ def _resolve_network_params(data: dict, board_size: int):
 
     arch = resolve_network_preset(preset)
     arch['size_preset'] = preset
+    arch['input_features'] = features
     return arch, None
 
 
@@ -115,9 +131,37 @@ def network_presets():
     if board_size not in (7, 9, 13, 15, 19):
         board_size = 9
 
+    # Parameter counts depend on the encoding: more input planes means a wider
+    # first convolution, so the chooser must price the set the user picked.
+    from game.features import DEFAULT_FEATURES, FEATURE_SETS
+    data_features = request.args.get('input_features') or DEFAULT_FEATURES
+    if data_features not in FEATURE_SETS:
+        data_features = DEFAULT_FEATURES
+
     presets = []
     for key in NETWORK_PRESET_ORDER:
         spec = NETWORK_PRESETS[key]
+        params = _estimate_params(
+            board_size, spec['num_res_blocks'],
+            spec['num_filters'], spec['value_head_hidden'],
+            data_features,
+        )
+        # How many of those parameters are only there because of the chosen
+        # encoding — i.e. what switching input_features actually costs on this
+        # preset. Computed by building the DEFAULT-encoding network and diffing
+        # real parameter counts, the same way `params` itself is computed,
+        # rather than a formula kept in sync by hand on both ends. Zero when
+        # the request is already asking about the default encoding.
+        if data_features == DEFAULT_FEATURES:
+            params_delta = 0
+        else:
+            base_params = _estimate_params(
+                board_size, spec['num_res_blocks'],
+                spec['num_filters'], spec['value_head_hidden'],
+                DEFAULT_FEATURES,
+            )
+            params_delta = params - base_params
+
         presets.append({
             'key': key,
             'label': spec['label'],
@@ -125,15 +169,32 @@ def network_presets():
             'num_res_blocks': spec['num_res_blocks'],
             'num_filters': spec['num_filters'],
             'value_head_hidden': spec['value_head_hidden'],
-            'params': _estimate_params(
-                board_size, spec['num_res_blocks'],
-                spec['num_filters'], spec['value_head_hidden'],
-            ),
+            'params': params,
+            'params_delta': params_delta,
         })
+
+    # Input encodings are a create-time choice, so the chooser needs them here
+    # alongside the size presets. Changing one later would change
+    # input_conv.in_channels and orphan the model's weights.
+    from game.features import (DEFAULT_FEATURES, FEATURE_SETS,
+                               FEATURE_SET_ORDER)
+    feature_sets = [
+        {
+            'key': key,
+            'label': FEATURE_SETS[key].label,
+            'num_planes': FEATURE_SETS[key].num_planes,
+            'summary': FEATURE_SETS[key].summary,
+            'plane_names': FEATURE_SETS[key].plane_names,
+        }
+        for key in FEATURE_SET_ORDER
+    ]
+
     return jsonify({
         'board_size': board_size,
         'default': DEFAULT_NETWORK_PRESET,
         'presets': presets,
+        'feature_sets': feature_sets,
+        'default_features': DEFAULT_FEATURES,
     })
 
 
@@ -237,10 +298,57 @@ def model_history(model_id):
     return jsonify(model_stats.history(model_id, fields))
 
 
+@model_bp.route('/api/<model_id>/elo_history')
+def model_elo_history(model_id):
+    """
+    The competitive Elo ledger for one model, as a curve over games played.
+
+    Separate from `/history` because it is a different axis: `/history` is per
+    training iteration, and this is per rated game. Each entry carries the
+    opponent and `game_record_path`, so the chart can link a point straight to
+    the review of the game that moved the rating.
+    """
+    mgr = _get_manager()
+    if not mgr.get_model(model_id):
+        return jsonify({'error': 'Model not found'}), 404
+
+    try:
+        limit = max(2, min(1000, int(request.args.get('limit', 200))))
+    except (TypeError, ValueError):
+        limit = 200
+
+    return jsonify(model_stats.elo_curve(model_id, limit=limit))
+
+
 @model_bp.route('/api/head_to_head')
 def head_to_head():
     """Win matrix over every stored bot vs bot game."""
     return jsonify(model_stats.head_to_head())
+
+
+@model_bp.route('/api/<model_id>/overfitting')
+def model_overfitting(model_id):
+    """
+    Whether this model is learning Go or learning itself.
+
+    Separate from `/history` because no field in the training log can answer it:
+    every number there comes from the model playing itself, and self-play cannot
+    see a blind spot both sides share. This adds the two entropy probes and the
+    internal-vs-external win rate split. See overfit_stats for what each means.
+
+    `?probe=0` skips the live weight-loading probes (seconds) and returns only
+    the log-derived series, for callers polling on a timer.
+    """
+    mgr = _get_manager()
+    if not mgr.get_model(model_id):
+        return jsonify({'error': 'Model not found'}), 404
+
+    probe = request.args.get('probe', '1') not in ('0', 'false', 'no')
+    try:
+        return jsonify(overfit_stats.report(model_id, probe=probe))
+    except Exception as exc:
+        # A diagnostic panel must never be the thing that breaks the page.
+        return jsonify({'error': f'Could not build report: {exc}'}), 500
 
 
 @model_bp.route('/api/<model_id>/meta', methods=['POST'])

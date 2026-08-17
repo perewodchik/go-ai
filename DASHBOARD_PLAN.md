@@ -270,9 +270,7 @@ Rules the layout follows:
 
 ## 4. Implementation plan
 
-**Status: phases 1–6 are built and live at `/models`. Phase 7 (cutover)
-is deliberately NOT done — `/` still serves the original dashboard unchanged,
-and will until you decide to migrate.**
+**Status: Phases 1–7 are built and live. `/` serves the modern fleet console, with the legacy dashboard preserved at `/dashboard_old`.**
 
 
 ### Phase 1 — data layer (no UI)  ✅ built
@@ -364,13 +362,12 @@ almost entirely wiring to code that already exists.
 * **Notes**: a `notes` field on `ModelInfo`, editable inline — why this fork
   exists, in the user's own words.
 
-### Phase 7 — cutover  ⏸ not started (by request)
+### Phase 7 — cutover  ✅ complete
 
-1. `/` renders `models.html`; the old template moves to `/dashboard_old`.
-2. One week of both, then delete `index.html` + `dashboard.js` and rename
-   the old `dashboard.*` files (the `/models` route and its redirect stay).
-3. Remove the `/training_old` archive card and, if it is equally unused, the
-   route itself.
+1. `/` renders `models.html` (the primary fleet console).
+2. The legacy dashboard is preserved and served at `/dashboard_old` via `dashboard_old.html`.
+3. `/models` and `/dashboard_new` redirect to `/`.
+4. Nav header updated to link Dashboard directly to `/`.
 
 ---
 

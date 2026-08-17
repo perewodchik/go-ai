@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}Go AI — Classic Dashboard{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <h1 class="page-title">Go AI Dashboard (Classic)</h1>
+
+    <div class="dash-layout">
+        <!-- Model Selector -->
+        <div class="model-selector glass">
+            <div class="model-selector-header">
+                <h3>🧬 Models</h3>
+                <button id="btn-create-model" class="btn-small btn-accent">+ New Model</button>
+            </div>
+            <div id="model-list" class="model-list">
+                {% if models %}
+                    {% for m in models %}
+                    <div class="model-list-item {% if active_model and m.id == active_model.id %}active{% endif %}" 
+                         data-model-id="{{ m.id }}">
+                        <div class="model-list-info">
+                            <span class="model-list-name">{{ m.name }}</span>
+                            <span class="model-list-meta">{{ m.board_size }}×{{ m.board_size }} · {{ m.ruleset }} · {{ m.kyu_rank }}</span>
+                        </div>
+                        <span class="model-list-elo">{{ "%.0f"|format(m.elo) }}</span>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p class="empty-hint">No models yet. Create one to get started!</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Active Model Info -->
+        <div class="model-info-card glass">
+            {% if active_model %}
+            <div class="model-info-header">
+                <div>
+                    <h2 id="model-display-name">{{ active_model.name }}</h2>
+                    <span class="model-info-badge">{{ active_model.board_size }}×{{ active_model.board_size }} · {{ active_model.ruleset | capitalize }} · Komi {{ active_model.komi }}</span>
+                </div>
+                <div class="model-actions">
+                    <button class="btn-icon" id="btn-edit" title="Edit parameters">✏️</button>
+                    <button class="btn-icon" id="btn-copy" title="Duplicate">📋</button>
+                    <button class="btn-icon btn-icon-danger" id="btn-delete" title="Delete">🗑️</button>
+                </div>
+            </div>
+
+            <div class="model-stats-grid">
+                <div class="model-stat">
+                    <span class="model-stat-label">Elo Rating</span>
+                    <span class="model-stat-value" id="dash-elo">{{ "%.0f"|format(active_model.elo) }}</span>
+                </div>
+                <div class="model-stat">
+                    <span class="model-stat-label">Rank</span>
+                    <span class="model-stat-value" id="dash-rank">{{ active_model.kyu_rank }}</span>
+                </div>
+                <div class="model-stat">
+                    <span class="model-stat-label">Iteration</span>
+                    <span class="model-stat-value" id="dash-iter">{{ active_model.iteration }}</span>
+                </div>
+                <div class="model-stat">
+                    <span class="model-stat-label">Games Played</span>
+                    <span class="model-stat-value" id="dash-games">{{ active_model.total_games }}</span>
+                </div>
+            </div>
+
+            <div class="model-config-section">
+                <h4>Training Configuration</h4>
+                <div class="model-config-grid">
+                    <div class="config-item">
+                        <span class="config-key">Self-Play Games</span>
+                        <span class="config-val">{{ active_model.training.num_self_play_games }}</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-key">MCTS Simulations</span>
+                        <span class="config-val">{{ active_model.training.num_simulations }}</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-key">Exploration (c_puct)</span>
+                        <span class="config-val">{{ active_model.training.c_puct }}</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-key">Learning Rate</span>
+                        <span class="config-val">{{ active_model.training.learning_rate }}</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-key">Temp Decay Threshold</span>
+                        <span class="config-val">{{ active_model.training.temperature_threshold if active_model.training.temperature_threshold is defined else 30 }} moves</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-key">Temp Init / Final</span>
+                        <span class="config-val">{{ active_model.training.temperature_init if active_model.training.temperature_init is defined else 0.8 }} → {{ active_model.training.temperature_final if active_model.training.temperature_final is defined else 0.1 }}</span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-key">Network Size</span>
+                        <span class="config-val">{{ (active_model.network.size_preset if active_model.network else 'small') | capitalize }}
+                            ({{ active_model.network.num_res_blocks if active_model.network else 4 }}×{{ active_model.network.num_filters if active_model.network else 64 }})</span>
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            <div class="no-model-state">
+                <div class="no-model-icon">🧬</div>
+                <h2>No Model Selected</h2>
+                <p>Create a model to start training your Go AI.</p>
+                <button id="btn-create-model-alt" class="btn-primary">+ Create Your First Model</button>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Quick nav -->
+    <div class="action-cards">
+        <a href="/play" class="action-card glass">
+            <div class="action-icon">🎮</div>
+            <h3>Play vs Bot</h3>
+            <p>Test the bot's current strength. Choose easy or hard mode.</p>
+        </a>
+        <a href="/training/" class="action-card glass">
+            <div class="action-icon">🧠</div>
+            <h3>Training Dashboard</h3>
+            <p>Monitor training progress, view games, and manage training.</p>
+        </a>
+        <a href="/training/review" class="action-card glass">
+            <div class="action-icon">📖</div>
+            <h3>Review Games</h3>
+            <p>Step through self-play and evaluation games move by move.</p>
+        </a>
+    </div>
+
+    <!-- Archived / Legacy Training Footer Block -->
+    <div class="dash-footer-archive">
+        <div class="archive-card glass">
+            <div class="archive-content">
+                <span class="archive-icon">📦</span>
+                <div class="archive-text">
+                    <span class="archive-title">Archived Training Interface</span>
+                    <span class="archive-desc">Looking for the previous training layout? You can still access the classic interface.</span>
+                </div>
+            </div>
+            <a href="/training_old" class="btn-archive">Open Classic Training →</a>
+        </div>
+    </div>
+</div>
+
+<!-- Create / Edit Model Modal (shared) -->
+<div id="create-model-modal" class="modal" style="display:none;">
+    <div class="modal-content glass create-model-form">
+        <h2 id="model-form-title">Create New Model</h2>
+        <div class="form-group">
+            <label>Model Name</label>
+            <input type="text" id="new-model-name" placeholder="e.g. Aggressive 9×9" autocomplete="off">
+        </div>
+        <div class="form-row form-row-3">
+            <div class="form-group">
+                <label>Board Size</label>
+                <select id="new-model-board-size">
+                    <option value="7">7×7</option>
+                    <option value="9" selected>9×9</option>
+                    <option value="13">13×13</option>
+                    <option value="15">15×15</option>
+                    <option value="19">19×19</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Komi</label>
+                <input type="number" id="new-model-komi" value="6.5" step="0.5" min="0" max="20">
+            </div>
+            <div class="form-group">
+                <label>Ruleset</label>
+                <select id="new-model-ruleset">
+                    <option value="chinese">Chinese</option>
+                    <option value="japanese">Japanese</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-group net-size-group">
+            <label>Network Size · <span id="net-size-params" class="net-size-params">…</span></label>
+            <input type="range" id="new-model-net-size" min="0" max="4" step="1" value="1">
+            <div class="net-size-meta">
+                <strong id="net-size-label">Small</strong>
+                <span id="net-size-note" class="model-list-meta"></span>
+            </div>
+            <p id="net-size-locked" class="model-form-warning" style="display:none;">
+                Network size is frozen after creation — the saved weights depend on it.
+            </p>
+        </div>
+        <div class="form-group net-features-group">
+            <label>Input Encoding · <span id="net-features-planes" class="net-size-params">…</span></label>
+            <select id="new-model-input-features"></select>
+            <div class="net-size-meta">
+                <span id="net-features-note" class="model-list-meta"></span>
+            </div>
+            <p id="net-features-locked" class="model-form-warning" style="display:none;">
+                Input encoding is frozen after creation — the saved weights depend on
+                how many planes the first layer accepts. Use
+                <code>scripts/migrate_features.py</code> to move a trained model.
+            </p>
+        </div>
+        <details class="advanced-toggle" open>
+            <summary>Advanced Training Settings</summary>
+            <div id="modal-param-categories" class="param-categories-container"></div>
+        </details>
+        <p id="model-form-warning" class="model-form-warning" style="display:none;"></p>
+        <div class="modal-actions">
+            <button id="btn-cancel-create" class="btn-secondary">Cancel</button>
+            <button id="btn-confirm-create" class="btn-primary">Create Model</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

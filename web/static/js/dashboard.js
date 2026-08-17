@@ -66,7 +66,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const p = netPresets[idx];
         if (netLabelEl) netLabelEl.textContent = p.label;
         if (netNoteEl) netNoteEl.textContent = p.note || '';
-        if (netParamsEl) netParamsEl.textContent = fmtParams(p.params);
+        if (netParamsEl) {
+            // params_delta comes from the server diffing two real networks —
+            // never recomputed client-side, so this can't drift from the truth.
+            let text = fmtParams(p.params);
+            if (p.params_delta) {
+                text += ` (+${p.params_delta.toLocaleString()} for this encoding)`;
+            }
+            netParamsEl.textContent = text;
+        }
     };
 
     // Fetch presets (with live param counts) for a board size, keeping the
@@ -76,11 +84,32 @@ document.addEventListener('DOMContentLoaded', () => {
         const prevKey = netPresets.length
             ? (netPresets[parseInt(netSlider.value) || 0] || {}).key
             : null;
+        const featuresSel = document.getElementById('new-model-input-features');
+        const features = (featuresSel && featuresSel.value) || 'v1_10';
         try {
-            const res = await fetch(`/models/api/network_presets?board_size=${boardSize}`);
+            const res = await fetch(
+                `/models/api/network_presets?board_size=${boardSize}` +
+                `&input_features=${encodeURIComponent(features)}`);
             const data = await res.json();
             netPresets = data.presets || [];
             netDefaultKey = data.default || 'small';
+            if (featuresSel && (data.feature_sets || []).length) {
+                const want = featuresSel.value || data.default_features || 'v1_10';
+                featuresSel.innerHTML = data.feature_sets.map(f =>
+                    `<option value="${f.key}">${f.label}</option>`).join('');
+                featuresSel.value = data.feature_sets.some(f => f.key === want)
+                    ? want : (data.default_features || 'v1_10');
+                const spec = data.feature_sets.find(f => f.key === featuresSel.value)
+                          || data.feature_sets[0];
+                const planes = document.getElementById('net-features-planes');
+                const note = document.getElementById('net-features-note');
+                if (planes) planes.textContent = `${spec.num_planes} planes`;
+                if (note) note.textContent = spec.summary || '';
+                if (!featuresSel.dataset.bound) {
+                    featuresSel.dataset.bound = '1';
+                    featuresSel.addEventListener('change', () => loadNetworkPresets(boardSize));
+                }
+            }
         } catch (e) {
             console.error('Failed to load network presets', e);
             return;
@@ -106,6 +135,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const setNetSizeLocked = (locked) => {
         if (netSlider) netSlider.disabled = locked;
         if (netLockedEl) netLockedEl.style.display = locked ? '' : 'none';
+        // Frozen for the same reason as the architecture: the encoding decides
+        // how many channels the first convolution accepts.
+        const fSel = document.getElementById('new-model-input-features');
+        if (fSel) fSel.disabled = locked;
+        const fWarn = document.getElementById('net-features-locked');
+        if (fWarn) fWarn.style.display = locked ? '' : 'none';
     };
 
     if (netSlider) netSlider.addEventListener('input', renderNetSize);
@@ -231,6 +266,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!isEdit && netPresets.length && netSlider) {
                 const idx = Math.max(0, Math.min(netPresets.length - 1, parseInt(netSlider.value) || 0));
                 payload.network_size = netPresets[idx].key;
+                const fSel = document.getElementById('new-model-input-features');
+                payload.input_features = (fSel && fSel.value) || 'v1_10';
             }
             const url = isEdit ? `/models/api/${editingModel.id}/update` : '/models/api/create';
             const busyText = isEdit ? 'Saving...' : 'Creating...';

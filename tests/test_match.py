@@ -180,6 +180,84 @@ class TestMatchRunner:
         assert snapshot['rated'] is False
         assert player_a.rating == 1000.0
 
+    def test_the_rating_event_names_the_opponent_and_the_outcome(self):
+        """
+        `commit_rating` used to receive a bare float, so persisting a rating
+        destroyed the previous one and left nothing to explain the change.
+        """
+        events = {}
+
+        class LedgerPlayer(ScriptedPlayer):
+            def commit_rating(self, new_rating, event=None):
+                super().commit_rating(new_rating, event)
+                events[self.name] = event
+
+        winner = LedgerPlayer('Winner', rating=1000.0)
+        loser = LedgerPlayer('Loser', rating=1000.0, pass_after=0)
+        MatchRunner('m15', winner, loser, _config(num_games=1)).run()
+
+        assert events['Winner'].game_outcome == 'win'
+        assert events['Loser'].game_outcome == 'loss'
+        assert events['Winner'].opponent_name == 'Loser'
+        assert events['Loser'].opponent_id == winner.rating_key
+        assert events['Winner'].match_id == 'm15'
+        assert events['Winner'].game_index == 0
+        # Symmetric: the points one side gains are the points the other loses.
+        assert events['Winner'].elo_delta == pytest.approx(-events['Loser'].elo_delta)
+        assert events['Winner'].new_elo == winner.rating
+
+    def test_each_side_is_linked_to_its_own_copy_of_the_game(self, tmp_path):
+        """
+        A match is written into every participating model's games dir as a
+        SEPARATE file, so "the game record" is per model. A ledger entry that
+        pointed at the other model's copy would open nothing.
+        """
+        events = {}
+        dir_a = tmp_path / 'model-a' / 'games'
+        dir_b = tmp_path / 'model-b' / 'games'
+
+        class LocatedPlayer(ScriptedPlayer):
+            def __init__(self, name, games_dir, **kw):
+                super().__init__(name, **kw)
+                self.games_dir = str(games_dir)
+
+            def commit_rating(self, new_rating, event=None):
+                super().commit_rating(new_rating, event)
+                events[self.name] = event
+
+        player_a = LocatedPlayer('A', dir_a, pass_after=3)
+        player_b = LocatedPlayer('B', dir_b, pass_after=3)
+        MatchRunner('m16', player_a, player_b,
+                    _config(num_games=1, record_games=True),
+                    record_dirs=[str(dir_a), str(dir_b)]).run()
+
+        for name, games_dir in (('A', dir_a), ('B', dir_b)):
+            rel = events[name].game_record_path
+            assert rel, f"{name} has no game to link to"
+            # The path is the same id the review page takes: relative to that
+            # model's own games dir, and it must actually resolve there.
+            assert os.path.isfile(os.path.join(str(games_dir), rel))
+
+    def test_a_player_with_nowhere_to_store_games_links_to_nothing(self, tmp_path):
+        """The random bot and OGS opponents have no games dir — and no ledger."""
+        events = {}
+        dir_a = tmp_path / 'model-a' / 'games'
+
+        class Recording(ScriptedPlayer):
+            def commit_rating(self, new_rating, event=None):
+                super().commit_rating(new_rating, event)
+                events[self.name] = event
+
+        local = Recording('Local', pass_after=3)
+        local.games_dir = str(dir_a)
+        away = Recording('Away', pass_after=3)
+
+        MatchRunner('m17', local, away, _config(num_games=1, record_games=True),
+                    record_dirs=[str(dir_a)]).run()
+
+        assert events['Local'].game_record_path
+        assert events['Away'].game_record_path is None
+
     def test_stop_ends_the_match_between_moves(self):
         class StoppingPlayer(ScriptedPlayer):
             """Stops the match from inside its own first move."""
@@ -259,6 +337,26 @@ class TestMatchRecording:
             assert record['black_player']['name'] == 'A'
             assert record['white_player']['name'] == 'B'
             assert record['moves']
+
+    def test_the_stored_record_carries_both_sides_of_the_rating_move(self, tmp_path):
+        """
+        The record is written BEFORE the ratings are committed (the ledger
+        entries need its path), so the ratings have to be stamped explicitly —
+        otherwise the file would silently show the pre-game numbers.
+        """
+        games_dir = tmp_path / 'model-a' / 'games'
+        runner = MatchRunner(
+            'm14', ScriptedPlayer('A', pass_after=3), ScriptedPlayer('B', pass_after=3),
+            _config(num_games=1, record_games=True),
+            record_dirs=[str(games_dir)],
+        )
+        runner.run()
+
+        (_, record), = load_match_game_files(str(games_dir))
+        for side in (record['black_player'], record['white_player']):
+            assert side['rating_before'] == 500.0
+            assert side['rating_after'] == side['rating']
+            assert side['rating_after'] != 500.0     # the game moved both
 
     def test_match_games_live_outside_the_iteration_tree(self, tmp_path):
         games_dir = str(tmp_path / 'games')

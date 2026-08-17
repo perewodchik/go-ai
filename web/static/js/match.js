@@ -445,6 +445,15 @@
                 num_simulations: player.num_simulations,
             };
         }
+        if (player.kind === 'ogs') {
+            // Without the bot id this rebuilds as "an OGS opponent needs a
+            // bot_id" — which is what Rematch used to do after a failed match.
+            return {
+                type: 'ogs',
+                bot_id: player.ogs_id,
+                ranked: !!player.ranked,
+            };
+        }
         return { type: player.kind || 'random' };
     }
 
@@ -524,6 +533,8 @@
         renderResults(snapshot);
         renderWinRate(snapshot);
 
+        renderOGSStatus(snapshot, over);
+
         const pauseBtn = el('match-pause');
         pauseBtn.dataset.paused = snapshot.paused ? '1' : '0';
         pauseBtn.textContent = snapshot.paused ? '▶ Resume' : '⏸ Pause';
@@ -580,6 +591,54 @@
         // The one number the scoreboard cannot show afterwards: what the
         // series did to the ratings.
         el('match-summary-elo').innerHTML = eloMovement(snapshot);
+    }
+
+    /**
+     * What the online opponent is doing, and how long it has been doing it.
+     *
+     * Only a networked player reports a status, so this stays hidden for a
+     * match between two local models.
+     */
+    function renderOGSStatus(snapshot, over) {
+        const row = el('ogs-status');
+        if (!row) return;
+
+        const players = snapshot.players || {};
+        const status = (players.a || {}).status || (players.b || {}).status;
+        if (!status) {
+            row.hidden = true;
+            return;
+        }
+
+        row.hidden = false;
+        row.dataset.state = status.state;
+
+        const seconds = Math.round(status.waiting_seconds || 0);
+        const stale = status.state === 'waiting' && seconds > 20;
+        let text = status.detail || status.state;
+
+        if (status.state === 'waiting') {
+            text = `${status.detail} · ${seconds}s`;
+            if (stale) text += ' — it may be busy; you can stop the match';
+        } else if (status.state === 'connecting') {
+            text = status.detail;
+        } else if (status.state === 'playing') {
+            text = over ? 'Game finished on OGS' : 'Playing on OGS';
+        } else if (status.state === 'finished') {
+            text = 'Game finished on OGS';
+        } else if (status.state === 'failed' || status.state === 'cancelled') {
+            text = status.detail || status.state;
+        }
+        if (status.online === false) {
+            text = 'Disconnected from OGS — reconnecting…';
+            row.dataset.state = 'offline';
+        }
+
+        el('ogs-status-text').textContent = text;
+
+        const link = el('ogs-status-link');
+        link.hidden = !status.game_url;
+        if (status.game_url) link.href = status.game_url;
     }
 
     /** "hot boi 812 (+7.4) · lucky thirteen 494 (−7.4)", or nothing to say. */

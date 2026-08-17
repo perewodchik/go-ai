@@ -34,7 +34,7 @@ Note: `test_mp.py`, `test_mp2.py`, and `test_socket.py` at the project root are 
 Three independent layers, each importable without the others pulling in unrelated deps:
 
 - **`game/`** — pure Go rules engine, no ML or web dependencies. `board.py` (grid, groups, liberties, Zobrist hashing), `rules.py` (legality, captures, ko/superko), `game_state.py` (`GameState`: move history, undo, NN state encoding via `encode_for_nn()`), `scoring/` (pluggable `ScoringStrategy` via `get_scorer(method)` — chinese/japanese, plus a display-only `estimator.py` using Benson's algorithm + flood-fill that bots never see).
-- **`ai/`** — AlphaZero-style pipeline built on top of `game/`. `network.py` (`GoNetwork`: small ResNet, policy + value heads), `mcts.py` (`MCTS`/`MCTSNode`, PUCT selection, Dirichlet root noise), `self_play.py` (plays games with MCTS + network, produces `TrainingSample = (state_tensor, mcts_policy, outcome)`), `trainer.py` (`Trainer`: orchestrates self-play → replay buffer → train → evaluate → checkpoint loop; runs in a background thread when driven from the web UI, emits progress via a callback), `evaluator.py` (Elo tracking, eval vs random bot / previous checkpoint), `checkpoint.py` (save/load `weights.pt`).
+- **`ai/`** — AlphaZero-style pipeline built on top of `game/`. `network.py` (`GoNetwork`: small ResNet, policy + value heads), `mcts.py` (`MCTS`/`MCTSNode`, PUCT selection, Dirichlet root noise), `self_play.py` (plays games with MCTS + network, produces `TrainingSample = (state_tensor, mcts_policy, outcome)`), `trainer.py` (`Trainer`: orchestrates self-play → replay buffer → train → promotion gate → checkpoint loop; runs in a background thread when driven from the web UI, emits progress via a callback), `evaluator.py` (the promotion gate: candidate vs champion, plus the pairwise Elo maths matches use), `checkpoint.py` (save/load `weights.pt`).
 - **`web/`** — Flask + SocketIO app (`web/app.py` factory). REST blueprints: `game_routes.py` (`/play`, `/api/game/*` — new/move/bot_move/pass/resign/undo/suggest/estimate), `training_routes.py` (`/training/*`), `model_routes.py` (`/models/api/*`), `api.py` (`/api/health`, `/api/config`). Real-time training progress goes over SocketIO (`start_training`/`stop_training`/`request_status` events, `training_update` emissions), not REST polling.
 
 ### Config
@@ -43,9 +43,53 @@ Three independent layers, each importable without the others pulling in unrelate
 
 ### Multi-model architecture
 
-`model_manager.py`'s `ModelManager` owns everything under `models/`: each model is a directory (`models/<slug>/`) with its own `config.json` (board size/komi/ruleset/training hyperparams/live Elo & iteration state), `weights.pt`, `games/`, and `logs/`.
+`model_manager.py`'s `ModelManager` owns everything under `models/`: each model is a directory (`models/<slug>/`) with its own `config.json` (board size/komi/ruleset/training hyperparams/live Elo & iteration state), `weights.pt`, `elo_history.jsonl`, `games/`, and `logs/`.
 
-Recorded games live under `games/iter_<NNNNNN>/<phase>/`, where phase is `self-play`, `promotion` (candidate vs champion gate matches), or `eval` (champion vs random bot). `ai/game_store.py` owns that layout — writing (`save_game`), listing (`iter_game_files` / `load_game_files`), resolving a client-supplied id (`resolve_game_path`, which rejects paths escaping `games/`), and migrating the old flat `iter_000001_game_0000.json` naming (`migrate_legacy_layout`, run from `Trainer.__init__` and the games API). A game's id everywhere — API, review URLs — is its path relative to `games/`. The currently active model id is stored in `models/.active`. `web/app.py`'s `switch_model(model_id)` builds a `Config` from the model's `ModelInfo` and creates a new `Trainer` bound to that model's directory — so switching models swaps the entire training context (weights, replay data, hyperparameters) at once.
+Recorded games live under `games/iter_<NNNNNN>/<phase>/`, where phase is `self-play`, `promotion` (candidate vs champion gate matches), or `eval` (champion vs random bot). `ai/game_store.py` owns that layout — writing (`save_game`, which also indexes every game — see below), listing (`iter_game_files` / `load_game_files`), resolving a client-supplied id (`resolve_game_path`, which rejects paths escaping `games/`), and migrating the old flat `iter_000001_game_0000.json` naming (`migrate_legacy_layout`, run from `Trainer.__init__` and the games API). A game's id everywhere — API, review URLs — is its path relative to `games/`. The currently active model id is stored in `models/.active`. `web/app.py`'s `switch_model(model_id)` builds a `Config` from the model's `ModelInfo` and creates a new `Trainer` bound to that model's directory — so switching models swaps the entire training context (weights, replay data, hyperparameters) at once.
+
+### The games index — `games/index.jsonl`
+
+Alongside the records, every model keeps ONE LINE PER GAME in
+`games/index.jsonl`, owned by `ai/game_index.py`: the ~dozen scalars the
+charts need (`iteration`, `phase`, `game_index`, `winner`, `margin`,
+`num_moves`, `elapsed_seconds`, `network_color`, `candidate_won`, and the
+mercy-rule fields), and none of the bulk.
+
+**Every statistics endpoint reads the index, never the records.**
+`/training/api/learning_stats` and `/training/api/resign_stats` used to open
+and parse every game file on disk — 3.5s and growing on an 11k-game model,
+paid twice on every training-page load for the same numbers. Off the index
+both are under 0.1s. The full records are read to REPLAY one game, and never
+in bulk.
+
+Two invariants make it safe to rely on:
+
+- **A row is identified by `(iteration, phase, game_index)`, not by a path** —
+  because a row exists for games whose record was never written.
+- **`load()` reconciles against the directory on every read**, appending rows
+  for game files it has not seen. That is the migration path (a model that
+  predates the index builds one on first read) and the repair path, and it
+  costs one directory walk with zero JSON parses when the index is current.
+  Reconciliation only ever ADDS; `delete_saved_game` is what prunes, so
+  deleting games clears both the bytes and the statistics.
+
+### Recording toggles — `record_self_play_games` / `record_gate_games`
+
+Because the index is separate, writing the records is optional.
+`save_game(..., store_full=False)` indexes the game and skips the file, so a
+run with recording off keeps **every point on every chart** and loses only the
+ability to replay those games. That is the whole trade: ~12 KB per 9x9 game,
+and the gate is the bigger offender (`gate_games`, 20 by default, against
+`num_self_play_games`).
+
+Both are live-tunable `TrainingConfig` / `TrainingParams` booleans plumbed
+through `run_self_play_batch(record_games=)` and
+`evaluate_against_checkpoint(record_games=)`. They appear in the UI
+automatically — the Create/Edit/Live-Tune panels are generated from
+`param_bounds.PARAM_BOUNDS` (category `storage`), so adding the entries there
+was the only edit needed. The games list reports `not_recorded` per phase and
+`total_not_recorded` per iteration, so an iteration with nothing on disk says
+why instead of looking empty.
 
 ### Playing on OGS (online-go.com)
 
@@ -88,12 +132,46 @@ checks the whole path (sign-in, socket token, roster) without playing a game.
 OGS asks that engine-driven accounts be registered as bot accounts; matches
 default to unranked and are capped at `MAX_OGS_GAMES` per series.
 
+Three things about OGS that are not written down anywhere and each cost a live
+game to find — all now covered by `tests/test_ogs_player.py`:
+
+- **The game id in the challenge response is provisional.** The real one
+  arrives on the `active_game` event; `_NewGameWatcher` waits for it.
+- **Moves are numbered from 1**, by the board's move count *after* the move, so
+  our own move echoes back at the number our board already holds.
+- **A resignation is not announced on `game/<id>/phase`.** Any game that goes
+  quiet is checked against OGS's own record (`_ended_on_ogs`), which is also
+  read for *who* lost so a loss can never be recorded as a win.
+
+Most bots set `max_games_per_player: 1`, so the next game of a series cannot be
+challenged until OGS has finished the previous one — our runner ends a game as
+soon as OUR board is over, which is earlier. `_wait_for_previous_game_to_clear`
+bridges that gap; without it a 5 game series stops at 4 with a challenge nobody
+answers. `OGSPlayer.status()` reports what the bridge is waiting on (it reaches
+the live match panel via the snapshot), `cancel()` makes Stop Match immediate
+instead of sitting out `ACCEPT_TIMEOUT`, and both `cancel()` and `close()` give
+back any game on OGS we would otherwise abandon.
+
 ### Concurrency
 
-All three game-playing phases run their games across a `ProcessPoolExecutor`, sized by the single `config.training.num_parallel_workers` setting (capped at the CPU count and at that phase's game count): self-play (`run_self_play_batch`), the promotion gate (`evaluate_against_checkpoint`), and the random-bot eval (`evaluate_against_random`). There is no sequential branch in any of them — `num_workers=1` just means a pool of one.
+Both game-playing training phases run their games across a `ProcessPoolExecutor`, sized by the single `config.training.num_parallel_workers` setting (capped at the CPU count and at that phase's game count): self-play (`run_self_play_batch`) and the promotion gate (`evaluate_against_checkpoint`). `num_workers=1` just means a pool of one.
 
-MPS is not a constraint here despite the Apple-Silicon target: `Trainer` keeps a separate CPU-resident `eval_network` (the gated champion) and hands *that* to all three phases with `device="cpu"`, so the MPS training network is never pickled into a worker. Only `_train_network` uses the MPS device.
+MPS is not a constraint here despite the Apple-Silicon target: `Trainer` keeps a separate CPU-resident `eval_network` (the gated champion) and hands *that* to both phases with `device="cpu"`, so the MPS training network is never pickled into a worker. Only `_train_network` uses the MPS device.
 
 ### Data flow for a training iteration
 
-`Trainer.train()` (`ai/trainer.py`): run self-play games with the current `GoNetwork` + `MCTS` → push `TrainingSample`s into a fixed-size FIFO `ReplayBuffer` → sample mini-batches and train → evaluate new weights against the random bot / previous checkpoint to update Elo → persist `weights.pt` and update the model's `config.json` state (elo, kyu_rank, iteration, total_games) → emit progress events (used by both the CLI printer in `run_training.py` and the SocketIO relay in `web/app.py`).
+`Trainer.train()` (`ai/trainer.py`): run self-play games with the current `GoNetwork` + `MCTS` → push `TrainingSample`s into a fixed-size FIFO `ReplayBuffer` → sample mini-batches and train → put the candidate through the promotion gate against the champion → persist `weights.pt` and update the model's `config.json` training state (iteration, total_games) → emit progress events (used by both the CLI printer in `run_training.py` and the SocketIO relay in `web/app.py`).
+
+Four stages, not five: the random-bot evaluation phase that used to sit between the gate and the checkpoint is gone. **Training does not rate a model.** It writes `iteration` and `total_games` (via `ModelManager.update_training_state`) and never touches `elo` — a long run overlapping a match series would otherwise write its stale in-memory rating back over every point the model earned. The only rating training maintains is `gate_elo`, its own self-referential ladder, which moves via `performance_elo_gap` when and only when a candidate beats the champion.
+
+### Competitive Elo — the `elo_history.jsonl` ledger
+
+A model's rating is the last line of `models/<slug>/elo_history.jsonl`, an append-only ledger owned by `elo_history.py` (a root peer of `model_manager.py`/`model_stats.py`). `config.json`'s `elo` is a **cache** of that tail, kept in sync so a fleet listing of forty models does not have to open forty ledgers; `elo_history.reconcile` / `ModelManager.sync_elo_from_history` repair it if the two drift.
+
+Each line records `timestamp`, `opponent_name`/`opponent_id` (the opponent's `rating_key`), `game_outcome`, `elo_delta`, `new_elo` and `game_record_path` — the same id `save_match_game` returns, so every point on the Elo curve links straight to its game in the review page. The path is stored **per model** because a match is written into both participants' `games/` directories as two separate files; `MatchRunner._saved_path_for` matches a player's `games_dir` against the record dirs to pick the right one.
+
+`ai/match.py` is the only thing that moves a competitive rating, and the order in `_finish_game` matters: ratings are COMPUTED (`compute_pairwise_elo`), the game is WRITTEN (it carries the rating delta and explicit `rating_before`/`rating_after` per side), then the ratings are COMMITTED — `commit_rating(new_rating, event)` with an `EloEntry` that now has a path to point at. `ModelPlayer`'s sink is `ai/model_loader.persist_model_rating` → `ModelManager.record_elo_result`.
+
+**Migration:** a model with no ledger but an existing `elo` gets one baseline entry (`note: "Baseline initialization"`) carrying that rating, so a model rated 1240 after ninety iterations is not reset to the default. It fires lazily on first read (`ModelManager.read_elo_history`, `model_stats.elo_curve`) and eagerly in `create_model`. Baseline entries have no `game_outcome`, so `rated_games` does not count them as earned.
+
+The dashboard plots this curve against **games played**, not training iteration (`model_stats.elo_curve` → `/models/api/<id>/elo_history`): a rating that only moves when a game is played draws a flat line through every iteration nobody played in, and collapses a forty-game evening into a single point. `/models/api/<id>/history` stays per-iteration for losses and the gate.

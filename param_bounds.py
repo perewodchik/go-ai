@@ -72,31 +72,36 @@ PARAM_BOUNDS = {
         "type": "float",
         "hint": "Late-game move randomness temperature",
     },
+    "policy_target_temperature": {
+        "key": "policy_target_temperature",
+        "order": 30,
+        "label": "Policy Target Temp",
+        "category": "temperature",
+        "category_label": "Temperature & Randomness",
+        # Floor of 0.5, unlike temperature_final's 0.001: this is the LABEL, and
+        # tau below ~0.5 turns it into an argmax the policy head can only clone.
+        "min": 0.5,
+        "max": 1.5,
+        "step": 0.05,
+        "default": 1.0,
+        "type": "float",
+        "hint": "tau for the policy LABEL (1.0 = AlphaZero). Lower = the network "
+                "is taught only the search's best move, not how much better it "
+                "was — policy entropy then decays and the model overfits to its "
+                "own self-play lines. Leave at 1.0.",
+    },
     "num_self_play_games": {
         "key": "num_self_play_games",
         "order": 10,
         "label": "Self-Play Games",
         "category": "volume",
-        "category_label": "Self-Play & Evaluation Volume",
+        "category_label": "Self-Play Volume",
         "min": 1,
         "max": 100,
         "step": 1,
         "default": 5,
         "type": "int",
         "hint": "Games the bot plays against itself per training iteration",
-    },
-    "eval_games": {
-        "key": "eval_games",
-        "order": 20,
-        "label": "Eval Games",
-        "category": "volume",
-        "category_label": "Self-Play & Evaluation Volume",
-        "min": 0,
-        "max": 50,
-        "step": 1,
-        "default": 4,
-        "type": "int",
-        "hint": "Evaluation games vs random bot (0 = skip evaluation phase entirely)",
     },
     # --- Champion vs candidate (promotion gate) --------------------------
     # These decide whether a freshly trained candidate is allowed to replace
@@ -322,17 +327,49 @@ PARAM_BOUNDS = {
         "type": "float",
         "hint": "Gradient update step size — lower if training is unstable",
     },
+    # --- Game recording ----------------------------------------------------
+    # What a phase writes to DISK, not what it plays. Every game is summarized
+    # into games/index.jsonl either way, and that index is what the charts on
+    # this page are drawn from — so turning these off costs the replay of those
+    # games in the review page and nothing else.
+    "record_self_play_games": {
+        "key": "record_self_play_games",
+        "order": 10,
+        "label": "Record Self-Play Games",
+        "category": "storage",
+        "category_label": "Game Recording",
+        "min": 0,
+        "max": 1,
+        "step": 1,
+        "default": True,
+        "type": "bool",
+        "hint": "Off = keep the stats, skip the replays (~12 KB/game on 9×9)",
+    },
+    "record_gate_games": {
+        "key": "record_gate_games",
+        "order": 20,
+        "label": "Record Gate Games",
+        "category": "storage",
+        "category_label": "Game Recording",
+        "min": 0,
+        "max": 1,
+        "step": 1,
+        "default": True,
+        "type": "bool",
+        "hint": "Champion vs candidate matches — the bulkiest phase, 20 games per iteration",
+    },
 }
 
 CATEGORIES = [
     {"key": "mcts", "label": "MCTS & Search Strategy"},
     {"key": "temperature", "label": "Temperature & Randomness"},
-    {"key": "volume", "label": "Self-Play & Evaluation Volume"},
+    {"key": "volume", "label": "Self-Play Volume"},
     {"key": "gate", "label": "Champion vs Candidate"},
     {"key": "compute", "label": "Compute & Parallelism"},
     {"key": "restrictions", "label": "Move Restrictions"},
     {"key": "resign", "label": "Mercy Rule (Resignation)"},
     {"key": "network", "label": "Neural Network Optimization"},
+    {"key": "storage", "label": "Game Recording"},
 ]
 
 # Keys every editing surface (create / edit / live tune) accepts. Derived from

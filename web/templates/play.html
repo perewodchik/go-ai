@@ -163,7 +163,6 @@
                 <button id="btn-resign" class="btn-danger">Resign</button>
                 <button id="btn-undo" class="btn-secondary easy-only">Undo</button>
                 <button id="btn-suggest" class="btn-secondary easy-only">Suggest</button>
-                <button id="btn-record" class="btn-secondary control-wide" title="Save this game to Review Games">💾 Record</button>
             </div>
             <div class="toggle-group play-toggle-group">
                 <label class="toggle" for="toggle-estimate" title="Show real-time estimated board territory overlay">
@@ -297,6 +296,16 @@
                         <span class="match-player-wins" id="match-wins-b">0</span>
                     </div>
                     <div class="match-series-line" id="match-series-line">Game 1 of 4</div>
+                </div>
+
+                <!-- What an online opponent is doing. A match waiting on a bot
+                     that will never accept looks exactly like one thinking
+                     hard, unless it says so. -->
+                <div class="ogs-status" id="ogs-status" hidden>
+                    <span class="ogs-status-dot" id="ogs-status-dot"></span>
+                    <span class="ogs-status-text" id="ogs-status-text"></span>
+                    <a class="ogs-status-link" id="ogs-status-link" target="_blank"
+                       rel="noopener" hidden>View on OGS ↗</a>
                 </div>
 
                 <div class="play-scoreboard">

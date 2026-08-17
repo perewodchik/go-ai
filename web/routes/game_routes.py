@@ -385,7 +385,11 @@ def suggest_move():
         return jsonify({'error': 'Model not loaded'}), 400
 
     mcts = _session_mcts(sess)
-    action, policy = mcts.search(sess['state'], temperature=0.1, add_noise=False)
+    # temperature=0.0: a hint should be the search's actual best move, not a
+    # sample from it. The returned policy is still the full visit distribution
+    # (target_temperature defaults to 1.0), so the top-3 list below keeps its
+    # relative weights.
+    action, policy = mcts.search(sess['state'], temperature=0.0, add_noise=False)
 
     suggestion = list(action) if action != MOVE_PASS else 'pass'
     # Get top 3 moves by policy
@@ -584,7 +588,9 @@ def _bot_move(game_id: str) -> dict:
         return {'type': 'pass'}
 
     mcts = _session_mcts(sess)
-    action, _ = mcts.search(state, temperature=0.1, add_noise=False)
+    # temperature=0.0: play the strongest move against a human opponent. Game
+    # variety comes from the human, so there is nothing to buy by sampling.
+    action, _ = mcts.search(state, temperature=0.0, add_noise=False)
 
     # The search that chose the move is also the evidence for giving up on the
     # game — a bot that has been lost for several of its own moves resigns

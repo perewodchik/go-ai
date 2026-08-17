@@ -47,7 +47,7 @@ def fleet(tmp_path, monkeypatch):
     created_models = []
 
     def add(model_id, rows=(), created="2026-01-01T00:00:00", games=0,
-            match_games=(), **config):
+            match_games=(), elo_ledger=(), **config):
         model_dir = root / model_id
         (model_dir / "logs").mkdir(parents=True)
         cfg = {"id": model_id, "name": model_id, "created_at": created}
@@ -70,6 +70,11 @@ def fleet(tmp_path, monkeypatch):
             for name, payload in match_games:
                 (match_dir / name).write_text(json.dumps(payload))
 
+        if elo_ledger:
+            with open(model_dir / "elo_history.jsonl", "w") as fh:
+                for entry in elo_ledger:
+                    fh.write(json.dumps(entry) + "\n")
+
         created_models.append(ModelInfo.from_dict(dict(cfg)))
         return model_dir
 
@@ -85,6 +90,28 @@ def run(n, start=1, stamp="2026-01-01T00:%02d:00", **extra):
         row = {"iteration": i, "timestamp": stamp % i, "elo": 500 + i}
         row.update(extra)
         rows.append(row)
+    return rows
+
+
+def ledger(n, start_elo=500.0, stamp="2026-02-01T00:%02d:00"):
+    """
+    A baseline entry followed by `n` rated games, each worth +1 Elo.
+
+    Mirrors what `ai/match.py` writes: the model's rating after each played
+    game, the opponent, and the path of the saved record.
+    """
+    rows = [{"timestamp": stamp % 0, "new_elo": start_elo, "elo_delta": 0.0,
+             "note": "Baseline initialization"}]
+    for i in range(1, n + 1):
+        rows.append({
+            "timestamp": stamp % (i % 60),
+            "opponent_name": "Random Bot",
+            "opponent_id": "random",
+            "game_outcome": "win",
+            "elo_delta": 1.0,
+            "new_elo": start_elo + i,
+            "game_record_path": f"match/match_{i:04d}.json",
+        })
     return rows
 
 
@@ -327,7 +354,10 @@ class TestSummary:
         summary = model_stats.summarize(fleet.infos()[0])
         assert summary["games_on_disk"] == 0
         assert summary["iterations_logged"] == 0
-        assert summary["elo_series"] == []
+        # Summarising migrates the ledger into existence, so the curve is one
+        # point — where the model starts — and no games are claimed as earned.
+        assert summary["elo_series"] == [500.0]
+        assert summary["rated_games"] == 0
 
     def test_gate_record_is_counted_from_the_log(self, fleet):
         rows = run(4, gate_win_rate=0.7, gate_promoted=True)
@@ -338,13 +368,24 @@ class TestSummary:
         assert summary["gate_promotions"] == 3
 
     def test_elo_series_is_downsampled_but_keeps_the_last_point(self, fleet):
-        fleet("long", run(200))
+        fleet("long", run(200), elo_ledger=ledger(200))
         summary = model_stats.summarize(fleet.infos()[0])
         assert len(summary["elo_series"]) <= 24
-        assert summary["elo_series"][-1] == 700   # 500 + iteration 200
+        assert summary["elo_series"][-1] == 700   # 500 + 200 rated games
 
-    def test_elo_delta_covers_the_last_ten_iterations(self, fleet):
-        fleet("moving", run(30))    # elo climbs by 1 per iteration
+    def test_the_elo_curve_comes_from_the_ledger_not_the_training_log(self, fleet):
+        """
+        The two used to be the same number. They are not any more: training
+        does not rate a model, so a run with a hundred iterations and no games
+        played has not moved.
+        """
+        fleet("trained-only", run(100))
+        summary = model_stats.summarize(fleet.infos()[0])
+        assert summary["rated_games"] == 0
+        assert summary["elo_series"] == [500.0]
+
+    def test_elo_delta_covers_the_last_ten_rated_games(self, fleet):
+        fleet("moving", run(30), elo_ledger=ledger(30))   # +1 Elo per game
         summary = model_stats.summarize(fleet.infos()[0])
         assert summary["elo_delta_10"] == 10
 

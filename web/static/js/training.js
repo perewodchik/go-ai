@@ -373,9 +373,8 @@ if (typeof socket !== 'undefined' && socket) {
 
         // Update charts on iteration_done
         if (data.type === 'iteration_done') {
-            updateCharts(data);
             pushMetric(data);
-            if (metricsTableVisible()) renderMetricsTable();
+            applyMetricsFilter();
             loadGamesList();
             loadLearningStats();
             loadGateHistory();
@@ -434,6 +433,19 @@ const GAMES_ITERATIONS = 3;
 function escapeAttr(str) {
     return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
                       .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function formatGameTime(timestamp) {
+    if (!timestamp) return '';
+    try {
+        const d = new Date(timestamp);
+        if (isNaN(d.getTime())) return '';
+        const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        const timeStr = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+        return `${dateStr}, ${timeStr}`;
+    } catch (e) {
+        return '';
+    }
 }
 
 /**
@@ -500,6 +512,17 @@ function gamesPhaseBadge(phase) {
     return resign;
 }
 
+/**
+ * "N not recorded" — games a phase played while its recording toggle was off.
+ * They are in every chart on this page (those read the games index), they
+ * just have no stored record to open, so the list says so instead of looking
+ * like the iteration produced nothing.
+ */
+function notRecordedNote(n) {
+    if (!n) return '';
+    return ` <span class="group-note" style="opacity: 0.65;">· ${n} not recorded</span>`;
+}
+
 async function loadGamesList() {
     try {
         // Only the iterations you are actually watching. A long run has
@@ -531,7 +554,7 @@ async function loadGamesList() {
                 </div>
                 <div class="summary-row-bottom">
                     <div class="summary-row-left">
-                        <span class="group-note">${group.total_games} game${group.total_games === 1 ? '' : 's'}</span>
+                        <span class="group-note">${group.total_games} game${group.total_games === 1 ? '' : 's'}</span>${notRecordedNote(group.total_not_recorded)}
                     </div>
                     <button class="btn-group-delete" title="Delete Iteration ${group.iteration}" aria-label="Delete">✕</button>
                 </div>
@@ -564,7 +587,7 @@ async function loadGamesList() {
                     </div>
                     <div class="summary-row-bottom">
                         <div class="summary-row-left">
-                            <span class="group-note">${phase.count} game${phase.count === 1 ? '' : 's'}</span>
+                            <span class="group-note">${phase.count} game${phase.count === 1 ? '' : 's'}</span>${notRecordedNote(phase.not_recorded)}
                         </div>
                         <button class="btn-group-delete" title="Delete ${phase.label}" aria-label="Delete">✕</button>
                     </div>
@@ -611,12 +634,15 @@ async function loadGamesList() {
                         resultText = game.resignation.result;
                     }
 
+                    const isSelfPlay = phase.phase === 'self_play' || (!phase.phase && !game.is_eval && !game.candidate_color);
+                    const when = formatGameTime(game.timestamp);
+
                     const body = document.createElement('div');
                     body.className = 'game-item-body';
                     body.style.cursor = 'pointer';
                     body.innerHTML = `
-                        <div style="font-weight: 500;">${winnerIcon} ${label}${gameResignTag(game)}</div>
-                        <div class="meta"><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves</div>
+                        <div style="font-weight: 500;">${winnerIcon} ${label}${isSelfPlay ? gameResignTag(game) : ''}</div>
+                        <div class="meta"><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves${when ? ` &middot; ${when}` : ''}</div>
                     `;
                     body.addEventListener('click', () => {
                         window.location.href = `/training/review?game=${encodeURIComponent(game.filename)}`;
@@ -874,6 +900,100 @@ if (btnTuneApply) {
 let allMetrics = [];
 let currentModelId = null;
 
+let currentMetricsFilter = 'all';
+let currentGateFilter = 'all';
+let currentGateMA = 10;
+
+let allGatePoints = [];
+let allGateSummary = {};
+
+let allResignPoints = [];
+let allResignDangerRate = 0.05;
+
+function applyGateFilter() {
+    let points = allGatePoints;
+    if (currentGateFilter !== 'all') {
+        const limit = parseInt(currentGateFilter, 10);
+        if (!isNaN(limit) && limit > 0) {
+            points = points.slice(-limit);
+        }
+    }
+    
+    const empty = document.getElementById('gate-empty');
+    const hasData = Array.isArray(points) && points.length > 0;
+    if (empty) empty.style.display = hasData ? 'none' : '';
+
+    if (typeof updateGateChart === 'function') {
+        updateGateChart(points, allGateSummary.gate_threshold, currentGateMA);
+    }
+}
+
+function applyMetricsFilter() {
+    let metrics = allMetrics;
+    if (currentMetricsFilter !== 'all') {
+        const limit = parseInt(currentMetricsFilter, 10);
+        if (!isNaN(limit) && limit > 0) {
+            metrics = metrics.slice(-limit);
+        }
+    }
+    
+    resetCharts();
+    for (const m of metrics) {
+        updateCharts(m);
+    }
+    
+    if (metricsTableVisible()) renderMetricsTable(metrics);
+    applyResignFilter();
+}
+
+function applyResignFilter() {
+    let points = allResignPoints;
+    if (currentMetricsFilter !== 'all') {
+        const limit = parseInt(currentMetricsFilter, 10);
+        if (!isNaN(limit) && limit > 0) {
+            points = points.slice(-limit);
+        }
+    }
+    if (typeof updateResignChart === 'function') {
+        updateResignChart(points, allResignDangerRate);
+    }
+}
+
+function setupMetricsFilters() {
+    const gateBtns = document.querySelectorAll('#gate-time-filter .filter-btn');
+    gateBtns.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            gateBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentGateFilter = btn.dataset.limit || 'all';
+            applyGateFilter();
+        });
+    });
+
+    const gateMABtns = document.querySelectorAll('#gate-ma-filter .filter-btn');
+    gateMABtns.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            gateMABtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentGateMA = parseInt(btn.dataset.ma, 10) || 10;
+            applyGateFilter();
+        });
+    });
+
+    const metricsBtns = document.querySelectorAll('#metrics-time-filter .filter-btn');
+    metricsBtns.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            metricsBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentMetricsFilter = btn.dataset.limit || 'all';
+            applyMetricsFilter();
+        });
+    });
+}
+
 function pushMetric(m) {
     if (m == null || m.iteration == null) return;
     const at = allMetrics.findIndex(x => x.iteration === m.iteration);
@@ -889,17 +1009,18 @@ function fmtLoss(v) {
     return Number(v).toFixed(4);
 }
 
-function renderMetricsTable() {
+function renderMetricsTable(filteredMetrics) {
     const body = document.getElementById('metrics-table-body');
     const empty = document.getElementById('metrics-table-empty');
     if (!body) return;
-    if (!allMetrics.length) {
+    const source = Array.isArray(filteredMetrics) ? filteredMetrics : allMetrics;
+    if (!source.length) {
         body.innerHTML = '';
         if (empty) empty.style.display = '';
         return;
     }
     if (empty) empty.style.display = 'none';
-    const rows = allMetrics.slice().sort((a, b) => (a.iteration || 0) - (b.iteration || 0));
+    const rows = source.slice().sort((a, b) => (a.iteration || 0) - (b.iteration || 0));
     body.innerHTML = rows.map(m => {
         let total = m.total_loss;
         if (total == null && m.policy_loss != null && m.value_loss != null) total = m.policy_loss + m.value_loss;
@@ -987,7 +1108,7 @@ function setupMetricsViewToggle() {
                     table.hidden = false;
                     table.style.display = 'block';
                 }
-                renderMetricsTable();
+                applyMetricsFilter();
             } else {
                 if (table) {
                     table.hidden = true;
@@ -1015,7 +1136,10 @@ async function loadResignStats() {
     const card = document.getElementById('resign-card');
     if (!card) return;
     try {
-        const res = await fetch('/training/api/resign_stats');
+        const url = currentMetricsFilter === 'all' 
+            ? '/training/api/resign_stats' 
+            : `/training/api/resign_stats?limit=${currentMetricsFilter}`;
+        const res = await fetch(url);
         const { enabled, has_data, points, summary, danger_rate } = await res.json();
 
         const toggle = document.getElementById('metrics-view-toggle');
@@ -1034,45 +1158,10 @@ async function loadResignStats() {
             const el = document.getElementById(id);
             if (el) el.textContent = txt;
         };
-        const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
 
-        // Verdict banner — the one-line answer to "should this be on?"
-        const banner = document.getElementById('resign-verdict');
-        if (banner) banner.className = `resign-verdict is-${summary.verdict}`;
-        set('resign-headline', summary.headline || '—');
-        set('resign-detail', summary.detail || '');
-
-        set('resign-rate', pct(summary.resign_rate));
-        set('resign-counts', `${summary.total_resigned} of ${summary.total_games} games`);
-
-        set('resign-false-rate', summary.false_resign_rate == null
-            ? '—' : pct(summary.false_resign_rate));
-        set('resign-false-counts', summary.checked_games
-            ? `${summary.false_resigns} of ${summary.checked_games} checked`
-                + (summary.ci_high != null ? ` · up to ${pct(summary.ci_high)}` : '')
-            : 'no checks yet');
-
-        set('resign-saved', summary.est_moves_saved == null
-            ? '—' : `~${summary.est_moves_saved.toLocaleString()}`);
-        set('resign-saved-avg', summary.avg_moves_saved == null
-            ? 'measured from playout games'
-            : `~${summary.avg_moves_saved} moves per resigned game`);
-
-        set('resign-checks', `${summary.checked_games}`);
-        set('resign-checks-hint', summary.checked_games < summary.min_checks
-            ? `need ${summary.min_checks} to judge`
-            : 'enough to judge');
-
-        const hint = document.getElementById('resign-threshold-hint');
-        if (hint && summary.threshold != null) {
-            hint.textContent = summary.suppressed
-                ? 'Suppressed (collapse guard)'
-                : `Resign below ${Math.round((1 - summary.threshold) * 50)}% win rate`;
-        }
-
-        if (typeof updateResignChart === 'function') {
-            updateResignChart(points || [], danger_rate);
-        }
+        allResignPoints = points || [];
+        allResignDangerRate = danger_rate;
+        applyResignFilter();
     } catch (e) { /* ignore */ }
 }
 
@@ -1084,12 +1173,11 @@ async function loadGateHistory() {
         const { points, summary } = await res.json();
 
         const empty = document.getElementById('gate-empty');
-        const hasData = Array.isArray(points) && points.length > 0;
-        if (empty) empty.style.display = hasData ? 'none' : '';
+        allGatePoints = points || [];
+        allGateSummary = summary || {};
+        applyGateFilter();
 
-        if (typeof updateGateChart === 'function') {
-            updateGateChart(points || [], summary.gate_threshold);
-        }
+        const hasData = Array.isArray(allGatePoints) && allGatePoints.length > 0;
 
         const set = (id, txt) => {
             const el = document.getElementById(id);
@@ -1097,9 +1185,6 @@ async function loadGateHistory() {
         };
 
         if (!hasData) {
-            ['gate-promotions', 'gate-avg', 'gate-streak'].forEach(id => set(id, '—'));
-            set('gate-promo-rate', 'no gated iterations yet');
-            set('gate-last-promo', '—');
             set('gate-champ-version', 'v1');
             
             // Hero defaults
@@ -1119,16 +1204,7 @@ async function loadGateHistory() {
         const streak = summary.current_reject_streak || 0;
         const champVer = `v${summary.champion_version || 1}`;
 
-        set('gate-promotions', `${promoCount}/${totalGated}`);
-        set('gate-promo-rate', `${promoRatePct}% accepted`);
-        set('gate-avg', `${Math.round((summary.avg_gate_win_rate || 0) * 100)}%`);
         set('gate-champ-version', champVer);
-
-        set('gate-streak', streak === 0 ? 'just promoted' : `${streak} iter`);
-        set('gate-last-promo',
-            summary.last_promotion_iteration
-                ? `last at iter ${summary.last_promotion_iteration}`
-                : 'no promotions yet');
 
         // Update Hero Card & Tiles
         set('t-champ-version', champVer);
@@ -1137,12 +1213,6 @@ async function loadGateHistory() {
         set('t-hero-promo-rate', `${promoRatePct}% (${promoCount}/${totalGated})`);
         set('t-hero-streak', streak === 0 ? 'Just Promoted 🚀' : `${streak} iter streak`);
 
-        // Highlight streak if stalling
-        const streakEl = document.getElementById('gate-streak');
-        const heroStreakEl = document.getElementById('t-hero-streak');
-        if (streakEl) {
-            streakEl.style.color = streak >= 5 ? 'var(--danger)' : streak >= 3 ? 'var(--warning)' : '';
-        }
         if (heroStreakEl) {
             heroStreakEl.style.color = streak >= 5 ? 'var(--danger)' : streak >= 3 ? 'var(--warning)' : '';
         }
@@ -1155,11 +1225,7 @@ async function loadHistoricalMetrics() {
         const res = await fetch('/training/api/metrics');
         const metrics = await res.json();
         allMetrics = Array.isArray(metrics) ? metrics.slice() : [];
-        resetCharts();
-        for (const m of metrics) {
-            updateCharts(m);
-        }
-        renderMetricsTable();
+        applyMetricsFilter();
     } catch (e) { /* ignore */ }
 }
 
@@ -1403,4 +1469,5 @@ loadResignStats();
 setupSelfPlayFilter();
 setupTimeMetricsTabsAndFilters();
 setupMetricsViewToggle();
+setupMetricsFilters();
 

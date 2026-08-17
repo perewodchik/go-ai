@@ -68,8 +68,18 @@ class GoNetwork(nn.Module):
     
     def __init__(self, board_size: int = 9, num_input_planes: int = 10,
                  num_res_blocks: int = 4, num_filters: int = 64,
-                 value_head_hidden: int = 64):
+                 value_head_hidden: int = 64,
+                 input_features: str = None):
         super().__init__()
+        from game.features import DEFAULT_FEATURES, num_planes as _num_planes
+
+        # The network carries the name of the encoding it was built for, so
+        # callers can ask it rather than guessing. When a feature set is named,
+        # it is authoritative for the plane count — the two can never drift.
+        self.input_features = input_features or DEFAULT_FEATURES
+        if input_features:
+            num_input_planes = _num_planes(input_features)
+
         self.board_size = board_size
         self.action_size = board_size * board_size + 1  # All positions + pass
         

@@ -41,6 +41,13 @@ network shape it was produced for, so board size and plane count are recorded
 and checked on load. A mismatch loads nothing and says why — it never tries to
 salvage a partial buffer, because a half-migrated buffer is harder to reason
 about than an empty one.
+
+The plane COUNT is the key, not the feature-set name (game/features.py), because
+the count is exactly what decides tensor compatibility: v1_10 and v2_12 differ in
+width and are caught. This is deliberately the weaker check — two different
+encodings of the SAME width would be indistinguishable here. None exist today; a
+future one must bump FORMAT_VERSION, which invalidates old buffers cleanly
+instead of silently feeding a network planes that mean something else.
 """
 
 import os

@@ -7,7 +7,7 @@
     <meta name="description" content="AlphaZero-style Go AI with self-play training and interactive web interface">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=20">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=23">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
@@ -33,12 +33,11 @@
             <a href="/" class="nav-brand-link"><span class="nav-icon">⚫</span><span class="nav-brand-text">Go AI</span></a>
         </div>
         <div class="nav-links">
-            <a href="/" class="nav-link {% if request.path == '/' %}active{% endif %}">Dashboard</a>
-            {# The fleet console. Lives beside the old dashboard until it replaces it. #}
-            <a href="/models" class="nav-link {% if request.path == '/models' or request.path == '/models/' %}active{% endif %}">Models</a>
+            <a href="/" class="nav-link {% if request.path == '/' or request.path.startswith('/models') or request.path.startswith('/dashboard_old') %}active{% endif %}">Dashboard</a>
             <a href="/play" class="nav-link {% if request.path == '/play' %}active{% endif %}">Play</a>
             <a href="/training/" class="nav-link {% if request.path == '/training/' or request.path == '/training' or request.path == '/training_new' or request.path == '/training_new/' %}active{% endif %}">Training</a>
             <a href="/training/review" class="nav-link {% if request.path == '/training/review' %}active{% endif %}">Review Games</a>
+            <a href="/overfitting" class="nav-link {% if request.path.startswith('/overfitting') %}active{% endif %}">Overfitting</a>
             <a href="/info" class="nav-link {% if request.path == '/info' %}active{% endif %}">Info</a>
         </div>
         <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>

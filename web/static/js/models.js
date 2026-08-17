@@ -251,7 +251,7 @@
      */
     function sparkline(series, variant = '') {
         if (!series || series.length < 2) {
-            return '<span class="spark-empty" title="Not enough iterations to plot">·</span>';
+            return '<span class="spark-empty" title="No rated games to plot">·</span>';
         }
         const w = 60, h = 18, pad = 2;
         const min = Math.min(...series), max = Math.max(...series);
@@ -315,7 +315,7 @@
                 </div>
                 <div class="row-spark ${deltaClass}">${sparkline(model.elo_series, deltaClass)}</div>
                 <div class="row-elo">
-                    <span class="row-elo-value">${model.iterations_logged ? Math.round(model.elo) : '—'}</span>
+                    <span class="row-elo-value">${Math.round(model.elo)}</span>
                     ${delta ? `<span class="row-elo-delta ${deltaClass}">${escapeHtml(fmtSigned(delta))}</span>` : ''}
                 </div>
             </div>`;
@@ -374,12 +374,14 @@
             ? `${model.gate_promotions}/${model.gate_matches}`
             : 'none';
         const vitals = [
-            ['Elo', model.iterations_logged ? Math.round(model.elo) : '—',
-             model.elo_delta_10 ? `${fmtSigned(model.elo_delta_10)} over 10 iterations` : model.kyu_rank],
+            ['Elo', Math.round(model.elo),
+             model.elo_delta_10
+                ? `${fmtSigned(model.elo_delta_10)} over 10 games`
+                : `${model.kyu_rank} · ${model.rated_games || 0} rated game${model.rated_games === 1 ? '' : 's'}`],
             ['Iterations', model.iterations_logged || 0,
              node.parent ? `${node.own_iterations} since the fork` : 'from scratch'],
             ['Gate record', gate,
-             model.gate_matches ? 'candidates promoted' : 'Elo rests on the random-bot eval'],
+             model.gate_matches ? 'candidates promoted' : 'no gated iterations yet'],
             ['Games', (model.games_on_disk || 0).toLocaleString(), `${fmtBytes(model.bytes_on_disk)} on disk`],
             ['Trained for', fmtDuration(model.total_train_seconds), fmtAgo(model.last_trained)],
             ['Last loss', model.last_loss ?? '—', model.buffer_size ? `buffer ${model.buffer_size.toLocaleString()}` : ''],
@@ -674,8 +676,9 @@
 
             <section class="detail-section">
                 <h3 class="detail-section-title">Progress
-                    <span class="section-note">${model.iterations_logged} iterations</span></h3>
-                ${model.iterations_logged >= 2 ? `
+                    <span class="section-note">${model.iterations_logged} iterations ·
+                        ${model.rated_games || 0} rated games</span></h3>
+                ${hasCharts(model) ? `
                     <div class="chart-grid">
                         <div class="chart-box"><canvas id="chart-elo"></canvas></div>
                         <div class="chart-box"><canvas id="chart-loss"></canvas></div>
@@ -688,10 +691,19 @@
             ${configHTML(model)}
         `;
 
-        if (model.iterations_logged >= 2) renderCharts(model);
+        if (hasCharts(model)) renderCharts(model);
     }
 
     // ---- charts ----------------------------------------------------------
+
+    /**
+     * Is there anything to chart? Two separate axes now feed this panel, and
+     * either one alone is worth drawing: a model can have a hundred training
+     * iterations and no rated games, or the reverse.
+     */
+    function hasCharts(model) {
+        return model.iterations_logged >= 2 || (model.rated_games || 0) >= 1;
+    }
 
     const CHART_BASE = {
         responsive: true,
@@ -742,12 +754,113 @@
         state.charts.push(chart);
     }
 
+    /**
+     * Competitive Elo, plotted against games played.
+     *
+     * The x-axis is the sequential index of the rating event, so point 0 is
+     * where the model started and point N is where it stood after its Nth
+     * rated game. Clicking a point opens the game that moved the rating —
+     * that link is the reason the ledger stores `game_record_path` at all.
+     */
+    function eloChart(canvasId, elo, modelId) {
+        const canvas = el(canvasId);
+        if (!canvas) return;
+        const entries = elo.entries || [];
+        if (entries.length < 2) {
+            canvas.parentElement.innerHTML =
+                '<p class="empty-hint">No rated games yet — play a match to start the Elo curve.</p>';
+            return;
+        }
+
+        const chart = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: entries.map((e) => e.game),
+                datasets: [{
+                    label: 'Elo',
+                    data: entries.map((e) => e.new_elo),
+                    borderColor: '#c8956c',
+                    backgroundColor: 'rgba(200,149,108,0.12)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    // Wins, losses and draws are worth seeing individually —
+                    // this axis has one point per game, not per iteration.
+                    pointRadius: entries.length > 80 ? 0 : 2,
+                    pointHoverRadius: 5,
+                    pointBackgroundColor: entries.map(outcomeColor),
+                    spanGaps: true,
+                }],
+            },
+            options: {
+                ...CHART_BASE,
+                onClick: (evt, hit) => {
+                    if (!hit.length) return;
+                    const entry = entries[hit[0].index];
+                    if (entry && entry.game_record_path) {
+                        // `model` matters: the id is a path inside THIS model's
+                        // games dir, not the active model's.
+                        window.location.href =
+                            `/training/review?game=${encodeURIComponent(entry.game_record_path)}`
+                            + `&model=${encodeURIComponent(modelId)}`;
+                    }
+                },
+                plugins: {
+                    ...CHART_BASE.plugins,
+                    title: {
+                        display: true,
+                        text: `Competitive Elo · ${elo.rated_games || 0} rated game${elo.rated_games === 1 ? '' : 's'}`,
+                        color: '#c8c8c8', font: { size: 11 }, align: 'start',
+                    },
+                    tooltip: {
+                        callbacks: {
+                            title: (i) => {
+                                const e = entries[i[0].dataIndex];
+                                return e.note ? e.note : `Game ${e.game}`;
+                            },
+                            label: (ctx) => {
+                                const e = entries[ctx.dataIndex];
+                                const parts = [`Elo ${Math.round(e.new_elo)}`];
+                                if (e.game_outcome) {
+                                    parts.push(`${e.game_outcome} vs ${e.opponent_name || e.opponent_id || '?'}`);
+                                    parts.push(`${e.elo_delta >= 0 ? '+' : ''}${e.elo_delta.toFixed(1)}`);
+                                }
+                                return parts.join(' · ');
+                            },
+                            footer: (i) => (entries[i[0].dataIndex].game_record_path
+                                ? 'Click to open the game' : ''),
+                        },
+                    },
+                },
+                scales: {
+                    x: axisStyle('Games played'),
+                    y: axisStyle(''),
+                },
+            },
+        });
+        state.charts.push(chart);
+    }
+
+    function outcomeColor(entry) {
+        if (entry.game_outcome === 'win') return '#6cb98a';
+        if (entry.game_outcome === 'loss') return '#c87a7a';
+        if (entry.game_outcome === 'draw') return '#9a9a9a';
+        return '#c8956c';   // baseline / manual entry
+    }
+
     async function renderCharts(model) {
-        let data;
+        let data, elo;
         try {
-            const res = await fetch(
-                `/models/api/${encodeURIComponent(model.id)}/history?fields=elo,total_loss,gate_win_rate`);
-            data = await res.json();
+            // Two axes, two requests: losses and the gate are per training
+            // iteration, but competitive Elo is per rated game — a rating that
+            // only moves when a game is played cannot be plotted against
+            // iterations without inventing points that were never measured.
+            const [histRes, eloRes] = await Promise.all([
+                fetch(`/models/api/${encodeURIComponent(model.id)}/history?fields=total_loss,gate_win_rate`),
+                fetch(`/models/api/${encodeURIComponent(model.id)}/elo_history`),
+            ]);
+            data = await histRes.json();
+            elo = await eloRes.json();
         } catch (e) {
             return;
         }
@@ -755,8 +868,7 @@
         if (state.selectedId !== model.id || state.compareMode) return;
 
         const labels = data.iterations;
-        lineChart('chart-elo', labels, data.series.elo, 'Elo', '#c8956c',
-                  { fill: 'rgba(200,149,108,0.12)' });
+        eloChart('chart-elo', elo, model.id);
         lineChart('chart-loss', labels, data.series.total_loss, 'Total loss', '#7aa2c8');
         lineChart('chart-gate', labels, data.series.gate_win_rate, 'Gate win rate', '#6cb98a',
                   { yScale: { min: 0, max: 1, ticks: { color: '#9a9a9a', callback: (v) => `${Math.round(v * 100)}%`, font: { size: 10 } } } });
@@ -887,28 +999,37 @@
     }
 
     async function renderCompareCharts(a, b) {
-        const fetchOne = async (m) => {
-            try {
-                const res = await fetch(`/models/api/${encodeURIComponent(m.id)}/history?fields=elo,total_loss`);
-                return await res.json();
-            } catch (e) { return { iterations: [], series: {} }; }
+        const getJSON = async (url, fallback) => {
+            try { return await (await fetch(url)).json(); } catch (e) { return fallback; }
         };
-        const [da, db] = await Promise.all([fetchOne(a), fetchOne(b)]);
+        const id = (m) => encodeURIComponent(m.id);
+        const [da, db, ea, eb] = await Promise.all([
+            getJSON(`/models/api/${id(a)}/history?fields=total_loss`, { iterations: [], series: {} }),
+            getJSON(`/models/api/${id(b)}/history?fields=total_loss`, { iterations: [], series: {} }),
+            getJSON(`/models/api/${id(a)}/elo_history`, { entries: [] }),
+            getJSON(`/models/api/${id(b)}/elo_history`, { entries: [] }),
+        ]);
         if (!state.compareMode) return;
 
-        const pairs = (data, field) => (data.iterations || [])
+        const byIteration = (data, field) => (data.iterations || [])
             .map((it, i) => ({ x: it, y: (data.series[field] || [])[i] }))
             .filter((p) => p.y !== null && p.y !== undefined);
 
-        const overlay = (canvasId, field, title, yScale) => {
+        // Elo is per rated game for both models, so the two curves share an
+        // x-axis of "games played". That is the only fair way to overlay them:
+        // two forks can differ by fifty iterations and have played the same
+        // six games.
+        const byGame = (data) => (data.entries || []).map((e) => ({ x: e.game, y: e.new_elo }));
+
+        const overlay = (canvasId, title, xTitle, seriesA, seriesB, yScale) => {
             const canvas = el(canvasId);
             if (!canvas) return;
             const chart = new Chart(canvas.getContext('2d'), {
                 type: 'line',
                 data: {
                     datasets: [
-                        { label: a.name, data: pairs(da, field), borderColor: '#c8956c', borderWidth: 2, pointRadius: 0, tension: 0.3 },
-                        { label: b.name, data: pairs(db, field), borderColor: '#7aa2c8', borderWidth: 2, pointRadius: 0, tension: 0.3 },
+                        { label: a.name, data: seriesA, borderColor: '#c8956c', borderWidth: 2, pointRadius: 0, tension: 0.3 },
+                        { label: b.name, data: seriesB, borderColor: '#7aa2c8', borderWidth: 2, pointRadius: 0, tension: 0.3 },
                     ],
                 },
                 options: {
@@ -918,7 +1039,7 @@
                         title: { display: true, text: title, color: '#c8c8c8', font: { size: 11 }, align: 'start' },
                     },
                     scales: {
-                        x: { type: 'linear', ...axisStyle('Iteration') },
+                        x: { type: 'linear', ...axisStyle(xTitle) },
                         y: { ...axisStyle(''), ...(yScale || {}) },
                     },
                 },
@@ -926,8 +1047,9 @@
             state.charts.push(chart);
         };
 
-        overlay('chart-cmp-elo', 'elo', 'Elo');
-        overlay('chart-cmp-loss', 'total_loss', 'Total loss');
+        overlay('chart-cmp-elo', 'Competitive Elo', 'Games played', byGame(ea), byGame(eb));
+        overlay('chart-cmp-loss', 'Total loss', 'Iteration',
+                byIteration(da, 'total_loss'), byIteration(db, 'total_loss'));
     }
 
     // ---- actions ---------------------------------------------------------
@@ -1125,18 +1247,57 @@
         const preset = modal.netPresets[idx];
         el('net-size-label').textContent = preset.label;
         el('net-size-note').textContent = preset.note || '';
-        el('net-size-params').textContent = fmtParams(preset.params);
+        // params_delta is computed by the server building both networks and
+        // diffing real parameter counts — never re-derived here, so this label
+        // can never drift from what the model actually ends up with.
+        let text = fmtParams(preset.params);
+        if (preset.params_delta) {
+            text += ` (+${preset.params_delta.toLocaleString()} for this encoding)`;
+        }
+        el('net-size-params').textContent = text;
     }
 
-    async function loadNetworkPresets(boardSize, keepKey) {
+    function currentFeatures() {
+        const sel = el('new-model-input-features');
+        return (sel && sel.value) || modal.featuresDefaultKey || 'v1_10';
+    }
+
+    function renderNetFeatures() {
+        const sel = el('new-model-input-features');
+        if (!sel || !modal.featureSets || !modal.featureSets.length) return;
+        const spec = modal.featureSets.find((f) => f.key === sel.value)
+                  || modal.featureSets[0];
+        const planes = el('net-features-planes');
+        const note = el('net-features-note');
+        if (planes) planes.textContent = `${spec.num_planes} planes`;
+        if (note) note.textContent = spec.summary || '';
+    }
+
+    async function loadNetworkPresets(boardSize, keepKey, keepFeatures) {
         const slider = el('new-model-net-size');
         if (!slider) return;
+        const features = keepFeatures || currentFeatures();
         try {
-            const res = await fetch(`/models/api/network_presets?board_size=${boardSize}`);
+            const res = await fetch(
+                `/models/api/network_presets?board_size=${boardSize}` +
+                `&input_features=${encodeURIComponent(features)}`);
             const data = await res.json();
             modal.netPresets = data.presets || [];
             modal.netDefaultKey = data.default || 'small';
+            modal.featureSets = data.feature_sets || [];
+            modal.featuresDefaultKey = data.default_features || 'v1_10';
         } catch (e) { return; }
+
+        // Populate the encoding chooser once we know what exists.
+        const sel = el('new-model-input-features');
+        if (sel && modal.featureSets.length) {
+            const want = keepFeatures || sel.value || modal.featuresDefaultKey;
+            sel.innerHTML = modal.featureSets.map((f) =>
+                `<option value="${f.key}">${f.label}</option>`).join('');
+            sel.value = modal.featureSets.some((f) => f.key === want)
+                ? want : modal.featuresDefaultKey;
+            renderNetFeatures();
+        }
 
         slider.max = String(Math.max(0, modal.netPresets.length - 1));
         const target = keepKey || modal.netDefaultKey;
@@ -1159,6 +1320,12 @@
     function setNetLocked(locked) {
         el('new-model-net-size').disabled = locked;
         el('net-size-locked').style.display = locked ? '' : 'none';
+        // The encoding decides input_conv.in_channels, so it is frozen for the
+        // same reason the architecture is: existing weights would not fit.
+        const sel = el('new-model-input-features');
+        if (sel) sel.disabled = locked;
+        const warn = el('net-features-locked');
+        if (warn) warn.style.display = locked ? '' : 'none';
     }
 
     function setFieldsDisabled(disabled) {
@@ -1206,7 +1373,8 @@
         setFieldsDisabled(false);
 
         await initModalParams(model.training || {});
-        await loadNetworkPresets(model.board_size, (model.network || {}).size_preset);
+        await loadNetworkPresets(model.board_size, (model.network || {}).size_preset,
+                                 (model.network || {}).input_features || 'v1_10');
         setNetLocked(true);
         el('create-model-modal').style.display = 'flex';
     }
@@ -1238,7 +1406,8 @@
         setFieldsDisabled(true);
 
         await initModalParams(model.training || {});
-        await loadNetworkPresets(model.board_size, (model.network || {}).size_preset);
+        await loadNetworkPresets(model.board_size, (model.network || {}).size_preset,
+                                 (model.network || {}).input_features || 'v1_10');
         setNetLocked(true);
         el('create-model-modal').style.display = 'flex';
     }
@@ -1266,6 +1435,7 @@
         if (modal.mode === 'create' && modal.netPresets.length) {
             const idx = parseInt(el('new-model-net-size').value, 10) || 0;
             payload.network_size = (modal.netPresets[idx] || {}).key;
+            payload.input_features = currentFeatures();
         }
 
         const original = btn.textContent;
@@ -1399,6 +1569,18 @@
         });
         el('btn-confirm-create').addEventListener('click', submitModal);
         el('new-model-net-size').addEventListener('input', renderNetSize);
+        const featuresSel = el('new-model-input-features');
+        if (featuresSel) {
+            featuresSel.addEventListener('change', () => {
+                renderNetFeatures();
+                // Extra planes widen the first convolution, so the parameter
+                // counts shown against each size preset have to be refetched.
+                const size = parseInt(el('new-model-board-size').value, 10) || 9;
+                const idx = parseInt(el('new-model-net-size').value, 10) || 0;
+                const keep = (modal.netPresets[idx] || {}).key;
+                loadNetworkPresets(size, keep, featuresSel.value);
+            });
+        }
         el('new-model-board-size').addEventListener('change', (e) => {
             loadNetworkPresets(parseInt(e.target.value, 10) || 9);
             const warn = el('model-form-warning');

@@ -39,10 +39,19 @@ class NetworkConfig:
     """Neural network architecture — kept small for CPU/MPS."""
     num_res_blocks: int = 4                # Residual blocks (4 is good for 9x9)
     num_filters: int = 64                  # Convolutional filters per layer
-    # Input planes: black stones, white stones, liberties (1,2,3+) x2 colors,
-    #               ko point, turn color = 10 planes total
+    # Versioned input encoding — see game/features.py. Frozen per model at
+    # creation: changing it changes input_conv.in_channels, which makes an
+    # existing weights.pt shape-incompatible.
+    input_features: str = "v1_10"
+    # Derived from input_features in __post_init__; never set it by hand.
     num_input_planes: int = 10
     value_head_hidden: int = 64            # Hidden layer size in value head
+
+    def __post_init__(self):
+        # One source of truth. Keeping the plane count derived means a config
+        # can never claim 10 planes while asking for a 12-plane encoding.
+        from game.features import num_planes
+        self.num_input_planes = num_planes(self.input_features)
 
 
 # ------------------------------------------------------------------
@@ -162,6 +171,19 @@ class MCTSConfig:
     temperature_threshold: int = 15        # After this many moves, temp drops to near-zero
     temperature_init: float = 0.5
     temperature_final: float = 0.001
+    # tau used to build the POLICY TRAINING TARGET, kept separate from the three
+    # settings above (which govern only which move gets PLAYED). AlphaZero
+    # trains on pi = N/sum(N), i.e. tau = 1.0, regardless of the play
+    # temperature: the relative visit counts of the runners-up ARE the training
+    # signal, and any tau < 1 discards them.
+    #
+    # This used to be tied to the play temperature. The result, measured on a
+    # real 50k buffer: 62% of targets one-hot, median 3 actions with any mass.
+    # The policy head then behaviour-clones its own argmax, its entropy decays
+    # monotonically, and the model overfits to the narrow move set it shares
+    # with its self-play opponent — invisible to the promotion gate, obvious
+    # against any foreign opponent. Leave at 1.0 unless experimenting.
+    policy_target_temperature: float = 1.0
 
 
 @dataclass
@@ -184,11 +206,35 @@ class TrainingConfig:
     # Game storage — keep 1 out of every N self-play games for replay/review.
     # We want to save every single game per user request.
     game_store_every_n: int = 1
+
+    # --- Game recording ---------------------------------------------------
+    # Whether a phase writes its full game records (move lists, per-move win
+    # rates) to disk. Off means the games are still PLAYED and still indexed —
+    # every chart on the training page keeps every point, because those are
+    # drawn from games/index.jsonl, not from the records (see
+    # ai/game_index.py). What is lost is the ability to replay those games in
+    # the review page.
+    #
+    # The bytes are the reason to turn them off: a 9x9 self-play record is
+    # ~12 KB and a hundred-iteration model has produced over a gigabyte of
+    # them. The gate is the bigger offender per iteration — it plays
+    # gate_games (20 by default) to self-play's num_self_play_games.
+    record_self_play_games: bool = True
+    record_gate_games: bool = True
     
     # Training
     batch_size: int = 32
     learning_rate: float = 0.002
-    lr_decay_steps: int = 100              # Cosine annealing cycle length (iterations)
+    # Length of the ONE cosine descent, in iterations: the LR falls from
+    # learning_rate to the scheduler's eta_min (1e-5) over this many iterations
+    # and then holds there — Trainer stops stepping the scheduler at T_max
+    # rather than letting CosineAnnealingLR's periodicity carry it back up to
+    # full strength, which it does by 2 * T_max.
+    #
+    # Set this to roughly the number of iterations you actually intend to run.
+    # Leaving it at 100 for a 400-iteration run is not broken, but it means three
+    # quarters of the run happens at the 1e-5 floor.
+    lr_decay_steps: int = 100
     weight_decay: float = 1e-4             # L2 regularization
     num_epochs_per_iteration: int = 3      # Training epochs per self-play iteration
     
@@ -212,7 +258,14 @@ class TrainingConfig:
     # instead of 75.1%.
     gate_games: int = 20                   # Head-to-head games (colors alternate)
     gate_threshold: float = 0.55           # Candidate must win >= this share
-    gate_simulations: int = 50             # Sims per move during the gate match
+    # Sims per move during the gate match. Should track num_simulations: the
+    # gate decides which network generates every future self-play game, so
+    # measuring it at a search depth the model never plays at selects for the
+    # wrong thing (a low sim budget can't overrule the prior, so it flatters
+    # whichever candidate has the most confident policy — exactly the network
+    # you don't want when its confidence is the problem). Trainer warns when
+    # this drops below half of num_simulations.
+    gate_simulations: int = 200
     # Consecutive rejections before warning that training has stalled.
     gate_stall_warning: int = 5
 
@@ -246,6 +299,41 @@ class TrainingConfig:
     collapse_pass_rate_max: float = 0.25   # Max share of a colour's moves that are passes
     collapse_probe_positions: int = 128    # Buffer positions sampled for the probe
     collapse_auto_stop: bool = False       # True = halt training when tripped
+    # --- Policy-head collapse ---------------------------------------------
+    # The value-head tripwires above miss the failure that actually degraded
+    # hero-of-time: the POLICY head narrowing until only a handful of moves
+    # carry any prior. Nothing else in the loop sees it. Self-play looks fine
+    # (both sides share the shrinking move set), the gate reads ~50% (a network
+    # is no worse than itself), and the value head stays perfectly healthy. It
+    # is visible only against a foreign opponent, whose replies fall outside the
+    # narrow prior — where PUCT cannot recover them because their prior is ~0.
+    #
+    # Two separate probes, because they fail in that order: the LABEL narrows
+    # first (a tau < 1 policy target, now fixed), and the NETWORK follows.
+    #
+    # LABEL floor, measured on 9x9 with this repo's own settings rather than
+    # assumed. Re-running iteration 185's positions at tau=1 gives a mean of
+    # 0.95 nats over a support of ~7 moves — lower than a textbook AlphaZero
+    # target because fpu_reduction (0.35) deliberately concentrates the search.
+    # The collapsed buffer this was found on measured 0.19 with 62% of labels
+    # literally one-hot and a support of 3. 0.55 sits in the empty band between
+    # those two regimes; anything nearer 0.9 would fire on healthy runs, since
+    # 42% of individual healthy positions are already below 0.9.
+    collapse_target_entropy_min: float = 0.55
+    # NETWORK floor. Deliberately low: the only measurements available are from
+    # a run that was already degrading (1.40 nats at iteration 128, 1.05 at
+    # 185), so there is no honest "healthy" value to calibrate against, and a
+    # guessed threshold either cries wolf or fires far too late. This is a
+    # last-resort floor meaning "definitely broken", not a health check — the
+    # trend tripwire below is what actually catches the failure.
+    collapse_policy_entropy_min: float = 0.5
+    # TREND tripwire, which needs no calibration and is what would have caught
+    # hero-of-time. A policy head that is narrowing gives up entropy steadily,
+    # so compare the current value against the mean of the window ending
+    # `collapse_entropy_trend_lookback` iterations ago and fire on a sustained
+    # relative drop. The real regression was -25% over 57 iterations.
+    collapse_entropy_trend_lookback: int = 25
+    collapse_entropy_trend_drop: float = 0.15  # Relative fall that trips it
 
     # --- Move restrictions (heuristics, not rules of Go) -------------------
     # When True, the bot may not play into one of its own chain's only two
@@ -368,6 +456,13 @@ class Config:
             temperature_threshold=getattr(model_info.training, "temperature_threshold", 30),
             temperature_init=getattr(model_info.training, "temperature_init", 0.8),
             temperature_final=getattr(model_info.training, "temperature_final", 0.1),
+            # Models created before the split have no value here and get 1.0 —
+            # the AlphaZero default — NOT their old temperature_final. Their
+            # existing buffer of sharpened labels ages out of the FIFO on its
+            # own; re-sharpening new ones to match it would just extend the
+            # problem.
+            policy_target_temperature=getattr(
+                model_info.training, "policy_target_temperature", 1.0),
         )
         training = TrainingConfig(
             num_self_play_games=model_info.training.num_self_play_games,
@@ -388,6 +483,8 @@ class Config:
             gate_simulations=_model_default(model_info.training, "gate_simulations"),
             gate_stall_warning=_model_default(model_info.training, "gate_stall_warning"),
             num_parallel_workers=_model_default(model_info.training, "num_parallel_workers"),
+            record_self_play_games=_model_default(model_info.training, "record_self_play_games"),
+            record_gate_games=_model_default(model_info.training, "record_gate_games"),
             collapse_guard_enabled=_model_default(model_info.training, "collapse_guard_enabled"),
             collapse_auto_stop=_model_default(model_info.training, "collapse_auto_stop"),
             restrict_eye_fill=_model_default(model_info.training, "restrict_eye_fill"),
@@ -409,6 +506,9 @@ class Config:
                 num_res_blocks=net_info.num_res_blocks,
                 num_filters=net_info.num_filters,
                 value_head_hidden=net_info.value_head_hidden,
+                # Models created before the registry existed have no such field
+                # and fall back to the 10-plane encoding they were trained with.
+                input_features=getattr(net_info, "input_features", None) or "v1_10",
             )
         else:
             network = NetworkConfig()

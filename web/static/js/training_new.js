@@ -423,6 +423,19 @@ function addLogEntry(data, append = false) {
     }
 }
 
+function formatGameTime(timestamp) {
+    if (!timestamp) return '';
+    try {
+        const d = new Date(timestamp);
+        if (isNaN(d.getTime())) return '';
+        const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        const timeStr = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+        return `${dateStr}, ${timeStr}`;
+    } catch (e) {
+        return '';
+    }
+}
+
 // ---- Games List ----
 function gamesPhaseBadge(phase) {
     const color = (rate, threshold = 0.5) => {
@@ -558,12 +571,14 @@ async function loadGamesList() {
                     if (game.winner === 1) resultText = `B+${game.margin || '?'}`;
                     else if (game.winner === 2) resultText = `W+${game.margin || '?'}`;
 
+                    const when = formatGameTime(game.timestamp);
+
                     const body = document.createElement('div');
                     body.className = 'game-item-body';
                     body.style.cursor = 'pointer';
                     body.innerHTML = `
                         <div style="font-weight: 500;">${winnerIcon} ${label}</div>
-                        <div class="meta"><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves</div>
+                        <div class="meta"><span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves${when ? ` &middot; ${when}` : ''}</div>
                     `;
                     body.addEventListener('click', () => {
                         window.location.href = `/training/review?game=${encodeURIComponent(game.filename)}`;

@@ -47,7 +47,7 @@ class ScriptedMCTS:
         self.move_num = 0
 
     def search(self, state, temperature=1.0, add_noise=True, allow_pass=True,
-               min_pass_move=0):
+               min_pass_move=0, target_temperature=1.0):
         self.root_value = float(self.value_fn(self.move_num, state.current_player))
         self.move_num += 1
 

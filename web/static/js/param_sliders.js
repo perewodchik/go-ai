@@ -26,7 +26,6 @@ function formatParamValue(key, val, spec) {
     if (spec.type === 'bool') return toParamBool(val) ? 'On' : 'Off';
     if (val === null || val === undefined || isNaN(val)) return '—';
     const num = parseFloat(val);
-    if (key === 'eval_games' && num === 0) return '0 (Skipped)';
     if (spec.type === 'int') return Math.round(num).toString();
     if (spec.step < 0.001) return num.toFixed(4);
     if (spec.step < 0.01) return num.toFixed(3);
@@ -114,7 +113,6 @@ function buildParamSlidersHTML(prefix, boundsData, values = {}) {
 const WORKER_POOL_PHASES = {
     num_self_play_games: 'Self-play',
     gate_games: 'Gate',
-    eval_games: 'Eval',
 };
 
 function updateWorkerBalance(prefix, boundsData) {

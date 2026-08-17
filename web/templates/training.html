@@ -153,32 +153,25 @@
         </div>
 
         <div class="collapsible-content">
-            <div class="gate-stats" id="gate-stats">
-                <div class="gate-stat">
-                    <span class="gate-stat-label">Promotions</span>
-                    <strong class="gate-stat-val" id="gate-promotions">—</strong>
-                    <small id="gate-promo-rate">—</small>
+            <div class="metrics-toolbar-bar" style="justify-content: space-between; display: flex; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.75rem;">
+                <div class="timeline-filter-buttons" id="gate-ma-filter">
+                    <button class="filter-btn active" data-ma="10">10</button>
+                    <button class="filter-btn" data-ma="20">20</button>
+                    <button class="filter-btn" data-ma="50">50</button>
                 </div>
-                <div class="gate-stat">
-                    <span class="gate-stat-label">Avg gate score</span>
-                    <strong class="gate-stat-val" id="gate-avg">—</strong>
-                    <small>vs previous champion</small>
-                </div>
-                <div class="gate-stat">
-                    <span class="gate-stat-label">Since last promotion</span>
-                    <strong class="gate-stat-val" id="gate-streak">—</strong>
-                    <small id="gate-last-promo">—</small>
+                <div class="timeline-filter-buttons" id="gate-time-filter">
+                    <button class="filter-btn" data-limit="10">10</button>
+                    <button class="filter-btn" data-limit="20">20</button>
+                    <button class="filter-btn" data-limit="50">50</button>
+                    <button class="filter-btn active" data-limit="all">All</button>
                 </div>
             </div>
+
 
             <div class="gate-chart-wrap">
                 <canvas id="gate-chart"></canvas>
             </div>
-            <p class="margin-caption">
-                Bars = the candidate's score against the reigning champion each iteration
-                (<span style="color:#81c784">green</span> promoted, <span style="color:#ff6b6b">red</span> rejected);
-                the dashed line is the 55% promotion threshold.
-            </p>
+
             <p class="margin-caption" id="gate-empty" style="display:none;">
                 No gate data yet — the champion ladder starts building from the next completed iteration.
             </p>
@@ -199,82 +192,46 @@
         </div>
 
         <div class="collapsible-content">
-            <div class="metrics-toolbar-bar">
-                <div class="graph-filter-buttons" id="metrics-view-toggle">
+            <div class="metrics-toolbar-bar" style="justify-content: space-between; display: flex; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.75rem;">
+                <div class="timeline-filter-buttons" id="metrics-view-toggle">
                     <button class="filter-btn active" data-view="chart" title="Show loss charts">Chart</button>
                     <button class="filter-btn" data-view="table" title="Show raw metrics table">Table</button>
                 </div>
+                
+                <div class="timeline-filter-buttons" id="metrics-time-filter">
+                    <button class="filter-btn" data-limit="10">10</button>
+                    <button class="filter-btn" data-limit="20">20</button>
+                    <button class="filter-btn" data-limit="50">50</button>
+                    <button class="filter-btn active" data-limit="all">All</button>
+                </div>
             </div>
 
-            <!-- Chart mode (2-card grid for Policy and Value Loss) -->
-            <div class="charts-grid charts-grid-2col" id="metrics-charts">
-                <div class="chart-card glass">
+            <!-- Chart mode (3-card grid for Policy Loss, Value Loss, and Mercy Rule) -->
+            <div class="charts-grid charts-grid-3col" id="metrics-charts">
+                <div class="chart-card">
                     <div class="chart-header">
                         <h4>Policy Loss</h4>
                         <span class="chart-metric-hint" title="Cross-entropy loss between MCTS visit distribution and network move policy">Move Distribution</span>
                     </div>
                     <canvas id="policy-loss-chart"></canvas>
                 </div>
-                <div class="chart-card glass">
+                <div class="chart-card">
                     <div class="chart-header">
                         <h4>Value Loss</h4>
                         <span class="chart-metric-hint" title="Mean-squared error between network outcome prediction and actual game result">Game Outcome (MSE)</span>
                     </div>
                     <canvas id="value-loss-chart"></canvas>
                 </div>
-            </div>
-
-            <!-- Mercy rule: benefit vs cost. Hidden entirely until the rule has
-                 either been switched on or produced data in the past. -->
-            <div class="chart-card glass resign-card" id="resign-card" hidden>
-                <div class="chart-header">
-                    <h4>🏳️ Mercy Rule</h4>
-                    <span class="chart-metric-hint" id="resign-threshold-hint"
-                          title="Games stopped early once a side's own search says it is lost">Resignation Health</span>
-                </div>
-
-                <div class="resign-verdict" id="resign-verdict">
-                    <span class="resign-verdict-dot"></span>
-                    <div class="resign-verdict-text">
-                        <strong id="resign-headline">—</strong>
-                        <small id="resign-detail">—</small>
+                <!-- Mercy rule: benefit vs cost. Hidden entirely until the rule has
+                     either been switched on or produced data in the past. -->
+                <div class="chart-card resign-card" id="resign-card" hidden>
+                    <div class="chart-header">
+                        <h4>🏳️ Mercy Rule</h4>
+                    </div>
+                    <div class="gate-chart-wrap">
+                        <canvas id="resign-chart"></canvas>
                     </div>
                 </div>
-
-                <div class="gate-stats resign-stats">
-                    <div class="gate-stat">
-                        <span class="gate-stat-label">Games resigned</span>
-                        <strong class="gate-stat-val" id="resign-rate">—</strong>
-                        <small id="resign-counts">—</small>
-                    </div>
-                    <div class="gate-stat">
-                        <span class="gate-stat-label">Wrong resignations</span>
-                        <strong class="gate-stat-val" id="resign-false-rate">—</strong>
-                        <small id="resign-false-counts">—</small>
-                    </div>
-                    <div class="gate-stat">
-                        <span class="gate-stat-label">Moves saved</span>
-                        <strong class="gate-stat-val gate-stat-accent" id="resign-saved">—</strong>
-                        <small id="resign-saved-avg">—</small>
-                    </div>
-                    <div class="gate-stat">
-                        <span class="gate-stat-label">Evidence</span>
-                        <strong class="gate-stat-val" id="resign-checks">—</strong>
-                        <small id="resign-checks-hint">playout checks</small>
-                    </div>
-                </div>
-
-                <div class="gate-chart-wrap">
-                    <canvas id="resign-chart"></canvas>
-                </div>
-                <p class="margin-caption">
-                    Grey bars = share of games the rule ended early each iteration (the benefit).
-                    The <span style="color:#ef5350">red line</span> = cumulative share of checked
-                    resignations that were <em>wrong</em> — the "hopeless" side went on to win —
-                    with its confidence band. Each wrong resignation mislabels a whole game of
-                    training data, so what matters is whether the <strong>band</strong>, not just
-                    the line, sits under the 5% danger rule.
-                </p>
             </div>
 
             <!-- Table mode (hidden by default) -->

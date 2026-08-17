@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}Overfitting — Go AI{% endblock %}
+
+{% block head %}
+<style>
+/* Scoped to this page: it is a diagnostic report, not a fleet console, so it
+   wants prose-width explanation next to each number rather than a stat grid. */
+.of-head { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.of-head h1 { font-size: 1.5rem; margin: 0; }
+.of-sub { color: var(--text-secondary); font-size: 0.9rem; max-width: 70ch; margin-bottom: 1.5rem; line-height: 1.5; }
+.of-select { background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-glass);
+             border-radius: var(--radius-sm); padding: 0.45rem 0.7rem; font-size: 0.9rem; }
+
+.of-findings { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 2rem; }
+.of-finding { display: flex; gap: 0.85rem; padding: 0.85rem 1rem; border-radius: var(--radius-sm);
+              background: var(--bg-glass); border-left: 3px solid var(--text-muted); }
+.of-finding.critical { border-left-color: var(--danger); background: rgba(239, 83, 80, 0.07); }
+.of-finding.warning  { border-left-color: var(--warning); background: rgba(255, 167, 38, 0.07); }
+.of-finding.ok       { border-left-color: var(--success); background: rgba(76, 175, 80, 0.06); }
+.of-finding-icon { font-size: 1.1rem; line-height: 1.3; }
+.of-finding-title { font-weight: 600; margin-bottom: 0.2rem; }
+.of-finding-detail { color: var(--text-secondary); font-size: 0.86rem; line-height: 1.55; max-width: 90ch; }
+
+.of-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.75rem; margin-bottom: 2rem; }
+.of-metric { background: var(--bg-glass); border: 1px solid var(--border-glass);
+             border-radius: var(--radius-sm); padding: 0.85rem 1rem; }
+.of-metric-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); }
+.of-metric-value { font-size: 1.7rem; font-weight: 700; margin: 0.25rem 0; }
+.of-metric-value.bad { color: var(--danger); }
+.of-metric-value.warn { color: var(--warning); }
+.of-metric-value.good { color: var(--success); }
+.of-metric-value.na { color: var(--text-muted); font-size: 1.1rem; }
+.of-metric-hint { font-size: 0.72rem; color: var(--text-muted); line-height: 1.45; }
+
+.of-section { margin-bottom: 2.5rem; }
+.of-section > h2 { font-size: 1.05rem; color: var(--accent-light); margin-bottom: 0.35rem; }
+.of-section > p.of-why { color: var(--text-secondary); font-size: 0.85rem; max-width: 80ch;
+                         line-height: 1.55; margin-bottom: 1rem; }
+.of-canvas-wrap { background: var(--bg-glass); border: 1px solid var(--border-glass);
+                  border-radius: var(--radius-sm); padding: 1rem; }
+.of-canvas-wrap canvas { width: 100% !important; height: 300px !important; }
+.of-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; }
+
+.of-table-scroll { overflow-x: auto; }
+.of-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; min-width: 560px; }
+.of-table th, .of-table td { padding: 0.55rem 0.7rem; text-align: left; border-bottom: 1px solid var(--border-glass); }
+.of-table th { color: var(--text-secondary); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.of-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.of-delta-down { color: var(--danger); font-weight: 600; }
+.of-delta-up { color: var(--success); font-weight: 600; }
+.of-muted { color: var(--text-muted); }
+.of-empty { color: var(--text-muted); font-size: 0.87rem; padding: 1.25rem; background: var(--bg-glass);
+            border: 1px dashed var(--border-glass); border-radius: var(--radius-sm); line-height: 1.55; }
+.of-loading { color: var(--text-secondary); padding: 2rem 0; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="of-head">
+    <h1>Overfitting Diagnostics</h1>
+    <select id="of-model" class="of-select">
+        {% for m in models %}
+        <option value="{{ m.id }}" {% if m.id == selected_model %}selected{% endif %}>
+            {{ m.name }} — iter {{ m.iteration }}
+        </option>
+        {% endfor %}
+    </select>
+    <button id="of-refresh" class="btn btn-secondary">Re-probe</button>
+</div>
+
+<p class="of-sub">
+    Every other chart in this app is built from the model playing itself, and self-play
+    cannot see a weakness both sides share. This page measures the things that can:
+    how much of the search survives into the training labels, how widely the policy
+    head still spreads its prior, and — the only unambiguous one — how results against
+    outside opponents compare with results against its own lineage.
+</p>
+
+<div id="of-error" class="of-empty" style="display:none"></div>
+<div id="of-loading" class="of-loading">Probing weights and replaying games…</div>
+
+<div id="of-body" style="display:none">
+    <div class="of-findings" id="of-findings"></div>
+
+    <div class="of-metrics" id="of-metrics"></div>
+
+    <div class="of-section">
+        <h2>Generalization gap</h2>
+        <p class="of-why">
+            Win rate against its own ancestors and the random anchor (internal) versus
+            anything from outside the training loop (external), bucketed by the iteration
+            the games were played at. The two lines tracking each other is health. The
+            internal line staying high while the external line falls is overfitting — and
+            it is the one signal the promotion gate structurally cannot produce, because a
+            network is never much worse than itself.
+        </p>
+        <div class="of-canvas-wrap"><canvas id="of-gap-chart"></canvas></div>
+    </div>
+
+    <div class="of-section">
+        <h2>Same opponents, later iterations</h2>
+        <p class="of-why">
+            The aggregate external rate confounds strength with scheduling — face easy bots
+            early and hard ones later and you look like you declined. This splits each
+            opponent's games at the median iteration, so every comparison is against the
+            same opponent. A red delta is a real regression.
+        </p>
+        <div class="of-table-scroll">
+            <table class="of-table">
+                <thead><tr>
+                    <th>Opponent</th><th class="num">Early</th><th class="num">Late</th>
+                    <th class="num">Change</th><th class="num">Games</th><th class="num">Iterations</th>
+                </tr></thead>
+                <tbody id="of-opponents"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="of-section">
+        <h2>Policy entropy over training</h2>
+        <p class="of-why">
+            The leading indicators, per iteration. <strong>Label entropy</strong> is how much
+            of the search's judgement reaches the network — it narrows first if the policy
+            target temperature is below 1. <strong>Network entropy</strong> is how widely the
+            policy head actually spreads its prior over legal moves, and follows the labels
+            down over the following tens of iterations. Both are in nats; higher is wider.
+            Gaps mean those iterations ran before the metric was recorded.
+        </p>
+        <div class="of-two">
+            <div class="of-canvas-wrap"><canvas id="of-entropy-chart"></canvas></div>
+            <div class="of-canvas-wrap"><canvas id="of-gate-chart"></canvas></div>
+        </div>
+    </div>
+
+    <div class="of-section">
+        <h2>Replay buffer label age profile</h2>
+        <p class="of-why">
+            Label entropy across the buffer from oldest to newest samples. This is the one
+            to watch after changing the policy target temperature: the buffer holds roughly
+            thirty iterations, so a fix appears here as a rising right-hand edge long before
+            the averages move. A flat line means every sample in the buffer, new and old,
+            was built the same way.
+        </p>
+        <div class="of-canvas-wrap"><canvas id="of-decile-chart"></canvas></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/overfitting.js') }}?v=1"></script>
+{% endblock %}

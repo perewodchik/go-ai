@@ -29,6 +29,7 @@ import torch
 from typing import Optional, Dict, Tuple, List
 from game.game_state import GameState, MOVE_PASS
 from game.board import BLACK, WHITE, opponent
+from game.features import encode_for_network
 
 
 def visit_distribution(visits, temperature: float) -> np.ndarray:
@@ -233,15 +234,23 @@ class MCTS:
 
     def search(self, state: GameState, temperature: float = 1.0,
                add_noise: bool = True, allow_pass: bool = True,
-               min_pass_move: int = 0) -> Tuple[Tuple[int, int], np.ndarray]:
+               min_pass_move: int = 0,
+               target_temperature: float = 1.0) -> Tuple[Tuple[int, int], np.ndarray]:
         """
         Run MCTS from the given state and return the best action.
 
         Args:
             state: Current game state.
-            temperature: Controls randomness of move selection.
+            temperature: Controls randomness of MOVE SELECTION only.
                 - temperature=1.0: proportional to visit counts (exploratory)
                 - temperature→0: pick the most-visited move (greedy)
+            target_temperature: tau used to build the returned POLICY TARGET.
+                AlphaZero trains on pi = N/sum(N), i.e. tau = 1, whatever
+                temperature the played move was sampled at — the search's
+                relative judgement of the runners-up is the entire training
+                signal, and sharpening it throws that signal away. Keep this at
+                1.0 unless you are deliberately experimenting; see the note
+                below the Returns block for what happens when you don't.
             add_noise: Whether to add Dirichlet noise at root (for training).
             allow_pass: Whether MOVE_PASS is allowed as a legal action at all.
             min_pass_move: Game move number before which passing is forbidden.
@@ -258,6 +267,33 @@ class MCTS:
                 action: (row, col) or MOVE_PASS
                 policy_vector: Visit count distribution over all actions
                               (used as training target for the policy head).
+
+        WHY THE TWO TEMPERATURES ARE SEPARATE
+        -------------------------------------
+        They used to be one. A single `visit_distribution(visits, temperature)`
+        served as both the sampling distribution and the training target, so a
+        self-play schedule that (correctly) anneals temperature towards 0 to
+        play its best move late in the game also (incorrectly) annealed the
+        LABEL towards one-hot.
+
+        With tau = 0.101 the exponent is 1/tau ~= 9.9, so a 60/50 visit split
+        becomes a 0.86/0.14 target and a 60/40 split becomes 0.98/0.02. Measured
+        on a real 50k-sample buffer produced this way: 62% of targets were
+        literally one-hot and the median position had THREE actions with any
+        mass at all, out of 200 simulations spread over ~60 legal moves.
+
+        Training on that is behaviour cloning of the search's argmax, not policy
+        improvement: the network is told which move was best but never how much
+        better, so its policy entropy decays monotonically. The practical
+        failure is invisible in self-play (both sides share the same shrinking
+        move set and the gate reads ~50%) and shows up only against a foreign
+        opponent, whose replies fall outside the few moves the prior still
+        covers — where PUCT cannot recover them because their prior is ~0.
+
+        Sampling at tau < 1 while targeting tau = 1 keeps the old invariant that
+        a stored position's played move always has support in its own target:
+        low-tau sampling only ever concentrates mass on moves that already hold
+        mass at tau = 1, never on moves outside that support.
         """
         root_state = state.copy()
         # Applied to our own copy rather than to the caller's state: the same
@@ -328,24 +364,30 @@ class MCTS:
         visits = np.array([root.children[a].visit_count for a in actions],
                           dtype=np.float64)
 
-        if temperature < 0.01:
+        # --- Training target: built at target_temperature, independent of the
+        # temperature the played move is sampled at (see the docstring). ---
+        if target_temperature < 0.01:
             # tau -> 0: the target is a *single* most-visited move. Setting every
             # child tied at max_visits to 1.0 (the old behavior) degenerates to a
             # near-uniform target whenever visits are flat (e.g. low sim counts),
             # which is exactly when the policy head can least afford a noisy label.
-            # Pick one argmax deterministically and make the selected move match.
-            best_action = actions[int(np.argmax(visits))]
-            policy[_action_index(best_action)] = 1.0
-            return best_action, policy
+            target_probs = np.zeros(len(actions), dtype=np.float64)
+            target_probs[int(np.argmax(visits))] = 1.0
+        else:
+            target_probs = visit_distribution(visits, target_temperature)
 
-        # One distribution serves as both the training target and the sampling
-        # distribution for the move actually played, so the move a position is
-        # stored with is always a move that had support in its own target.
-        probs = visit_distribution(visits, temperature)
-        for action, p in zip(actions, probs):
+        for action, p in zip(actions, target_probs):
             policy[_action_index(action)] = p
 
-        action = actions[int(np.random.choice(len(actions), p=probs))]
+        # --- Move selection: sampled at `temperature`. ---
+        if temperature < 0.01:
+            # Deterministic argmax rather than a random pick among ties: with
+            # low simulation counts visit ties are common, and breaking them
+            # randomly is a coin flip on every move of a competitive game.
+            action = actions[int(np.argmax(visits))]
+        else:
+            probs = visit_distribution(visits, temperature)
+            action = actions[int(np.random.choice(len(actions), p=probs))]
 
         return action, policy
     
@@ -358,8 +400,9 @@ class MCTS:
         """
         state = node.state
 
-        # Get neural network prediction
-        state_tensor = state.encode_for_nn()
+        # Get neural network prediction. The encoding is read off the network
+        # itself, so a 12-plane model is never fed a 10-plane position.
+        state_tensor = encode_for_network(state, self.network)
         policy_probs, value = self.network.predict(state_tensor, self.device)
 
         # Get legal moves

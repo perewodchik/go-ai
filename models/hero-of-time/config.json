@@ -7,7 +7,7 @@
   "training": {
     "num_self_play_games": 40,
     "eval_games": 0,
-    "num_simulations": 351,
+    "num_simulations": 200,
     "c_puct": 1.5,
     "learning_rate": 0.002,
     "batch_size": 32,
@@ -18,32 +18,35 @@
     "temperature_init": 0.8,
     "temperature_final": 0.101,
     "gate_enabled": true,
-    "gate_games": 24,
+    "gate_games": 40,
     "gate_threshold": 0.6,
     "gate_simulations": 50,
     "gate_stall_warning": 7,
     "num_parallel_workers": 8,
+    "record_self_play_games": true,
+    "record_gate_games": true,
     "restrict_eye_fill": false,
     "restrict_self_atari": false,
     "self_atari_max_stones": 1,
     "resign_enabled": true,
     "resign_threshold": 0.9,
     "resign_consecutive": 4,
-    "resign_min_move_factor": 1.0,
+    "resign_min_move_factor": 0.75,
     "resign_both_sides": true,
-    "resign_playout_fraction": 0.1
+    "resign_playout_fraction": 0.05
   },
   "network": {
     "size_preset": "small",
     "num_res_blocks": 4,
     "num_filters": 64,
-    "value_head_hidden": 64
+    "value_head_hidden": 64,
+    "input_features": "v1_10"
   },
   "created_at": "2026-08-14T20:23:06.650471",
   "notes": "",
   "archived": false,
-  "elo": 591.1565001120211,
-  "kyu_rank": "29k",
-  "iteration": 95,
-  "total_games": 2948
+  "elo": 674.4196659538973,
+  "kyu_rank": "28k",
+  "iteration": 185,
+  "total_games": 6548
 }

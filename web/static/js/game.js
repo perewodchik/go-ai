@@ -132,6 +132,7 @@ async function startGame() {
 
     gameId = data.game_id;
     gameOver = false;
+    gameRecorded = false;
     opponent = data;
 
     // Initialize board renderer
@@ -467,18 +468,14 @@ function renderWinRate(blackRates) {
 }
 
 // ---- Recording ----
-document.getElementById('btn-record')?.addEventListener('click', async () => {
-    if (!gameId) return;
+let gameRecorded = false;
 
-    const name = prompt('Name for this recorded game (optional):', defaultRecordName());
-    if (name === null) return;  // cancelled
-
-    const btn = document.getElementById('btn-record');
-    const original = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Saving...';
+async function autoRecordGame() {
+    if (!gameId || gameRecorded) return;
+    gameRecorded = true;
 
     try {
+        const name = defaultRecordName();
         const res = await fetch('/api/game/record', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -486,15 +483,14 @@ document.getElementById('btn-record')?.addEventListener('click', async () => {
         });
         const data = await res.json();
         if (!res.ok) {
-            showToast(data.error || 'Failed to record game');
+            console.warn('Auto-record failed:', data.error);
             return;
         }
         showToast('Game recorded — find it in Review Games');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = original;
+    } catch (err) {
+        console.warn('Auto-record error:', err);
     }
-});
+}
 
 function defaultRecordName() {
     const when = new Date().toLocaleString();
@@ -513,6 +509,7 @@ function showToast(text) {
 document.getElementById('btn-new-game')?.addEventListener('click', () => {
     gameId = null;
     gameOver = false;
+    gameRecorded = false;
     document.getElementById('play-summary').hidden = true;
     PlayViews.setHumanGame(null);
     PlayViews.show('human-setup');
@@ -594,6 +591,7 @@ function showGameOver(data) {
         [details, scoreLine].filter(Boolean).join(' · ');
 
     modal.style.display = 'flex';
+    autoRecordGame();
 }
 
 window.addEventListener('resize', () => {

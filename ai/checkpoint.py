@@ -28,6 +28,7 @@ def save_weights(
     weights_path: str,
     champion_state_dict: Optional[Dict] = None,
     gate_elo: Optional[float] = None,
+    scheduler: Optional[object] = None,
 ) -> str:
     """
     Save training state to a single weights file.
@@ -48,6 +49,14 @@ def save_weights(
             separate from `elo` (which is measured against the random-bot
             anchor) because the two stop agreeing as soon as the anchor
             saturates. Optional — older files simply lack it.
+        scheduler: The LR scheduler. Saved because it holds `last_epoch`, and
+            without it a resumed run rebuilds CosineAnnealingLR at last_epoch=-1
+            and restarts the cosine at the FULL base LR. A model trained across
+            many restarts then never anneals at all: one real run showed the LR
+            climbing back to 0.00199 at iteration 101 and again at 131 after
+            decaying to 0.00121 by iteration 91, which is why its candidates
+            stayed random perturbations of the champion and the gate sat at 50%.
+            Optional — older files simply lack it.
 
     Returns:
         Path to the saved file.
@@ -71,6 +80,12 @@ def save_weights(
         'timestamp': datetime.now().isoformat(),
     }
 
+    if scheduler is not None:
+        try:
+            state['scheduler_state_dict'] = scheduler.state_dict()
+        except Exception:
+            pass  # A scheduler-less run is worse, not broken.
+
     if champion_state_dict is not None:
         state['champion_state_dict'] = {
             k: v.detach().cpu() for k, v in champion_state_dict.items()
@@ -90,16 +105,20 @@ def load_weights(
     model: torch.nn.Module,
     optimizer: Optional[torch.optim.Optimizer] = None,
     device: str = "cpu",
+    scheduler: Optional[object] = None,
 ) -> Dict:
     """
     Load weights and restore model (and optionally optimizer) state.
-    
+
     Args:
         weights_path: Path to the weights.pt file.
         model: The neural network to load weights into.
         optimizer: If provided, restore optimizer state too.
         device: Device to map tensors to.
-    
+        scheduler: If provided, restore LR scheduler state too, so the cosine
+            cycle continues across restarts instead of jumping back to the base
+            LR. See save_weights for what that costs when it doesn't happen.
+
     Returns:
         Dict with metadata (iteration, elo, etc.).
     """
@@ -126,7 +145,19 @@ def load_weights(
     if optimizer is not None and 'optimizer_state_dict' in state:
         optimizer.load_state_dict(state['optimizer_state_dict'])
 
+    # Restored AFTER the optimizer: the scheduler writes the LR it computes into
+    # the optimizer's param groups, so loading it second is what makes the
+    # resumed LR the annealed one rather than whatever the optimizer state held.
+    scheduler_restored = False
+    if scheduler is not None and 'scheduler_state_dict' in state:
+        try:
+            scheduler.load_state_dict(state['scheduler_state_dict'])
+            scheduler_restored = True
+        except Exception:
+            pass  # Mismatched schedule (T_max changed) — start the cycle fresh.
+
     return {
+        'scheduler_restored': scheduler_restored,
         'iteration': state.get('iteration', 0),
         'elo': state.get('elo', 500),
         'kyu_rank': state.get('kyu_rank', '30k'),

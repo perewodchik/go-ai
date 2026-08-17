@@ -39,6 +39,7 @@ import json
 import time
 from typing import Dict, List, Optional, Tuple
 
+import elo_history
 from model_manager import MODELS_ROOT, ModelInfo
 
 # Long enough that a dashboard polling every few seconds does not re-walk the
@@ -204,8 +205,8 @@ def health(model_id: str, info: Optional[ModelInfo] = None,
     else:
         reasons.append({
             'level': 'warn',
-            'text': 'No promotion-gate matches — Elo here rests on the random-bot '
-                    'evaluation alone, which saturates.',
+            'text': 'No promotion-gate matches — nothing measures whether these '
+                    'iterations are producing a stronger network.',
         })
 
     checked = last.get('resign_checked_games') or 0
@@ -263,23 +264,39 @@ def summarize(info: ModelInfo) -> dict:
     """
     rows = read_log(info.id)
     disk = disk_stats(info.id)
+    curve = elo_curve(info.id)
 
-    elos = [r.get('elo') for r in rows if r.get('elo') is not None]
+    # The Elo sparkline is the COMPETITIVE curve — one point per rated game,
+    # from the ledger. It used to be the `elo` column of the training log,
+    # which no longer moves: nothing rates a model except playing.
+    elos = curve['elo']
     losses = [r.get('total_loss') for r in rows if r.get('total_loss') is not None]
     gated = [r for r in rows if r.get('gate_win_rate') is not None]
+    gate_elos = [r.get('gate_elo') for r in rows if r.get('gate_elo') is not None]
 
-    # Elo movement over the last 10 iterations — a trajectory says more about a
-    # run than its final number does.
+    # Elo movement over the last 10 rated games — a trajectory says more about
+    # a model than its current number does.
     elo_delta_10 = None
     if len(elos) >= 2:
         window = elos[-11:] if len(elos) > 10 else elos
         elo_delta_10 = round(window[-1] - window[0], 1)
 
     d = info.to_dict()
+    if elos:
+        # The ledger wins over the cached float in config.json — see
+        # elo_history.reconcile for why that is the safe direction.
+        d['elo'] = elos[-1]
     d.update({
         'iterations_logged': len(rows),
         'elo_series': [round(e, 1) for e in _downsample(elos)],
         'elo_delta_10': elo_delta_10,
+        # How much of the rating is earned rather than seeded. A model showing
+        # 1240 off zero rated games is carrying a migrated baseline, and the
+        # fleet table should be able to say so.
+        'rated_games': curve['rated_games'],
+        'last_rated_game': (curve['entries'][-1].get('timestamp')
+                            if curve['entries'] else None),
+        'gate_elo': round(gate_elos[-1], 1) if gate_elos else None,
         'last_loss': round(losses[-1], 4) if losses else None,
         'gate_matches': len(gated),
         'gate_promotions': sum(1 for r in gated if r.get('gate_promoted')),
@@ -290,6 +307,37 @@ def summarize(info: ModelInfo) -> dict:
         **disk,
     })
     return d
+
+
+def elo_curve(model_id: str, limit: int = 200) -> dict:
+    """
+    The competitive Elo curve for one model, indexed by GAMES PLAYED.
+
+    This is deliberately not `history(model_id, ['elo'])`. That series comes
+    from `training_log.jsonl` and is indexed by training iteration, which was
+    the right axis only while the rating was a by-product of training. It is
+    not any more: Elo moves when a game is played, so an iteration axis draws a
+    flat line through every iteration nobody played in and collapses a
+    forty-game evening into one point.
+
+    Returns {games, elo, entries, rated_games} — `games[i]` is the sequential
+    index of the rating event and `elo[i]` the `new_elo` it recorded. Index 0
+    is the starting rating, not a game.
+    """
+    model_dir = os.path.join(MODELS_ROOT, model_id)
+    # Migrates a pre-ledger model on the way past, so the curve of a model that
+    # has never played starts at the rating it actually holds.
+    elo_history.ensure_baseline(model_dir, _config_elo(model_id))
+    return elo_history.series(model_dir, limit=limit)
+
+
+def _config_elo(model_id: str) -> Optional[float]:
+    """The cached rating in a model's config.json, without a full load."""
+    try:
+        with open(os.path.join(MODELS_ROOT, model_id, 'config.json')) as fh:
+            return json.load(fh).get('elo')
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
 
 
 def history(model_id: str, fields: List[str], limit: int = 200) -> dict:

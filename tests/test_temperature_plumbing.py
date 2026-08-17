@@ -30,7 +30,8 @@ from ai.self_play import build_self_play_task, play_self_play_game
 TASK_KWARGS = dict(
     network=None, board_size=9, komi=6.5, num_simulations=96,
     c_puct=1.5, temperature_threshold=30, temperature_init=0.8,
-    temperature_final=0.2, device="cpu", fpu_reduction=0.35,
+    temperature_final=0.2, policy_target_temperature=1.0,
+    device="cpu", fpu_reduction=0.35,
     value_target_outcome_weight=0.6, restrict_eye_fill=False,
     restrict_self_atari=False, self_atari_max_stones=1,
     resign_enabled=False, resign_threshold=0.9, resign_consecutive=4,

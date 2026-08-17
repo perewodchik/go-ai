@@ -68,6 +68,18 @@ const ITERATIONS_PER_PAGE = 5;
 // Cursor for "load older": the oldest iteration currently on screen.
 let oldestLoadedIteration = null;
 
+/**
+ * "N not recorded" — games a phase played while its recording toggle was off.
+ * They still count in every statistic (those are read from the games index),
+ * but there is no stored record to replay, so the list says so rather than
+ * showing an iteration that looks like it produced nothing.
+ */
+function notRecordedNote(n) {
+    if (!n) return '';
+    return ` <span class="group-note" style="opacity: 0.65;">· ${n} not recorded</span>`;
+}
+
+
 async function loadGamesList() {
     const list = document.getElementById('review-games-list');
     oldestLoadedIteration = null;
@@ -122,7 +134,7 @@ function buildIterationGroup(group, open) {
         </div>
         <div class="summary-row-bottom">
             <div class="summary-row-left">
-                <span class="group-note">${group.total_games} game${group.total_games === 1 ? '' : 's'}</span>
+                <span class="group-note">${group.total_games} game${group.total_games === 1 ? '' : 's'}</span>${notRecordedNote(group.total_not_recorded)}
             </div>
             <button class="btn-group-delete" title="Delete Iteration ${group.iteration}" aria-label="Delete">✕</button>
         </div>
@@ -156,7 +168,7 @@ function buildIterationGroup(group, open) {
             </div>
             <div class="summary-row-bottom">
                 <div class="summary-row-left">
-                    <span class="group-note">${phase.count} game${phase.count === 1 ? '' : 's'}</span>
+                    <span class="group-note">${phase.count} game${phase.count === 1 ? '' : 's'}</span>${notRecordedNote(phase.not_recorded)}
                 </div>
                 <button class="btn-group-delete" title="Delete ${escapeHtml(phase.label)}" aria-label="Delete">✕</button>
             </div>
@@ -480,11 +492,24 @@ function buildMatchGroup(group, open) {
         }
 
         seriesEl.appendChild(seriesSummary);
-        series.games.forEach(game => seriesEl.appendChild(buildMatchGameItem(game)));
+        series.games.forEach((game, gameIdx) => seriesEl.appendChild(buildMatchGameItem(game, gameIdx + 1)));
         details.appendChild(seriesEl);
     });
 
     return details;
+}
+
+function formatGameTime(timestamp) {
+    if (!timestamp) return '';
+    try {
+        const d = new Date(timestamp);
+        if (isNaN(d.getTime())) return '';
+        const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        const timeStr = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+        return `${dateStr}, ${timeStr}`;
+    } catch (e) {
+        return '';
+    }
 }
 
 function getOpponentName(series) {
@@ -527,37 +552,56 @@ function getOpponentKind(series, oppName) {
 }
 
 /**
- * Series score as "3–1", counted per PLAYER (colours alternate between games,
- * so a per-colour tally would be meaningless).
+ * Series score as "3–1", counted from active model's perspective.
  */
 function matchSeriesScore(series) {
-    const names = [];
-    const wins = {};
-    series.games.forEach(game => {
-        const black = (game.black_player || {}).name || 'Black';
-        const white = (game.white_player || {}).name || 'White';
-        [black, white].forEach(name => {
-            if (!names.includes(name)) names.push(name);
-            if (wins[name] === undefined) wins[name] = 0;
-        });
-        if (game.winner === 1) wins[black] += 1;
-        else if (game.winner === 2) wins[white] += 1;
+    const activeName = (window.ACTIVE_MODEL && window.ACTIVE_MODEL.name) || '';
+    const activeId = (window.ACTIVE_MODEL && window.ACTIVE_MODEL.id) || '';
+
+    let myWins = 0;
+    let oppWins = 0;
+    let draws = 0;
+
+    (series.games || []).forEach(game => {
+        const bp = game.black_player || {};
+        const wp = game.white_player || {};
+        const bpIsActive = Boolean((bp.model_id && bp.model_id === activeId) || (bp.name && bp.name === activeName));
+        const wpIsActive = Boolean((wp.model_id && wp.model_id === activeId) || (wp.name && wp.name === activeName));
+
+        if (game.winner === 1) {
+            if (bpIsActive) myWins++;
+            else if (wpIsActive) oppWins++;
+            else myWins++;
+        } else if (game.winner === 2) {
+            if (wpIsActive) myWins++;
+            else if (bpIsActive) oppWins++;
+            else oppWins++;
+        } else {
+            draws++;
+        }
     });
 
-    if (names.length < 2) return '';
-    return `${wins[names[0]]}–${wins[names[1]]}`;
+    return `${myWins}–${oppWins}${draws ? `–${draws}` : ''}`;
 }
 
-/** One match game row: who played which colour, and who won. */
-function buildMatchGameItem(game) {
+/** One match game row: who played which colour, who won with proper win/loss colors, and time signature. */
+function buildMatchGameItem(game, gameNum) {
     const item = document.createElement('div');
     item.className = 'game-item review-list-item match-game-item';
     if (currentGameData && currentGameData.filename === game.filename) {
         item.classList.add('active');
     }
 
-    const black = (game.black_player || {}).name || 'Black';
-    const white = (game.white_player || {}).name || 'White';
+    const activeName = (window.ACTIVE_MODEL && window.ACTIVE_MODEL.name) || '';
+    const activeId = (window.ACTIVE_MODEL && window.ACTIVE_MODEL.id) || '';
+
+    const bp = game.black_player || {};
+    const wp = game.white_player || {};
+    const black = bp.name || 'Black';
+    const white = wp.name || 'White';
+
+    const bpIsActive = Boolean((bp.model_id && bp.model_id === activeId) || (bp.name && bp.name === activeName));
+    const wpIsActive = Boolean((wp.model_id && wp.model_id === activeId) || (wp.name && wp.name === activeName));
 
     let resultText = 'Draw';
     let resultColor = 'var(--text-muted)';
@@ -567,15 +611,27 @@ function buildMatchGameItem(game) {
             ? 'by resignation'
             : `+${game.margin !== undefined ? Number(game.margin).toFixed(1) : '?'}`;
         resultText = `${game.winner === 1 ? '⚫' : '⚪'} ${winnerName} won ${how}`;
-        resultColor = 'var(--text-primary)';
+
+        const myModelWon = (game.winner === 1 && bpIsActive) || (game.winner === 2 && wpIsActive);
+        const myModelLost = (game.winner === 1 && wpIsActive) || (game.winner === 2 && bpIsActive);
+        if (myModelWon) {
+            resultColor = 'var(--success)';
+        } else if (myModelLost) {
+            resultColor = 'var(--danger)';
+        } else {
+            resultColor = 'var(--text-primary)';
+        }
     }
+
+    const when = formatGameTime(game.timestamp);
+    const displayNum = gameNum || game.display_game_index || (game.game_index !== undefined ? game.game_index + 1 : 1);
 
     const body = document.createElement('div');
     body.className = 'game-item-body';
     body.innerHTML = `
-        <div style="font-weight: 600; margin-bottom: 0.15rem;">Game ${(game.game_index || 0) + 1}${resignTag(game)}</div>
+        <div style="font-weight: 600; margin-bottom: 0.15rem;">Game ${displayNum}</div>
         <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(resultText)}</div>
-        <div class="match-game-line">⚫ ${escapeHtml(black)} vs ⚪ ${escapeHtml(white)} &middot; ${game.num_moves} moves</div>
+        <div class="match-game-line">${game.num_moves} moves${when ? ` &middot; ${when}` : ''}</div>
     `;
     body.addEventListener('click', () => selectGame(item, game.filename));
     item.appendChild(body);
@@ -618,12 +674,12 @@ function buildRecordedGameItem(game) {
     const title = game.name && game.name.length
         ? game.name
         : `${humanColor === 1 ? '⚫' : '⚪'} You vs Bot`;
-    const when = game.timestamp ? new Date(game.timestamp).toLocaleString() : '';
+    const when = formatGameTime(game.timestamp);
 
     const body = document.createElement('div');
     body.className = 'game-item-body';
     body.innerHTML = `
-        <div style="font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(title)}${resignTag(game)}</div>
+        <div style="font-weight: 600; margin-bottom: 0.15rem;">${escapeHtml(title)}</div>
         <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${resultText}</div>
         <div style="font-size: 0.8rem; color: var(--text-muted);">${game.num_moves} moves${when ? ` &middot; ${when}` : ''}</div>
     `;
@@ -707,6 +763,26 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+/**
+ * A pill linking to the game on online-go.com, when one side played there.
+ *
+ * The id is stored on whichever player was the OGS bot, which is where the
+ * bridge leaves it when the game ends.
+ */
+function ogsGameLink(data) {
+    const sides = [data.black_player, data.white_player, data.opponent];
+    for (const side of sides) {
+        if (!side) continue;
+        const url = side.ogs_game_url ||
+            (side.ogs_game_id ? `https://online-go.com/game/${side.ogs_game_id}` : null);
+        if (url) {
+            return `<a class="review-meta-pill is-ogs-link" href="${escapeHtml(url)}"
+                       target="_blank" rel="noopener">🌐 View on OGS ↗</a>`;
+        }
+    }
+    return '';
+}
+
 /** Open a game and mark its row active. */
 function selectGame(item, filename) {
     document.querySelectorAll('.game-item').forEach(el => el.classList.remove('active'));
@@ -742,6 +818,8 @@ function buildGameItem(game, phase) {
     const body = document.createElement('div');
     body.className = 'game-item-body';
 
+    const when = formatGameTime(game.timestamp);
+
     if (phase === 'promotion') {
         if (game.winner !== 0) {
             resultColor = game.candidate_won ? 'var(--success)' : 'var(--danger)';
@@ -753,13 +831,14 @@ function buildGameItem(game, phase) {
         }
 
         body.innerHTML = `
-            <div style="font-weight: 600; margin-bottom: 0.15rem;">${winnerIcon} Promotion #${game.game_index}${resignTag(game)}</div>
+            <div style="font-weight: 600; margin-bottom: 0.15rem;">${winnerIcon} Promotion #${game.game_index}</div>
             <div style="font-size: 0.85rem; color: ${resultColor}; font-weight: 600; margin-bottom: 0.15rem;">${outcomeLine}</div>
-            <div style="font-size: 0.85rem; color: var(--text-muted);">${game.num_moves} moves</div>
+            <div style="font-size: 0.85rem; color: var(--text-muted);">${game.num_moves} moves${when ? ` &middot; ${when}` : ''}</div>
         `;
     } else {
+        const isEval = phase === 'eval' || game.is_eval;
         let label;
-        if (phase === 'eval' || game.is_eval) {
+        if (isEval) {
             label = `Eval #${game.game_index} (AI as ${colorStr(game.network_color)} vs RandomBot)`;
             if (game.network_color !== undefined && game.winner !== 0) {
                 resultColor = (game.winner === game.network_color) ? 'var(--success)' : 'var(--danger)';
@@ -770,10 +849,10 @@ function buildGameItem(game, phase) {
 
         body.innerHTML = `
             <div style="margin-bottom: 0.25rem;">
-                <strong>${winnerIcon} ${label}</strong>${resignTag(game)}
+                <strong>${winnerIcon} ${label}</strong>${isEval ? '' : resignTag(game)}
             </div>
             <div style="font-size: 0.85rem; color: var(--text-muted);">
-                <span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves
+                <span style="color: ${resultColor}; font-weight: 600;">${resultText}</span> &middot; ${game.num_moves} moves${when ? ` &middot; ${when}` : ''}
             </div>
         `;
     }
@@ -800,7 +879,13 @@ async function loadGame(filename) {
         // The id is a path under games/ (iter_000001/promotion/promo_0000.json),
         // so escape each segment but keep the separators.
         const encodedPath = filename.split('/').map(encodeURIComponent).join('/');
-        const res = await fetch(`/training/api/games/${encodedPath}?t=${cacheBuster}`);
+        // A deep link from another model's dashboard (the Elo curve, the
+        // head-to-head table) carries ?model=<id>; a game id only resolves
+        // inside the model directory it was saved in.
+        const owner = new URLSearchParams(window.location.search).get('model');
+        const ownerParam = owner ? `&model=${encodeURIComponent(owner)}` : '';
+        const res = await fetch(
+            `/training/api/games/${encodedPath}?t=${cacheBuster}${ownerParam}`);
         if (!res.ok) throw new Error('Game not found');
 
         const data = await res.json();
@@ -878,6 +963,7 @@ async function loadGame(filename) {
                 <span class="review-meta-pill">♟️ ${data.moves.length} moves</span>
                 <span class="review-meta-pill">⚖️ Komi ${komi}</span>
                 ${when ? `<span class="review-meta-pill">🕒 ${when}</span>` : ''}
+                ${ogsGameLink(data)}
             `;
         } else if (data.phase === 'promotion') {
             const candIcon = data.candidate_color === 1 ? '⚫' : '⚪';

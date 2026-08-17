@@ -20,6 +20,7 @@ import os
 import queue
 import sys
 import threading
+import time
 
 import pytest
 
@@ -358,6 +359,186 @@ class TestReceivingTheirMoves:
         }
         with pytest.raises(OGSGameError, match="Timeout"):
             player.select_move(GameState(board_size=9))
+
+
+class TestStatusAndCancelling:
+    """
+    A match against a bot that never answers used to look identical to one
+    thinking hard, and stopping it meant sitting out the accept timeout.
+    """
+
+    def test_status_says_what_it_is_waiting_for(self):
+        player, socket, client = _pair(accept=False)
+        assert player.status()["state"] == "idle"
+
+        # Run the doomed start on a thread so the wait can be observed.
+        errors = []
+
+        def start():
+            try:
+                player.game_started(GameState(board_size=9), WHITE)
+            except OGSGameError as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=start)
+        thread.start()
+        deadline = time.time() + 3
+        while time.time() < deadline and player.status()["state"] != "waiting":
+            time.sleep(0.02)
+
+        status = player.status()
+        assert status["state"] == "waiting"
+        assert "Bergamot" in status["detail"]
+        assert status["waiting_seconds"] >= 0
+
+        thread.join(timeout=5)
+        assert errors and "did not accept" in str(errors[0])
+        assert player.status()["state"] == "failed"
+
+    def test_cancel_ends_the_wait_immediately(self):
+        player, socket, client = _pair(accept=False)
+        errors = []
+
+        def start():
+            try:
+                player.game_started(GameState(board_size=9), WHITE)
+            except OGSGameError as exc:
+                errors.append(exc)
+
+        # A 30s accept timeout: without cancellation this test would sit there.
+        player.accept_timeout = 30
+        thread = threading.Thread(target=start)
+        thread.start()
+        deadline = time.time() + 3
+        while time.time() < deadline and player.status()["state"] != "waiting":
+            time.sleep(0.02)
+
+        began = time.time()
+        player.cancel()
+        thread.join(timeout=5)
+
+        assert time.time() - began < 3, "cancel should not wait out the timeout"
+        assert errors and "stopped" in str(errors[0])
+        assert client.cancelled == [1234]
+
+    def test_cancel_gives_a_live_game_back(self):
+        """Walking away would keep the bot busy and lose us the game on time."""
+        player, socket, client = _pair()
+        player.game_started(GameState(board_size=9), WHITE)
+        socket.sent.clear()
+
+        player.cancel()
+        assert ("game/resign", {"game_id": REAL_GAME_ID}) in socket.sent
+
+    def test_cancel_interrupts_waiting_for_a_move(self):
+        player, socket, client = _pair(move_timeout=30)
+        player.game_started(GameState(board_size=9), WHITE)
+        result = []
+
+        def wait_for_move():
+            try:
+                player.select_move(GameState(board_size=9))
+            except OGSGameError as exc:
+                result.append(str(exc))
+
+        thread = threading.Thread(target=wait_for_move)
+        thread.start()
+        time.sleep(0.2)
+        player.cancel()
+        thread.join(timeout=5)
+
+        assert result and "stopped" in result[0]
+
+    def test_a_declined_challenge_is_reported_at_once(self):
+        """
+        Bots allow one game per player; a second challenge while the first is
+        still open comes back as a rejection, which beats 90 seconds of silence.
+        """
+        player, socket, client = _pair(accept=False)
+        player.accept_timeout = 30
+
+        errors = []
+
+        def start():
+            try:
+                player.game_started(GameState(board_size=9), WHITE)
+            except OGSGameError as exc:
+                errors.append(str(exc))
+
+        thread = threading.Thread(target=start)
+        thread.start()
+        deadline = time.time() + 3
+        while time.time() < deadline and player.status()["state"] != "waiting":
+            time.sleep(0.02)
+
+        began = time.time()
+        socket.fire("notification", {"type": "gameOfferRejected",
+                                     "message": "no thanks"})
+        thread.join(timeout=5)
+
+        assert time.time() - began < 3
+        assert errors and "declined" in errors[0]
+
+
+class TestSeriesAgainstOneBot:
+    def test_waits_for_the_previous_game_to_finish_before_challenging(self):
+        """
+        The 5-game series that stopped at 4: bots cap games per player at one,
+        and our runner starts the next game the moment OUR board is done, while
+        OGS is still finalising the last one.
+        """
+        player, socket, client = _pair()
+        player.game_started(GameState(board_size=9), WHITE)
+        player.game_finished(GameState(board_size=9), 1)
+        assert player.meta["ogs_game_id"] == REAL_GAME_ID
+
+        # OGS still has the old game open for the first two checks.
+        phases = ["play", "play", "finished"]
+        seen = []
+
+        def game(game_id):
+            seen.append(game_id)
+            phase = phases[min(len(seen) - 1, len(phases) - 1)]
+            return {"gamedata": {"phase": phase}, "ended": phase != "play"}
+
+        client.game = game
+        client.game_id = 556          # the next game gets a new id
+        player.game_started(GameState(board_size=9), WHITE)
+
+        assert seen[0] == REAL_GAME_ID, "should have checked the previous game"
+        assert len(seen) >= 3, "should have waited for it to finish"
+        assert player.game_id == 556
+
+    def test_closing_gives_back_a_game_the_bot_accepted_after_we_cancelled(self):
+        """
+        Cancelling between "challenge sent" and "game id known" leaves a game
+        we never learn the id of — it would sit there occupying the bot until
+        our clock ran out.
+        """
+        player, socket, client = _pair(accept=False)
+        player._games_before = {111}
+        client.ongoing_games = lambda: [
+            {"id": 111, "players": {"black": {"id": OUR_ID},
+                                    "white": {"id": BOT.id}}},   # already ours
+            {"id": 222, "players": {"black": {"id": OUR_ID},
+                                    "white": {"id": BOT.id}}},   # the stray
+            {"id": 333, "players": {"black": {"id": OUR_ID},
+                                    "white": {"id": 4242}}},     # someone else
+        ]
+
+        player.close()
+        resigned = [d["game_id"] for c, d in socket.sent if c == "game/resign"]
+        assert resigned == [222]
+
+    def test_the_url_of_the_game_is_kept_for_the_record(self):
+        player, socket, client = _pair()
+        player.game_started(GameState(board_size=9), WHITE)
+        assert player.game_url == f"https://online-go.com/game/{REAL_GAME_ID}"
+
+        player.game_finished(GameState(board_size=9), 1)
+        described = player.describe()
+        assert described["ogs_game_id"] == REAL_GAME_ID
+        assert described["ogs_game_url"].endswith(str(REAL_GAME_ID))
 
 
 class TestRatingAndDescription:

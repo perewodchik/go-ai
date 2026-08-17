@@ -219,64 +219,22 @@ class GameState:
         
         return True
     
-    def encode_for_nn(self) -> torch.Tensor:
+    def encode_for_nn(self, features: Optional[str] = None) -> torch.Tensor:
         """
-        Encode the current board state as a tensor for the neural network.
-        
-        Returns a tensor of shape (num_planes, board_size, board_size).
-        
-        Planes (9 total):
-        0: Current player's stones (1 where current player has a stone)
-        1: Opponent's stones
-        2: Current player's liberties == 1 (atari)
-        3: Current player's liberties == 2
-        4: Current player's liberties >= 3
-        5: Opponent's liberties == 1
-        6: Opponent's liberties == 2
-        7: Opponent's liberties >= 3
-        8: Ko point (1 at the ko point, 0 elsewhere)
-        
-        NOTE: We don't include a "turn color" plane because the encoding is
-        always from the perspective of the current player — the network sees
-        "my stones" vs "opponent stones" regardless of color. This is a common
-        AlphaZero trick that halves the effective state space.
+        Encode this position as network input, shape (planes, size, size).
+
+        The plane layout is versioned — see game/features.py, which documents
+        what each plane holds and why. `features` names the set; None means the
+        project default (v1_10), which is what every model trained before the
+        registry existed uses.
+
+        Prefer `features.encode_for_network(state, network)` when a network is
+        in hand: it reads the layout off the network, so a position can never be
+        paired with the wrong encoding.
         """
-        size = self.board_size
-        planes = np.zeros((10, size, size), dtype=np.float32)
-        
-        opp = opponent(self.current_player)
-        
-        # Plane 0-1: Stone positions (from current player's perspective)
-        planes[0] = (self.board.grid == self.current_player).astype(np.float32)
-        planes[1] = (self.board.grid == opp).astype(np.float32)
-        
-        # Planes 2-7: Liberty counts for each group
-        # Process current player's groups
-        for group in self.board.get_all_groups(self.current_player):
-            lib_count = self.board.liberty_count(group)
-            plane_idx = 2 if lib_count == 1 else (3 if lib_count == 2 else 4)
-            for r, c in group:
-                planes[plane_idx, r, c] = 1.0
-        
-        # Process opponent's groups
-        for group in self.board.get_all_groups(opp):
-            lib_count = self.board.liberty_count(group)
-            plane_idx = 5 if lib_count == 1 else (6 if lib_count == 2 else 7)
-            for r, c in group:
-                planes[plane_idx, r, c] = 1.0
-        
-        # Plane 8: Ko point
-        if self.ko_point is not None:
-            planes[8, self.ko_point[0], self.ko_point[1]] = 1.0
-            
-        # Plane 9: Turn color (all 1s if Black to play, all 0s if White to play)
-        # This is CRITICAL for Go because of Komi. Without knowing if we are Black
-        # or White, the network cannot accurately predict who is winning close games!
-        if self.current_player == BLACK:
-            planes[9, :, :] = 1.0
-        
-        return torch.from_numpy(planes)
-    
+        from game.features import encode_state
+        return encode_state(self, features)
+
     def to_dict(self) -> dict:
         """
         Serialize game state to a JSON-compatible dict.

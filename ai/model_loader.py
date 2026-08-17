@@ -17,7 +17,8 @@ from typing import Optional, Tuple
 
 import torch
 
-from config import Config, elo_to_rank
+from config import Config
+from elo_history import EloEntry
 from model_manager import ModelManager
 from ai.network import GoNetwork
 from ai.checkpoint import load_weights
@@ -67,6 +68,7 @@ def load_model_network(model_id: str, manager: Optional[ModelManager] = None):
     network = GoNetwork(
         board_size=config.board.size,
         num_input_planes=config.network.num_input_planes,
+        input_features=config.network.input_features,
         num_res_blocks=config.network.num_res_blocks,
         num_filters=config.network.num_filters,
         value_head_hidden=config.network.value_head_hidden,
@@ -103,22 +105,30 @@ def invalidate_model_network(model_id: Optional[str] = None) -> None:
             _network_cache.pop(key, None)
 
 
-def persist_model_rating(model_id: str, rating: float) -> None:
+def persist_model_rating(model_id: str, rating: float,
+                         event: Optional[EloEntry] = None) -> None:
     """
-    Write a model's new Elo back to its config.json, leaving the rest of its
-    live state (iteration, total_games) alone.
+    Record a model's new Elo — as a ledger entry, not an overwritten float.
+
+    The entry names the opponent, the outcome and the game record it came from,
+    so the rating is reconstructible and every point on the model's Elo curve
+    links to the game that earned it. `ModelManager.record_elo_result` also
+    refreshes the cached `elo` in config.json, leaving iteration and
+    total_games (which training owns) alone.
+
+    A bare `rating` with no event still works — a manual correction has nothing
+    to link to — and is written as a noted entry rather than silently.
     """
     mgr = ModelManager()
     info = mgr.get_model(model_id)
     if info is None:
         return
-    mgr.update_model_state(
-        model_id,
-        elo=rating,
-        kyu_rank=elo_to_rank(rating),
-        iteration=info.iteration,
-        total_games=info.total_games,
-    )
+
+    if event is None:
+        event = EloEntry(new_elo=rating,
+                         elo_delta=rating - float(info.elo),
+                         note='Rating set directly')
+    mgr.record_elo_result(model_id, event)
 
 
 def build_model_player(model_id: str, num_simulations: Optional[int] = None,
@@ -158,5 +168,8 @@ def build_model_player(model_id: str, num_simulations: Optional[int] = None,
         iteration=info.iteration,
         meta={'kyu_rank': info.kyu_rank, 'ruleset': info.ruleset, 'komi': info.komi},
         rating_sink=persist_model_rating,
+        # Where this model's copy of a match record lands, so its ledger entry
+        # can point at a game the review page can actually open.
+        games_dir=config.paths.games_dir,
         mercy=MercyRule.from_config(config, info.board_size, enabled=mercy_resign),
     )

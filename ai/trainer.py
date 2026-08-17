@@ -3,10 +3,15 @@ trainer.py — Main training loop for the Go AI.
 
 Implements the AlphaZero training pipeline:
 1. Self-play: generate games with current network + MCTS
-2. Train: update network on the collected data
-3. Evaluate: compare new network vs previous version
-4. Save weights: persist model state
-5. Repeat
+2. Train: update network on the collected data, then put the candidate through
+   the promotion gate against the reigning champion
+3. Save weights: persist model state
+4. Repeat
+
+Training does NOT rate the model. Competitive Elo is earned in played matches
+(`ai/match.py`) and recorded in the model's `elo_history.jsonl`; the only
+rating training maintains is `gate_elo`, its own self-referential measure of
+whether candidates are still beating champions.
 
 The training loop runs in a background thread when started from the web UI.
 It emits progress events via a callback so the dashboard can update in real-time.
@@ -21,6 +26,7 @@ import os
 import time
 import json
 import random
+import warnings
 import numpy as np
 import torch
 import torch.nn as nn
@@ -32,12 +38,9 @@ from datetime import datetime
 from config import Config, elo_to_rank, simulations_for_board
 from ai.network import GoNetwork
 from ai.self_play import run_self_play_batch, TrainingSample
-from ai.evaluator import (
-    evaluate_against_random,
-    evaluate_against_checkpoint,
-    compute_elo_update,
-    performance_elo_gap,
-)
+from ai.evaluator import (evaluate_against_checkpoint, performance_elo_gap,
+                          promotion_elo_gain)
+from elo_history import DEFAULT_ELO
 from ai.checkpoint import save_weights, load_weights
 from ai.game_store import migrate_legacy_layout
 from ai.replay_store import buffer_path, load_buffer, save_buffer
@@ -145,6 +148,7 @@ class Trainer:
         self.network = GoNetwork(
             board_size=config.board.size,
             num_input_planes=config.network.num_input_planes,
+            input_features=config.network.input_features,
             num_res_blocks=config.network.num_res_blocks,
             num_filters=config.network.num_filters,
             value_head_hidden=config.network.value_head_hidden,
@@ -154,6 +158,7 @@ class Trainer:
         self.eval_network = GoNetwork(
             board_size=config.board.size,
             num_input_planes=config.network.num_input_planes,
+            input_features=config.network.input_features,
             num_res_blocks=config.network.num_res_blocks,
             num_filters=config.network.num_filters,
             value_head_hidden=config.network.value_head_hidden,
@@ -192,13 +197,17 @@ class Trainer:
         # Training state
         self.iteration = 0
         self.total_games = 0
-        self.elo = config.training.elo_anchor  # Start at random bot level
+        # Competitive rating, owned by the model's `elo_history.jsonl` ledger
+        # and moved ONLY by played games (see ai/match.py). Training no longer
+        # touches it: the anchor-based evaluation that used to nudge it every
+        # iteration measured nothing once the random bot stopped winning.
+        self.elo = DEFAULT_ELO
         self.best_elo = self.elo
-        # Rating on the promotion-gate ladder. `elo` above is measured against
-        # the random bot, which stops carrying information once the bot wins
-        # every game; this one only moves when a candidate actually beats the
-        # champion, so it cannot drift upward on its own.
-        self.gate_elo = float(config.training.elo_anchor)
+        # Rating on the promotion-gate ladder — a separate, self-referential
+        # scale that only moves when a candidate actually beats the champion.
+        # This is training's own progress measure and is not the competitive
+        # Elo above.
+        self.gate_elo = DEFAULT_ELO
         
         # Metrics history (for charts). `_history_loaded` tracks whether the
         # on-disk log has been merged in yet — see get_metrics_history().
@@ -213,6 +222,9 @@ class Trainer:
         # Per-iteration pass tallies, refreshed each self-play phase and read
         # by the collapse guard. {colour: [passes, total_moves]}
         self._pass_stats = {1: [0, 0], 2: [0, 0]}
+        # Per-iteration policy-LABEL tallies, refreshed each self-play phase.
+        # Fresh counterpart to the buffer-wide numbers in the collapse guard.
+        self._label_stats = self._empty_label_stats()
         # Per-iteration mercy-rule tallies, refreshed each self-play phase.
         self._resign_stats = self._empty_resign_stats()
         # Set by the collapse guard each iteration. While it is True the mercy
@@ -226,7 +238,7 @@ class Trainer:
             'stage': 'idle',
             'stage_name': 'Idle',
             'stage_index': 0,
-            'total_stages': 5,
+            'total_stages': 4,
             'iteration': self.iteration,
             'completed_items': 0,
             'total_items': 0,
@@ -252,6 +264,9 @@ class Trainer:
         # restart starts the next iteration from a few hundred samples and the
         # candidate it produces reliably loses its gate match.
         self._try_load_replay_buffer()
+        # A model with no weights.pt never reaches _try_load_weights' refresh,
+        # but it still has a rating if it has ever played a match.
+        self._refresh_elo()
     
     @staticmethod
     def _empty_resign_stats() -> dict:
@@ -288,26 +303,85 @@ class Trainer:
             'resign_suppressed': self._collapse_active,
         }
 
+    def _policy_entropy_trend(self, current: Optional[float]) -> dict:
+        """
+        Compare the current policy entropy against a window of history.
+
+        The baseline is the MEAN of the five logged iterations ending
+        `collapse_entropy_trend_lookback` back, not the single value at that
+        point: iteration-to-iteration entropy is noisy enough (the probe samples
+        128 buffer positions) that one reading makes a poor anchor and would
+        produce both false alarms and misses.
+
+        Returns {'baseline': float|None, 'drop': float|None} where drop is the
+        relative fall, so 0.25 means a quarter of the entropy is gone. None
+        means not enough history yet — the check is skipped, not passed.
+        """
+        cfg = self.config.training
+        out = {'baseline': None, 'drop': None}
+        if current is None or current <= 0:
+            return out
+        look = max(1, cfg.collapse_entropy_trend_lookback)
+        # metrics_history is append-per-iteration, so index -look is `look`
+        # iterations ago. A run resumed from a checkpoint starts with an empty
+        # history, so this silently no-ops until the window fills — which is
+        # correct, since the pre-restart entropy was measured under whatever
+        # config that run used.
+        if len(self.metrics_history) < look:
+            return out
+        window = self.metrics_history[-look:-look + 5] or self.metrics_history[-look:-look + 1]
+        vals = [m.get('policy_entropy') for m in window]
+        vals = [v for v in vals if isinstance(v, (int, float)) and v > 0]
+        if not vals:
+            return out
+        baseline = sum(vals) / len(vals)
+        out['baseline'] = round(baseline, 4)
+        out['drop'] = round(max(0.0, (baseline - current) / baseline), 4)
+        return out
+
+    @staticmethod
+    def _empty_label_stats() -> dict:
+        return {'entropy_sum': 0.0, 'support_sum': 0.0,
+                'max_prob_sum': 0.0, 'games': 0}
+
+    def _label_metrics(self) -> dict:
+        """
+        Entropy of the policy labels THIS iteration produced, averaged per game.
+
+        Distinct from the collapse guard's `target_entropy`, which reads the
+        replay buffer: at 50k samples the buffer holds ~30 iterations, so a
+        change to the label schedule takes that long to show up there. These
+        three describe only the games just played.
+        """
+        s = self._label_stats
+        if not s['games']:
+            return {'iter_target_entropy': None, 'iter_target_support': None,
+                    'iter_target_max_prob': None}
+        g = s['games']
+        return {
+            'iter_target_entropy': round(s['entropy_sum'] / g, 4),
+            'iter_target_support': round(s['support_sum'] / g, 2),
+            'iter_target_max_prob': round(s['max_prob_sum'] / g, 4),
+        }
+
     def _build_stages_overview(self, current_stage_key: str) -> list:
-        """Build metadata for the 5-stage learning pipeline."""
+        """Build metadata for the 4-stage learning pipeline."""
         gate_enabled = bool(getattr(self.config.training, 'gate_enabled', True) and getattr(self.config.training, 'gate_games', 0) > 0)
-        eval_enabled = bool(getattr(self.config.training, 'eval_games', 0) > 0)
-        
+
         stage_order = [
             ('self_play', 'Self-Play', '🎲', 'Generate MCTS training games'),
             ('training', 'NN Training', '🧠', 'Optimize Policy & Value Loss'),
             ('gate', 'Champion Gate', '🛡️', 'Candidate vs Champion Match' if gate_enabled else 'Gate Disabled'),
-            ('eval', 'Eval vs Random', '🎯', 'Measure Elo vs Random Bot' if eval_enabled else 'Eval Skipped'),
             ('saving', 'Checkpoint', '💾', 'Save Weights & Collapse Guard'),
         ]
-        
+
         keys = [s[0] for s in stage_order]
         current_idx = keys.index(current_stage_key) if current_stage_key in keys else (-1 if current_stage_key == 'idle' else 99)
-        
+
         stages = []
         for idx, (key, label, icon, desc) in enumerate(stage_order):
-            is_skipped = (key == 'gate' and not gate_enabled) or (key == 'eval' and not eval_enabled)
-            
+            is_skipped = (key == 'gate' and not gate_enabled)
+
             if is_skipped:
                 status = 'skipped'
             elif current_stage_key == 'idle':
@@ -351,7 +425,7 @@ class Trainer:
             'stage': stage,
             'stage_name': stage_name,
             'stage_index': stage_index,
-            'total_stages': 5,
+            'total_stages': 4,
             'iteration': self.iteration,
             'completed_items': completed_items,
             'total_items': total_items,
@@ -370,10 +444,39 @@ class Trainer:
         weights_path = self.config.paths.weights_path
         if os.path.isfile(weights_path):
             try:
-                meta = load_weights(weights_path, self.network, self.optimizer, self.device)
+                meta = load_weights(weights_path, self.network, self.optimizer,
+                                    self.device, scheduler=self.scheduler)
                 if meta:
+                    if meta.get('scheduler_restored'):
+                        self._emit('info',
+                                   'Restored LR schedule at '
+                                   f"{self.optimizer.param_groups[0]['lr']:.2e}")
+                    else:
+                        # Pre-fix checkpoints have no scheduler state. Fast-forward
+                        # the cosine to where this model's iteration count says it
+                        # should be, so a long-running model does not get handed a
+                        # full-strength LR on every resume for the rest of its life.
+                        resume_at = int(meta.get('iteration', 0))
+                        if resume_at > 0:
+                            self.scheduler.last_epoch = resume_at - 1
+                            # Torch warns when scheduler.step() precedes any
+                            # optimizer.step(), which is unavoidable here: this
+                            # runs at construction, before training starts. The
+                            # warning is about skipping the schedule's first LR,
+                            # and skipping ahead is exactly the intent.
+                            with warnings.catch_warnings():
+                                warnings.simplefilter('ignore', UserWarning)
+                                self.scheduler.step()
+                            self._emit('info',
+                                       'No saved LR schedule — fast-forwarded cosine to '
+                                       f"iteration {resume_at} "
+                                       f"(lr {self.optimizer.param_groups[0]['lr']:.2e})")
                     self.iteration = meta.get('iteration', 0)
-                    self.elo = meta.get('elo', 500)
+                    # The checkpoint's `elo` is a snapshot from whenever it was
+                    # written; the ledger may have moved since. Use it only as
+                    # the fallback when there is no ledger to read.
+                    if self._refresh_elo() is None:
+                        self.elo = meta.get('elo', DEFAULT_ELO)
                     self.total_games = meta.get('total_games', 0)
                     # Checkpoints predating the gate ladder seed it from the
                     # anchor rating rather than restarting it at zero.
@@ -512,6 +615,7 @@ class Trainer:
 
                 # Reset per-iteration pass tallies for the collapse guard.
                 self._pass_stats = {1: [0, 0], 2: [0, 0]}
+                self._label_stats = self._empty_label_stats()
                 self._resign_stats = self._empty_resign_stats()
 
                 # Mercy rule is suppressed while the collapse guard is tripped.
@@ -546,9 +650,11 @@ class Trainer:
                     temperature_threshold=self.config.mcts.temperature_threshold,
                     temperature_init=self.config.mcts.temperature_init,
                     temperature_final=self.config.mcts.temperature_final,
+                    policy_target_temperature=self.config.mcts.policy_target_temperature,
                     device="cpu",
                     game_store_every_n=self.config.training.game_store_every_n,
                     games_dir=self.config.paths.games_dir,
+                    record_games=self.config.training.record_self_play_games,
                     iteration=self.iteration,
                     progress_callback=self._on_game_complete,
                     fpu_reduction=self.config.mcts.fpu_reduction,
@@ -635,93 +741,17 @@ class Trainer:
                 if self._force_stop_requested:
                     break
 
-                # --- Phase 3: Evaluation ---
-                if self.config.training.eval_games <= 0:
-                    self._set_stage(
-                        'eval', 'Evaluation vs Random Bot (Skipped)', 4,
-                        completed_items=0, total_items=0,
-                        active_games=[], num_workers=0,
-                        detail='eval_games=0 (Evaluation skipped)'
-                    )
-                    self._emit('eval_start', 'Skipping evaluation (eval_games=0)...')
-                    eval_seconds = 0.0
-                    win_rate = None
-                    kyu = elo_to_rank(self.elo)
-                    eval_data = {
-                        'win_rate_vs_random': None,
-                        'elo_delta': 0.0,
-                    }
-                    self._emit('eval_done', f'Evaluation skipped, Elo: {self.elo:.0f} ({kyu})',
-                               data=eval_data)
-                else:
-                    eval_g = self.config.training.eval_games
-                    eval_workers = max(1, min(eval_g, self.config.training.num_parallel_workers, os.cpu_count() or 4))
-                    self._set_stage(
-                        'eval', 'Evaluation vs Random Bot', 4,
-                        completed_items=0, total_items=eval_g,
-                        active_games=[], num_workers=eval_workers,
-                        detail=f'Evaluating strength against random bot ({eval_g} games, {eval_workers} workers)'
-                    )
-                    self._emit('eval_start', 'Evaluating against random bot...')
-                    
-                    def _on_eval_game_progress(completed, total, active_games=None, num_workers=None):
-                        self._set_stage(
-                            'eval', 'Evaluation vs Random Bot', 4,
-                            completed_items=completed, total_items=total,
-                            active_games=active_games or [], num_workers=num_workers or eval_workers,
-                            detail=f'Evaluating vs random bot: {completed}/{total} games ({len(active_games or [])} parallel)'
-                        )
-                        self._emit('eval_progress', f'Eval progress: {completed}/{total}', data={'current_stage': self.current_stage})
+                # The random-bot evaluation phase used to sit here. It is
+                # gone: a fixed anchor stops carrying information the moment
+                # the bot wins every game, and the rating it produced then
+                # counted iterations rather than strength. Competitive Elo now
+                # moves only in `ai/match.py`, one played game at a time, and
+                # is recorded in the model's elo_history.jsonl ledger.
+                kyu = elo_to_rank(self.elo)
 
-                    eval_start = time.time()
-                    win_rate = evaluate_against_random(
-                        network=self.eval_network,
-                        board_size=self.config.board.size,
-                        komi=self.config.board.komi,
-                        num_simulations=effective_sims,
-                        num_games=self.config.training.eval_games,
-                        device="cpu",
-                        iteration=self.iteration,
-                        games_dir=self.config.paths.games_dir,
-                        stop_checker=self._check_force_stop,
-                        num_workers=self.config.training.num_parallel_workers,
-                        progress_callback=_on_eval_game_progress,
-                        restrict_eye_fill=self.config.training.restrict_eye_fill,
-                        c_puct=self.config.mcts.c_puct,
-                        fpu_reduction=self.config.mcts.fpu_reduction,
-                        restrict_self_atari=self.config.training.restrict_self_atari,
-                        self_atari_max_stones=self.config.training.self_atari_max_stones,
-                    )
-                    eval_seconds = round(time.time() - eval_start, 2)
-
-                    if self._force_stop_requested:
-                        break
-                    
-                    # Update Elo based on win rate against random bot
-                    old_elo = self.elo
-                    self.elo = compute_elo_update(
-                        self.elo, self.config.training.elo_anchor, win_rate,
-                        num_games=self.config.training.eval_games,
-                    )
-                    
-                    kyu = elo_to_rank(self.elo)
-                    
-                    eval_data = {
-                        'win_rate_vs_random': win_rate,
-                        'elo_delta': self.elo - old_elo,
-                    }
-                    self._set_stage(
-                        'eval', 'Evaluation Complete', 4,
-                        completed_items=eval_g, total_items=eval_g,
-                        active_games=[], num_workers=eval_workers,
-                        detail=f'Win rate vs random: {win_rate:.1%} | Elo: {self.elo:.0f} ({kyu})'
-                    )
-                    self._emit('eval_done', f'Win rate vs random: {win_rate:.1%}, Elo: {self.elo:.0f} ({kyu})',
-                               data=eval_data)
-                
-                # --- Phase 4: Save weights (EVERY iteration to prevent data loss) ---
+                # --- Phase 3: Save weights (EVERY iteration to prevent data loss) ---
                 self._set_stage(
-                    'saving', 'Saving Checkpoint & Diagnostics', 5,
+                    'saving', 'Saving Checkpoint & Diagnostics', 4,
                     completed_items=0, total_items=1,
                     active_games=[], num_workers=0,
                     detail=f'Saving iteration {self.iteration} weights & evaluating collapse guard'
@@ -740,17 +770,16 @@ class Trainer:
                     'total_games': self.total_games,
                     'elo': self.elo,
                     'kyu_rank': kyu,
-                    'win_rate_vs_random': win_rate,
                     'buffer_size': len(self.replay_buffer),
                     'elapsed_seconds': round(elapsed, 1),
                     'self_play_seconds': sp_seconds,
-                    'random_eval_seconds': eval_seconds,
                     'champion_gate_seconds': gate_seconds,
                     'timestamp': datetime.now().isoformat(),
                     'gate_win_rate': self.last_gate_win_rate,
                     'gate_rejections': self.gate_rejections,
                     'gate_elo': round(self.gate_elo, 1),
                     **diagnostics,
+                    **self._label_metrics(),
                     **self._resign_metrics(),
                 }
                 if train_metrics:
@@ -765,7 +794,7 @@ class Trainer:
                     self._emit_reflection()
                 
                 self._set_stage(
-                    'completed', f'Iteration {self.iteration} Completed', 5,
+                    'completed', f'Iteration {self.iteration} Completed', 4,
                     completed_items=1, total_items=1,
                     active_games=[], num_workers=0,
                     detail=f'Iteration {self.iteration} finished in {elapsed:.1f}s | Elo {self.elo:.0f} ({kyu})'
@@ -802,6 +831,7 @@ class Trainer:
         clone = GoNetwork(
             board_size=self.config.board.size,
             num_input_planes=self.config.network.num_input_planes,
+            input_features=self.config.network.input_features,
             num_res_blocks=self.config.network.num_res_blocks,
             num_filters=self.config.network.num_filters,
             value_head_hidden=self.config.network.value_head_hidden,
@@ -836,6 +866,21 @@ class Trainer:
             return True, None
 
         workers = max(1, min(cfg.num_parallel_workers, cfg.gate_games, os.cpu_count() or 4))
+
+        # The gate is a measurement, and it is only worth anything if it
+        # measures the regime the model actually plays in. Running it at 50 sims
+        # while self-play runs at 200 and real matches at 400 selects for
+        # whichever network happens to be best at a search depth nobody uses —
+        # policy-heavy networks look strong at low sim counts because there is
+        # not enough search to overrule the prior. Warn once per iteration
+        # rather than silently overriding the user's number.
+        if cfg.gate_simulations < self.config.mcts.num_simulations / 2:
+            self._emit('warning',
+                       f'Gate runs at {cfg.gate_simulations} sims but self-play runs at '
+                       f'{self.config.mcts.num_simulations} — the gate is selecting for a '
+                       f'search depth the model never plays at. Raise gate_simulations to '
+                       f'at least {self.config.mcts.num_simulations // 2}.')
+
         self._set_stage(
             'gate', 'Promotion Gate (Candidate vs Champion)', 3,
             completed_items=0, total_items=cfg.gate_games,
@@ -870,6 +915,7 @@ class Trainer:
                 device="cpu",
                 iteration=self.iteration,
                 games_dir=self.config.paths.games_dir,
+                record_games=cfg.record_gate_games,
                 num_workers=cfg.num_parallel_workers,
                 stop_checker=self._check_force_stop,
                 progress_callback=_on_gate_game_progress,
@@ -897,10 +943,10 @@ class Trainer:
                 {k: v.detach().cpu() for k, v in self.network.state_dict().items()}
             )
             # The candidate started as a copy of the champion, so their rating
-            # gap is exactly what this match just measured. Only promotions move
-            # the ladder: a rejected candidate leaves the champion — and its
-            # rating — untouched, which is why this series cannot inflate.
-            gap = performance_elo_gap(win_rate, cfg.gate_games)
+            # gap is what this match just measured — but only the part of it
+            # that exceeds the promotion bar is evidence of strength rather than
+            # of the selection rule. See promotion_elo_gain.
+            gap = promotion_elo_gain(win_rate, cfg.gate_games, cfg.gate_threshold)
             self.gate_elo += gap
             self.gate_rejections = 0
             self._set_stage(
@@ -965,15 +1011,33 @@ class Trainer:
 
     def _collapse_diagnostics(self) -> dict:
         """
-        Tripwires for value-head collapse.
+        Tripwires for the two ways this loop degrades without anything failing.
 
-        When one colour wins nearly every game, the value head can drive its
-        loss to ~0 by reading only the turn-colour plane (`v = +1 if Black to
-        move else -1`), ignoring the board entirely. MCTS then sees a constant
-        Q for every child and stops evaluating — 800 simulations of nothing.
+        VALUE-HEAD COLLAPSE. When one colour wins nearly every game, the value
+        head can drive its loss to ~0 by reading only the turn-colour plane
+        (`v = +1 if Black to move else -1`), ignoring the board entirely. MCTS
+        then sees a constant Q for every child and stops evaluating — 800
+        simulations of nothing. The spread must be measured WITHIN each colour:
+        across mixed positions a collapsed head still looks bimodal (±1) and
+        would appear healthy.
 
-        The spread must be measured WITHIN each colour: across mixed positions
-        a collapsed head still looks bimodal (±1) and would appear healthy.
+        POLICY-HEAD COLLAPSE (overfitting to self-play). The prior narrows onto
+        a handful of moves until the model can only play — and only knows how to
+        answer — its own lines. Nothing else in the loop can see this: self-play
+        is unaffected because both sides share the narrowed move set, the gate
+        reads ~50% because a network is no worse than itself, and the value head
+        stays healthy throughout. The first external evidence is losing to
+        opponents it used to beat.
+
+        Measured as mean Shannon entropy over LEGAL moves, in nats, at two
+        points in the loop, because they narrow in this order:
+          - `target_entropy`: the training LABEL, straight from the replay
+            buffer. Narrows first if policy_target_temperature < 1.
+          - `policy_entropy`: what the champion network actually outputs. Follows
+            the label down over the next few dozen iterations.
+        Also reported: `policy_top5_mass` (share of probability on the best five
+        moves) and `target_one_hot_frac` (labels that are a single move), which
+        are the two numbers that make the state of it obvious at a glance.
         """
         cfg = self.config.training
         out = {
@@ -981,23 +1045,69 @@ class Trainer:
             'value_std_white': None,
             'pass_rate_black': None,
             'pass_rate_white': None,
+            'policy_entropy': None,
+            'policy_top5_mass': None,
+            'policy_entropy_baseline': None,
+            'policy_entropy_drop': None,
+            'target_entropy': None,
+            'target_one_hot_frac': None,
+            'target_support': None,
             'collapse_warning': None,
         }
 
         # --- Value-head spread, split by side to move ---
         # Needs the turn-colour plane (index 9) to separate the sides.
-        if len(self.replay_buffer) >= 16 and self.config.network.num_input_planes > 9:
+        from game.features import resolve as _resolve_features
+        turn_plane = _resolve_features(self.config.network.input_features).turn_colour_plane
+        if (len(self.replay_buffer) >= 16
+                and self.config.network.num_input_planes > turn_plane):
             n = min(cfg.collapse_probe_positions, len(self.replay_buffer))
-            states, _, _ = self.replay_buffer.sample(n, augment=False)
+            # Policies come out of the same draw as the states, so the label and
+            # network numbers below describe the same positions and can be
+            # compared against each other directly.
+            states, policies, _ = self.replay_buffer.sample(n, augment=False)
             with torch.no_grad():
-                _, values = self.eval_network.predict_batch(states, "cpu")
-            # Plane 9 is all-ones exactly when Black is to move.
-            is_black = states[:, 9, 0, 0] > 0.5
+                # predict_batch returns softmaxed PROBABILITIES, not logits.
+                prior_probs, values = self.eval_network.predict_batch(states, "cpu")
+            # The turn-colour plane is all-ones exactly when Black is to move.
+            # Its index comes from the feature set — hardcoding 9 here would
+            # silently mis-split the probe if a set ever reorders its planes.
+            is_black = states[:, turn_plane, 0, 0] > 0.5
             for key, mask in (('value_std_black', is_black),
                               ('value_std_white', ~is_black)):
                 sel = values[mask]
                 if sel.numel() >= 2:
                     out[key] = round(float(sel.std().item()), 5)
+
+            # --- Policy-head spread, over LEGAL moves only ---
+            # Entropy over all 82 outputs would be dominated by the occupied
+            # points the network correctly gives ~0, so it would drift down as a
+            # game fills up regardless of how the prior is behaving. Planes 0
+            # and 1 are the two stone planes in every feature set (they are
+            # written by features._fill_base_planes), so their sum marks the
+            # occupied points; the remainder plus pass is a close enough stand-in
+            # for legality here — it over-counts only ko and suicide.
+            with torch.no_grad():
+                occupied = (states[:, 0] + states[:, 1]).reshape(n, -1) > 0.5
+                legal = torch.ones_like(prior_probs, dtype=torch.bool)
+                legal[:, :occupied.shape[1]] = ~occupied
+                # Renormalise over the legal subset so the number means "how
+                # spread out is the prior across the moves available here".
+                priors = prior_probs * legal
+                priors = priors / priors.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                ent = -(priors * priors.clamp_min(1e-12).log()).sum(dim=1)
+                out['policy_entropy'] = round(float(ent.mean()), 4)
+                top5 = priors.topk(min(5, priors.shape[1]), dim=1).values.sum(dim=1)
+                out['policy_top5_mass'] = round(float(top5.mean()), 4)
+
+                # --- Training-label spread, same positions ---
+                pol = policies.float()
+                lab_ent = -(pol * pol.clamp_min(1e-12).log()).sum(dim=1)
+                out['target_entropy'] = round(float(lab_ent.mean()), 4)
+                out['target_one_hot_frac'] = round(
+                    float((pol.max(dim=1).values > 0.99).float().mean()), 4)
+                out['target_support'] = round(
+                    float((pol > 1e-6).sum(dim=1).float().mean()), 2)
 
         # --- Pass rates from this iteration's self-play ---
         for colour, key in ((1, 'pass_rate_black'), (2, 'pass_rate_white')):
@@ -1033,7 +1143,48 @@ class Trainer:
 
         # Read by the next iteration's self-play phase to suppress the mercy
         # rule while the value head cannot be trusted to judge a lost game.
+        # Deliberately computed from the value/pass tripwires ONLY: a narrow
+        # policy says nothing about whether the value head can judge a lost
+        # game, and suppressing the mercy rule for it would just make every
+        # iteration slower while the real problem went unfixed.
         self._collapse_active = bool(problems)
+
+        # --- Policy-head narrowing (reported, does not gate the mercy rule) ---
+        if (out['target_entropy'] is not None
+                and out['target_entropy'] < cfg.collapse_target_entropy_min):
+            problems.append(
+                f"training LABELS are near-deterministic (mean entropy "
+                f"{out['target_entropy']:.2f} nats < {cfg.collapse_target_entropy_min}, "
+                f"{out['target_one_hot_frac']:.0%} one-hot, mean support "
+                f"{out['target_support']:.1f} moves) — the policy head is being taught "
+                f"its own argmax instead of the search's judgement. Check that "
+                f"policy_target_temperature is 1.0"
+            )
+
+        if (out['policy_entropy'] is not None
+                and out['policy_entropy'] < cfg.collapse_policy_entropy_min):
+            problems.append(
+                f"policy head has narrowed (mean legal-move entropy "
+                f"{out['policy_entropy']:.2f} nats < {cfg.collapse_policy_entropy_min}, "
+                f"{out['policy_top5_mass']:.0%} of the prior on 5 moves) — the model is "
+                f"overfitting to its own self-play lines and will lose to opponents "
+                f"that play outside them, while self-play and the gate still look fine"
+            )
+
+        # The trend check. An absolute floor cannot be calibrated from the runs
+        # available, but a sustained decline is unambiguous whatever the healthy
+        # value turns out to be for a given board size and sim budget.
+        drift = self._policy_entropy_trend(out['policy_entropy'])
+        out['policy_entropy_baseline'] = drift['baseline']
+        out['policy_entropy_drop'] = drift['drop']
+        if drift['drop'] is not None and drift['drop'] >= cfg.collapse_entropy_trend_drop:
+            problems.append(
+                f"policy entropy is trending down: {drift['baseline']:.2f} -> "
+                f"{out['policy_entropy']:.2f} nats ({drift['drop']:.0%} fall over "
+                f"{cfg.collapse_entropy_trend_lookback} iterations). The prior is "
+                f"narrowing onto its own self-play lines — expect losses to external "
+                f"opponents before self-play or the gate shows anything"
+            )
 
         if problems:
             out['collapse_warning'] = '; '.join(problems)
@@ -1059,6 +1210,7 @@ class Trainer:
                 weights_path=self.config.paths.weights_path,
                 champion_state_dict=self.eval_network.state_dict(),
                 gate_elo=self.gate_elo,
+                scheduler=self.scheduler,
             )
             self._emit('info', f'Weights saved (iteration {self.iteration})')
         except Exception as e:
@@ -1086,22 +1238,53 @@ class Trainer:
             weights_path=self.config.paths.weights_path,
             champion_state_dict=self.eval_network.state_dict(),
             gate_elo=self.gate_elo,
+            scheduler=self.scheduler,
         )
         self._emit('info', f'Weights saved manually (iteration {self.iteration})')
         return self.config.paths.weights_path
 
     def _update_model_state(self) -> None:
-        """Update the model's config.json with current training state."""
-        if self.model_id:
-            try:
-                from model_manager import ModelManager
-                mgr = ModelManager()
-                mgr.update_model_state(
-                    self.model_id, self.elo, elo_to_rank(self.elo),
-                    self.iteration, self.total_games
-                )
-            except Exception:
-                pass  # Non-critical
+        """
+        Write back what training owns — iteration and total games — and pick up
+        any rating the model earned in matches while it was training.
+
+        The rating is READ here, never written: `ai/match.py` owns it now. A
+        long training run and a bot-vs-bot series can overlap, and the trainer's
+        in-memory `self.elo` goes stale the moment the model plays a game.
+        """
+        if not self.model_id:
+            return
+        try:
+            from model_manager import ModelManager
+            mgr = ModelManager()
+            mgr.update_training_state(self.model_id, self.iteration, self.total_games)
+            self._refresh_elo(mgr)
+        except Exception:
+            pass  # Non-critical
+
+    def _refresh_elo(self, manager=None) -> Optional[float]:
+        """
+        Reload the competitive rating from the model's Elo ledger.
+
+        Returns None — leaving `self.elo` untouched — when there is no model
+        directory to read from. A Trainer built straight from a Config, as the
+        CLI and the tests do, is not attached to anything that holds a ledger,
+        and its rating then has to come from the checkpoint as before.
+        """
+        if not self.model_id:
+            return None
+        try:
+            import elo_history
+            from model_manager import ModelManager
+            mgr = manager or ModelManager()
+            info = mgr.get_model(self.model_id)
+            if info is None:
+                return None
+            self.elo = elo_history.current_elo(
+                mgr.get_model_dir(self.model_id), fallback=info.elo)
+            return self.elo
+        except Exception:
+            return None
     
     def stop(self) -> None:
         """Request graceful stop of the training loop."""
@@ -1184,9 +1367,25 @@ class Trainer:
                                f'Training: step {completed_steps}/{total_train_steps} (Loss {loss.item():.4f})',
                                data={'current_stage': self.current_stage})
         
-        # Step the learning rate scheduler
-        self.scheduler.step()
-        
+        # Step the learning rate scheduler — but only through ONE cosine descent.
+        #
+        # CosineAnnealingLR is periodic: lr = eta_min + (base - eta_min) *
+        # (1 + cos(pi * last_epoch / T_max)) / 2. It reaches eta_min at
+        # last_epoch = T_max and then CLIMBS BACK, returning to the full base rate
+        # at 2 * T_max. With lr_decay_steps = 100 that means a run annealing to
+        # ~0 by iteration 100 is back at 0.002 by iteration 200 — a warm-restart
+        # cycle nobody asked for, in the second half of every long run.
+        #
+        # This was invisible until now: the scheduler's state was not checkpointed,
+        # so restarts kept resetting last_epoch and the schedule never advanced far
+        # enough to turn around. Persisting it correctly exposed the periodicity.
+        # Holding at the floor once the descent completes is what "anneal the
+        # learning rate" is meant to do; a genuine warm restart should be an
+        # explicit choice, not a side effect of T_max being shorter than the run.
+        if self.scheduler.last_epoch < self.config.training.lr_decay_steps:
+            self.scheduler.step()
+
+
         avg_policy_loss = total_policy_loss / max(num_batches, 1)
         avg_value_loss = total_value_loss / max(num_batches, 1)
         
@@ -1242,6 +1441,19 @@ class Trainer:
                 detail=f'Generated {game_num}/{total} games (1 worker failed)'
             )
             return
+
+        # Tally this iteration's label entropy. The collapse guard's
+        # `target_entropy` reads the whole replay buffer, which at 50k samples
+        # is ~30 iterations deep and therefore lags a config change by weeks of
+        # training. This one is fresh: it describes the labels produced RIGHT
+        # NOW, so flipping policy_target_temperature shows up on the next
+        # iteration instead of slowly fading in as the FIFO turns over.
+        te = record.get('target_entropy')
+        if te is not None:
+            self._label_stats['entropy_sum'] += float(te)
+            self._label_stats['support_sum'] += float(record.get('target_support') or 0.0)
+            self._label_stats['max_prob_sum'] += float(record.get('target_max_prob') or 0.0)
+            self._label_stats['games'] += 1
 
         # Tally passes per colour for the collapse guard. A colour that starts
         # passing heavily is handing away points under area scoring.
@@ -1316,7 +1528,7 @@ class Trainer:
             'elo_gain': round(elo_gain, 1),
             'starting_rank': oldest.get('kyu_rank', '?'),
             'current_rank': recent.get('kyu_rank', '?'),
-            'latest_win_rate': recent.get('win_rate_vs_random', 0),
+            'latest_gate_win_rate': recent.get('gate_win_rate'),
             'latest_policy_loss': recent.get('policy_loss', 0),
             'latest_value_loss': recent.get('value_loss', 0),
         }

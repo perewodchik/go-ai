@@ -26,10 +26,12 @@ claim is a judgement call it says so.
 | P3 | Move legality is computed twice for every child | perf | Medium | ✅ fixed |
 | P4 | Terminal nodes are fully re-scored on every visit | perf | Low | ✅ fixed |
 
-Phases 1–4 are **implemented and tested** (440 tests pass, up from 297).
+All five phases are **implemented and tested** (549 tests pass, up from 297).
 Phase 4 is the self-atari filter (§7), shipped off by default — and the
-measurement that came with it contradicts HEURISTICS.md's ranking of it. See
-"What shipped" at the end of this document.
+measurement that came with it contradicts HEURISTICS.md's ranking of it.
+Phase 5 is the versioned input encoding (§6), with `v2_12` available for new
+models and a behaviour-preserving migration for existing ones. See "What
+shipped" at the end of this document.
 
 Plus the two things you asked about: **17-plane history input** (§6) and
 **prevent self-atari** (§7).
@@ -625,6 +627,79 @@ terminal score equals a freshly computed one.
 
 `tests/benchmark_search.py` is committed but excluded from the pytest suite by
 its filename. Run it before and after any further performance work.
+
+## What shipped (Phase 5 — versioned input encoding)
+
+**`game/features.py`** (new) — a registry of versioned encodings. `v1_10` is the
+existing 10-plane encoding and remains the default; `v2_12` appends two planes:
+the opponent's last move and the mover's own previous move.
+
+The encoding is attached to the **network**, not the game state
+(`GoNetwork.input_features`), so nothing has to be threaded through the dozens
+of `GameState` construction sites. `features.encode_for_network(state, network)`
+reads the layout off the network, which makes it impossible to pair a position
+with the wrong plane count.
+
+Also removed the last hardcoded layout assumption: the collapse guard was
+reading `states[:, 9]` as the turn-colour plane, and now takes the index from
+the feature set.
+
+**Cost measured**: encoding is 0.082 ms either way (identical), and the wider
+first convolution adds ~1,150 parameters on the Small preset — 320,701 to
+321,853, +0.4%. This is not a throughput decision.
+
+**Why `v2_12` and not AlphaGo Zero's 17**: AGZ's 17 planes are 8 board states per
+colour plus colour-to-play, with no liberty or ko planes at all — history was
+largely how it perceived ko. This project encodes ko explicitly and enforces
+positional superko in the rules engine, so that motivation is already satisfied.
+What history still buys is **locality**, and that signal lives almost entirely in
+the last one or two moves.
+
+### Migrations
+
+**Nothing to migrate to keep what you have.** A `config.json` with no
+`input_features` falls back to `v1_10`, which is what every existing model was
+trained with. All 8 models load unchanged.
+
+**To move a trained model onto `v2_12`** there is a widening migration
+(`ai/feature_migration.py`, driven by `scripts/migrate_features.py`). Because
+`v2_12` appends its planes and leaves 0-9 untouched, every existing weight still
+addresses the right channel; the two new input weights are zero-initialised, so
+the widened network computes the identical function on the day it runs. That
+identity is asserted numerically in `tests/test_feature_migration.py`, including
+against scrambled history planes to prove the new channels genuinely cannot
+influence the output.
+
+| | |
+|---|---|
+| Preserved | weights, gated champion, iteration, Elo, gate Elo, total games, stored games |
+| Dropped | optimizer state (Adam re-warms in a few hundred steps) |
+| Invalidated | the replay buffer — its positions were encoded with 10 planes, and a stored sample does not remember which move preceded it |
+
+The buffer's signature guard rejects it automatically rather than silently
+feeding a 12-plane network 10-plane data. `weights.pt` is backed up first, and
+the migration is one-way.
+
+`update_model` never accepts network params, so the encoding cannot be changed
+on a trained model through the API — the freeze is structural, not just
+documented.
+
+### Documented in the app
+
+`web/templates/info.html` gains an **Input Encoding** card next to the
+architecture presets: the full plane table, why 12 rather than 17, what it is
+expected to do to learning (and what to watch — the value head gains more
+phase cues, which is what the collapse guard exists to catch), and the migration
+story with the exact commands. Verified rendering in the browser.
+
+### Honest status
+
+`v2_12` is a well-supported idea, **not a measured result on this project**. It
+has not been A/B'd here. The way to settle it is the same protocol as every
+other change the promotion gate cannot see: copy a model, train one twin on each
+encoding for the same number of iterations, then play them head-to-head.
+
+---
 
 ## What shipped (Phase 4 — self-atari filter)
 

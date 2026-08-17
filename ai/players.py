@@ -24,6 +24,13 @@ rating purposes), `rating`, and `commit_rating()`. The match runner updates the
 two ratings after each game and lets the player decide how (or whether) to
 persist. The random bot is the Elo ANCHOR, so its rating is fixed — see
 `rating_is_fixed`.
+
+`commit_rating` takes the new rating AND an `EloEntry` describing the game that
+produced it — opponent, outcome, delta, and the path of the saved game record.
+It used to take the float alone, which meant persisting a rating destroyed the
+previous one and left no way to ask why the number changed. A player that has
+somewhere to persist to now appends to that model's `elo_history.jsonl` ledger
+instead of overwriting a field.
 """
 
 from abc import ABC, abstractmethod
@@ -33,10 +40,13 @@ from game.game_state import GameState, MOVE_PASS, MOVE_RESIGN
 from ai.mercy_rule import MercyRule
 from ai.mcts import MCTS
 from ai.random_bot import RandomBot
+from elo_history import DEFAULT_ELO, EloEntry
 
 
-# Elo the random bot is pinned at — the same anchor training uses.
-RANDOM_BOT_ELO = 500.0
+# Elo the random bot is pinned at. It is the same value a fresh model starts
+# on, which is the honest starting claim: an untrained network is worth about
+# what uniform-random play is worth.
+RANDOM_BOT_ELO = DEFAULT_ELO
 
 
 class Player(ABC):
@@ -67,10 +77,17 @@ class Player(ABC):
         """
         return False
 
-    def commit_rating(self, new_rating: float) -> None:
+    def commit_rating(self, new_rating: float,
+                      event: Optional[EloEntry] = None) -> None:
         """
         Adopt (and, for players that have somewhere to put it, persist) a new
         rating. Called by the match runner after each rated game.
+
+        `event` is the full record of what moved the rating: opponent, outcome,
+        delta and the saved game's path. It is optional so a caller that only
+        wants to set a number (tests, a manual correction) still can, but the
+        match runner always supplies it — a ledger entry without the game that
+        caused it cannot be reviewed, which is the whole point of keeping one.
         """
         if self.rating_is_fixed:
             return
@@ -95,6 +112,28 @@ class Player(ABC):
 
     def game_finished(self, state: GameState, winner: Optional[int]) -> None:
         """Called once the game is over (or was abandoned)."""
+
+    def cancel(self) -> None:
+        """
+        Stop waiting for whatever this player is waiting for, now.
+
+        A local engine is never blocked on anything a caller would want to
+        interrupt, so this does nothing by default. A networked one may be
+        waiting minutes for an opponent to accept a game or to move, and the
+        person watching should not have to sit out that timeout — `stop()` on
+        the match runner calls this so the wait ends immediately.
+        """
+
+    def status(self) -> Optional[dict]:
+        """
+        What this player is doing right now, for the UI, or None if there is
+        nothing interesting to say.
+
+        Local engines think and move; a remote one connects, challenges, waits
+        for an opponent, and can stall on any of those steps — which is
+        invisible unless it is reported.
+        """
+        return None
 
     def close(self) -> None:
         """Release any resources (sockets, sessions). Safe to call twice."""
@@ -127,8 +166,17 @@ class ModelPlayer(Player):
                  num_simulations: int = 200, c_puct: float = 1.5,
                  restrict_eye_fill: bool = False, device: str = "cpu",
                  rating: float = RANDOM_BOT_ELO, iteration: int = 0,
-                 temperature: float = 0.1, meta: Optional[dict] = None,
-                 rating_sink: Optional[Callable[[str, float], None]] = None,
+                 # 0.0 = play the most-visited move, always. This used to be 0.1,
+                 # which SAMPLES from N^10 rather than taking the argmax: a
+                 # 60-vs-50 visit split at the root then plays the second-best
+                 # move 14% of the time, and a 55-vs-50 split 24% of the time.
+                 # At 200-400 sims on 9x9 those near-ties are the common case,
+                 # not the exception, so a rated game was throwing a weighted
+                 # coin on most of its moves. Exploration belongs in self-play,
+                 # where Dirichlet noise already provides it.
+                 temperature: float = 0.0, meta: Optional[dict] = None,
+                 rating_sink: Optional[Callable[[str, float, Optional[EloEntry]], None]] = None,
+                 games_dir: Optional[str] = None,
                  mercy: Optional[MercyRule] = None):
         super().__init__(
             name=name,
@@ -149,6 +197,12 @@ class ModelPlayer(Player):
         self.board_size = board_size
         self.temperature = temperature
         self._rating_sink = rating_sink
+        # This model's own `games/` directory. The match runner writes a
+        # finished game into every participating model's directory, producing a
+        # DIFFERENT file per model, and each model's ledger has to point at its
+        # own copy — so the runner matches this against its record_dirs to find
+        # which saved path belongs to this player.
+        self.games_dir = games_dir
         # Mercy rule: gives up a game its own search has called lost for
         # several moves running, instead of playing out a decided endgame.
         self.mercy = mercy
@@ -175,10 +229,16 @@ class ModelPlayer(Player):
 
         return action
 
-    def commit_rating(self, new_rating: float) -> None:
-        super().commit_rating(new_rating)
-        if self._rating_sink:
-            self._rating_sink(self.model_id, self.rating)
+    def commit_rating(self, new_rating: float,
+                      event: Optional[EloEntry] = None) -> None:
+        super().commit_rating(new_rating, event)
+        if not self._rating_sink:
+            return
+        if event is not None:
+            # Keep the ledger's own number authoritative: the caller computed
+            # the rating, but a subclass may have clamped it in super().
+            event.new_elo = self.rating
+        self._rating_sink(self.model_id, self.rating, event)
 
 
 class RandomPlayer(Player):

@@ -65,5 +65,13 @@ def test_pass_off_turn_is_rejected(client):
 def test_white_player_moves_after_bot_opens(client):
     # Human is White; the bot (Black) opens inside /new, so it's the human's turn.
     gid = _new_game(client, "white")
-    resp = client.post('/api/game/move', json={'game_id': gid, 'row': 4, 'col': 4})
+
+    # Any empty point will do. Naming one (tengen used to be free) makes this
+    # test a hostage to the current weights: a network that learns to open
+    # there turns "the human may move" into "Illegal move".
+    for row, col in ((r, c) for r in range(9) for c in range(9)):
+        resp = client.post('/api/game/move',
+                           json={'game_id': gid, 'row': row, 'col': col})
+        if resp.status_code != 400:
+            break
     assert resp.status_code == 200

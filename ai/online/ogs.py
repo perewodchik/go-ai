@@ -60,12 +60,19 @@ GAMEDATA_TIMEOUT = 30.0
 # How often to ask OGS whether a quiet game has actually ended. Cheap next to
 # the cost of sitting out MOVE_TIMEOUT on a game that is already over.
 END_CHECK_INTERVAL = 10.0
+# How long to let the previous game settle on OGS before challenging again.
+# Bots that allow one game per player refuse the next challenge until then.
+PREVIOUS_GAME_TIMEOUT = 30.0
 
 _OGS_COLOR = {"black": BLACK, "white": WHITE}
 
 
 class OGSGameError(RuntimeError):
     """The OGS game could not be started, or diverged from ours."""
+
+
+class OGSChallengeRejected(OGSGameError):
+    """The bot said no, rather than leaving us waiting."""
 
 
 class _NewGameWatcher:
@@ -85,7 +92,20 @@ class _NewGameWatcher:
         self._known: set = set()
         self._found = threading.Event()
         self._game_id: Optional[int] = None
+        self._rejected: Optional[str] = None
         socket.on("active_game", self._on_active_game)
+        socket.on("notification", self._on_notification)
+
+    def _on_notification(self, data: dict) -> None:
+        """
+        A declined challenge is announced, not merely left unanswered — so
+        catching it turns a 90 second silence into an immediate answer.
+        """
+        if not isinstance(data, dict):
+            return
+        if data.get("type") == "gameOfferRejected":
+            self._rejected = data.get("message") or "the bot declined the challenge"
+            self._found.set()
 
     def _on_active_game(self, data: dict) -> None:
         try:
@@ -108,13 +128,20 @@ class _NewGameWatcher:
     def snapshot_known(self, game_ids) -> None:
         self._known.update(int(g) for g in game_ids)
 
-    def wait(self, timeout: float) -> int:
-        if not self._found.wait(timeout):
-            raise OGSSocketError("no game appeared for this challenge")
+    def wait(self, timeout: float, cancelled: Optional[threading.Event] = None) -> int:
+        deadline = time.monotonic() + timeout
+        while not self._found.wait(0.25):
+            if cancelled is not None and cancelled.is_set():
+                raise OGSSocketError("cancelled while waiting for the game")
+            if time.monotonic() >= deadline:
+                raise OGSSocketError("no game appeared for this challenge")
+        if self._rejected:
+            raise OGSChallengeRejected(self._rejected)
         return self._game_id
 
     def cancel(self) -> None:
         self._socket.off("active_game", self._on_active_game)
+        self._socket.off("notification", self._on_notification)
 
 
 class OGSPlayer(RemotePlayer):
@@ -169,6 +196,15 @@ class OGSPlayer(RemotePlayer):
         # select_move, since the runner ignores errors from observe_move.
         self._send_failure: Optional[str] = None
         self._next_end_check = 0.0
+        # Cancellation, set by the match runner's stop(). Every wait in here
+        # watches it, so stopping is immediate rather than "after the timeout".
+        self._cancelled = threading.Event()
+        self._status_state = "idle"
+        self._status_detail = ""
+        self._status_since = time.time()
+        # Games that were already running when we challenged; anything else
+        # against this bot is one of ours to clean up.
+        self._games_before: set = set()
 
     # ---- Construction from a spec ----------------------------------------
 
@@ -205,6 +241,60 @@ class OGSPlayer(RemotePlayer):
 
         return cls(bot=bot, request=request, game_name=spec.get("name") or "go-ai")
 
+    # ---- Status and cancellation -----------------------------------------
+
+    def _set_status(self, state: str, detail: str = "") -> None:
+        self._status_state = state
+        self._status_detail = detail
+        self._status_since = time.time()
+        logger.info("OGS %s: %s%s", self.bot.username, state,
+                    f" — {detail}" if detail else "")
+
+    def status(self) -> dict:
+        """
+        What this side of the board is doing, for the live match panel.
+
+        `waiting_seconds` is the point of it: a bot that has not accepted for
+        forty seconds is not thinking, it is not coming.
+        """
+        return {
+            "state": self._status_state,
+            "detail": self._status_detail,
+            "waiting_seconds": round(time.time() - self._status_since, 1),
+            "game_id": self.game_id,
+            "game_url": self.game_url,
+            "online": bool(self._socket and self._socket.connected),
+        }
+
+    @property
+    def game_url(self) -> Optional[str]:
+        """Where to watch this game on OGS."""
+        return f"https://online-go.com/game/{self.game_id}" if self.game_id else None
+
+    def cancel(self) -> None:
+        """
+        Stop waiting, whatever we are waiting for.
+
+        Also gives back the game: a live OGS game we walk away from keeps the
+        bot occupied and burns our clock down to a timeout loss, so it is
+        resigned rather than abandoned.
+        """
+        self._cancelled.set()
+        self._incoming.put(("cancelled", None))
+        self._set_status("cancelled", "stopped from here")
+
+        if self.game_id is not None and self._socket is not None:
+            try:
+                self._socket.send("game/resign", {"game_id": self.game_id})
+                logger.info("Resigned OGS game %s on cancel", self.game_id)
+            except OGSSocketError:
+                pass
+        self._withdraw()
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancelled.is_set():
+            raise OGSGameError("the match was stopped")
+
     # ---- Socket ----------------------------------------------------------
 
     def _connect(self) -> OGSSocket:
@@ -236,6 +326,8 @@ class OGSPlayer(RemotePlayer):
         self._phase = "play"
         self._send_failure = None
         self._next_end_check = 0.0
+        self._cancelled.clear()
+        self._set_status("connecting", "signing in to OGS")
 
         if state.board_size != self.request.board_size:
             raise OGSGameError(
@@ -256,21 +348,33 @@ class OGSPlayer(RemotePlayer):
         watcher = _NewGameWatcher(sock, our_id=self._our_id(), bot_id=self.bot.id)
         # Games already running against this bot are not the one we are about
         # to create — OGS re-announces them whenever we connect.
-        watcher.snapshot_known(self._ongoing_game_ids())
+        self._games_before = set(self._ongoing_game_ids())
+        watcher.snapshot_known(self._games_before)
 
+        self._wait_for_previous_game_to_clear()
+
+        self._set_status("challenging", f"challenging {self.bot.username}")
         created = self.client.challenge_bot(
             self.bot.id, self.request, name=self.game_name, our_color=our_color
         )
         self.challenge_id = created["challenge_id"]
 
+        self._set_status("waiting", f"waiting for {self.bot.username} to accept")
         self._start_keepalive(sock, created["game_id"])
         try:
-            self.game_id = watcher.wait(self.accept_timeout)
-        except OGSSocketError:
+            self.game_id = watcher.wait(self.accept_timeout, self._cancelled)
+        except OGSChallengeRejected as exc:
             self._withdraw()
+            self._set_status("failed", f"{self.bot.username} declined")
+            raise OGSGameError(f"{self.bot.username} declined the game: {exc}")
+        except OGSSocketError:
+            self._raise_if_cancelled()
+            self._withdraw()
+            self._set_status("failed", f"{self.bot.username} never accepted")
             raise OGSGameError(
                 f"{self.bot.username} did not accept the game within "
-                f"{self.accept_timeout:.0f}s — it may be busy or offline"
+                f"{self.accept_timeout:.0f}s — it may be busy, offline, or "
+                f"already playing its limit of games against us"
             )
         finally:
             self._stop_keepalive_timer()
@@ -284,6 +388,7 @@ class OGSPlayer(RemotePlayer):
 
         data = self._wait_for_gamedata(gamedata)
         self._verify_game(data, state)
+        self._set_status("playing", self.game_url or "")
         logger.info("OGS game %s started: %s plays %s",
                     self.game_id, self.bot.username,
                     "black" if color == BLACK else "white")
@@ -293,6 +398,41 @@ class OGSPlayer(RemotePlayer):
         if self._player_id is None:
             self._player_id = int(self.client.me()["id"])
         return self._player_id
+
+    def _wait_for_previous_game_to_clear(self) -> None:
+        """
+        Don't challenge again until the last game is really over on OGS.
+
+        Most bots — Bergamot and Amaranthus among them — set
+        `max_games_per_player: 1`, so a second challenge while the previous
+        game is still open is simply refused. Our runner considers a game
+        finished the moment OUR board says so, but OGS takes a beat to
+        finalise (a two-pass ending goes through stone removal and scoring
+        first). That gap is what stopped a 5 game series at 4: the fifth
+        challenge went out too early, was refused, and nothing was waiting to
+        say so.
+        """
+        previous = self.meta.get("ogs_game_id")
+        if not previous:
+            return
+
+        deadline = time.monotonic() + PREVIOUS_GAME_TIMEOUT
+        self._set_status("waiting", "waiting for the previous game to finish on OGS")
+        while time.monotonic() < deadline:
+            self._raise_if_cancelled()
+            try:
+                record = self.client.game(previous)
+            except Exception:
+                return          # cannot tell; the challenge itself will decide
+            phase = (record.get("gamedata") or {}).get("phase")
+            if phase != "play" or record.get("ended"):
+                # Give OGS a moment to release the bot's slot as well.
+                time.sleep(1.0)
+                return
+            time.sleep(1.5)
+
+        logger.warning("OGS game %s still open after %ss; challenging anyway",
+                       previous, PREVIOUS_GAME_TIMEOUT)
 
     def _ongoing_game_ids(self) -> list:
         """Games we are already in, which a new challenge is definitely not."""
@@ -499,9 +639,11 @@ class OGSPlayer(RemotePlayer):
                     f"{self.bot.username} did not move within "
                     f"{self.move_timeout:.0f}s"
                 )
+            self._raise_if_cancelled()
             try:
                 kind, payload = self._incoming.get(timeout=min(remaining, 5.0))
             except queue.Empty:
+                self._raise_if_cancelled()
                 if self._phase != "play":
                     return MOVE_RESIGN
                 # Not every ending announces itself on an event we listen for:
@@ -512,6 +654,9 @@ class OGSPlayer(RemotePlayer):
                 if ended is not None:
                     return ended
                 continue
+
+            if kind == "cancelled":
+                raise OGSGameError("the match was stopped")
 
             if kind == "phase":
                 # The game ended while it was the bot's turn: it resigned, ran
@@ -552,6 +697,8 @@ class OGSPlayer(RemotePlayer):
 
     def game_finished(self, state: GameState, winner: Optional[int]) -> None:
         self._stop_keepalive_timer()
+        if self._status_state not in ("cancelled", "failed"):
+            self._set_status("finished", self.game_url or "")
         if self._socket is not None and self.game_id is not None:
             try:
                 self._socket.off(f"game/{self.game_id}/move")
@@ -559,16 +706,55 @@ class OGSPlayer(RemotePlayer):
                 self._socket.send("game/disconnect", {"game_id": self.game_id})
             except OGSSocketError:
                 pass
+        # Keep the game's identity on the player, because describe() is what
+        # ends up in the saved record — that is how Review Games links back to
+        # the real game on OGS.
         self.meta["ogs_game_id"] = self.game_id
+        self.meta["ogs_game_url"] = self.game_url
         self.game_id = None
 
     def close(self) -> None:
         self._stop_keepalive_timer()
         self._withdraw()
+        self._resign_stray_games()
         if self._socket is not None and self._owns_socket:
             self._socket.close()
             self._socket = None
             self._authenticated = False
+
+    def _resign_stray_games(self) -> None:
+        """
+        Give back any game against this bot that we are still nominally in.
+
+        Cancelling in the gap between "challenge sent" and "game id known"
+        leaves a game the bot accepts a moment later: we never learn its id, so
+        nothing resigns it, and it sits there occupying the bot until our clock
+        runs out. Anything against this bot that was not already running when
+        we started is ours to close.
+        """
+        if self._socket is None or not self._socket.connected:
+            return
+        try:
+            ongoing = self.client.ongoing_games()
+        except Exception:
+            return
+
+        for game in ongoing:
+            game_id = game.get("id")
+            if not game_id or game_id in self._games_before:
+                continue
+            players = game.get("players") or {}
+            ids = {(players.get("black") or {}).get("id"),
+                   (players.get("white") or {}).get("id")}
+            if self.bot.id not in ids:
+                continue
+            try:
+                self._socket.send("game/connect", {"game_id": game_id, "chat": False})
+                self._socket.send("game/resign", {"game_id": game_id})
+                logger.info("Resigned stray OGS game %s against %s",
+                            game_id, self.bot.username)
+            except OGSSocketError:
+                return
 
     def _withdraw(self) -> None:
         """Take back a challenge that was never accepted."""
@@ -589,5 +775,10 @@ class OGSPlayer(RemotePlayer):
             "ogs_id": self.bot.id,
             "ogs_rank": self.bot.rank,
             "game_id": self.game_id,
+            # Present during the game and kept afterwards (game_finished moves
+            # it into meta), so both the live panel and a saved record can link
+            # to the game on OGS.
+            "ogs_game_id": self.game_id or self.meta.get("ogs_game_id"),
+            "ogs_game_url": self.game_url or self.meta.get("ogs_game_url"),
         })
         return info

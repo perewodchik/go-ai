@@ -97,24 +97,42 @@ def game_rel_path(iteration: int, phase: str, index: int) -> str:
     return os.path.join(iteration_dirname(iteration), phase, f'{prefix}_{index:04d}.json')
 
 
-def save_game(games_dir: str, iteration: int, phase: str, index: int, record: dict) -> str:
+def save_game(games_dir: str, iteration: int, phase: str, index: int,
+              record: dict, store_full: bool = True) -> Optional[str]:
     """
-    Write a game record into its iteration/phase directory.
+    Record a training game.
+
+    Two things happen here, and only the first is optional. The game's summary
+    always goes into `games/index.jsonl` (see ai/game_index.py) — that is what
+    every chart on the training page is drawn from. The full record, which is
+    the move list and therefore ~99% of the bytes, is written only when
+    `store_full` is set.
+
+    That is what the recording toggles switch off: a run with self-play
+    recording disabled still produces every statistic, it just cannot replay
+    the games afterwards. On a 9x9 model that is ~12 KB saved per game and one
+    fewer file write in the self-play hot loop.
 
     Stamps `iteration`, `game_index` and `phase` onto the record so a file is
     self-describing even if it is later moved or read out of context.
 
-    Returns the path relative to `games_dir`.
+    Returns the path relative to `games_dir`, or None when nothing was written.
     """
     record['iteration'] = iteration
     record['game_index'] = index
     record['phase'] = phase
 
-    rel = game_rel_path(iteration, phase, index)
-    abs_path = os.path.join(games_dir, rel)
-    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-    with open(abs_path, 'w') as f:
-        json.dump(record, f, indent=2)
+    rel = None
+    if store_full:
+        rel = game_rel_path(iteration, phase, index)
+        abs_path = os.path.join(games_dir, rel)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        with open(abs_path, 'w') as f:
+            json.dump(record, f, indent=2)
+
+    from ai import game_index
+    game_index.record(games_dir, iteration, phase, index, record,
+                      stored=store_full)
     return rel
 
 
@@ -287,6 +305,12 @@ def delete_saved_game(games_dir: str, rel_path: str) -> bool:
     path = resolve_game_path(games_dir, rel_path)
     if not path:
         return False
+
+    # Deleting games clears the statistics they produced as well as the bytes:
+    # the index outlives the records (that is what makes recording optional),
+    # so an explicit delete is the only thing that can drop a row.
+    from ai import game_index
+    game_index.prune(games_dir, os.path.relpath(path, os.path.realpath(games_dir)))
 
     games_root = os.path.realpath(games_dir)
     try:
