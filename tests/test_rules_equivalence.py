@@ -68,7 +68,9 @@ def oracle_is_legal_move(board, color, row, col, ko_point=None,
             return False, "Suicide: move would leave your group with no liberties"
 
     if board_history_hashes is not None:
-        if test_board.board_hash in board_history_hashes:
+        # Situational, not positional — the key carries whose turn it becomes.
+        if rules.situational_key(test_board.board_hash,
+                                 opponent(color)) in board_history_hashes:
             return False, "Superko violation: this board position has occurred before"
 
     return True, ""

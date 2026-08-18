@@ -15,6 +15,9 @@ let playerColor = 'black';
 let inputLocked = false;
 // Live win-rate readout: easy mode only, and off until the user asks for it.
 let showWinRate = false;
+let showConsidered = false;
+// Bumped per request so a slow search's answer can't land on a later position.
+let consideredToken = 0;
 let winrateChart = null;
 // Opponent picker state: every model in the workspace, and the one this game
 // is actually being played against.
@@ -138,6 +141,7 @@ async function startGame() {
     // Initialize board renderer
     const canvas = document.getElementById('go-board');
     board = new GoBoardRenderer(canvas, data.board_size, onBoardClick);
+    board.showAnalysis = showConsidered && gameMode === 'easy';
 
     // Name both sides, so the panel says who is who without a status heading.
     const botName = data.model_name || 'Bot';
@@ -185,6 +189,7 @@ function syncControls() {
     setVisible(document.getElementById('btn-undo'), easy && !gameOver);
     setVisible(document.getElementById('btn-suggest'), easy && !gameOver);
     setVisible(document.getElementById('winrate-toggle-row'), easy);
+    setVisible(document.getElementById('considered-toggle-row'), easy);
 }
 
 function setVisible(el, visible) {
@@ -359,6 +364,48 @@ async function refreshEstimateIfEnabled() {
 async function refreshAnalysis() {
     await refreshEstimateIfEnabled();
     await refreshWinRateIfEnabled();
+    await refreshConsideredIfEnabled();
+}
+
+// ---- Considered moves (easy mode only, off by default) ----
+document.getElementById('toggle-considered')?.addEventListener('change', async (e) => {
+    showConsidered = e.target.checked;
+    if (!board) return;
+    board.showAnalysis = showConsidered;
+    if (showConsidered) {
+        await refreshConsideredIfEnabled();
+    } else {
+        board.setAnalysis(null);
+    }
+});
+
+/**
+ * Ask the bot what it is considering for the position now on the board.
+ *
+ * This is a full search, so it costs about what one bot move costs — it runs
+ * only while the toggle is on, and the stale-response guard drops an answer
+ * that arrives after the board has already moved on.
+ */
+async function refreshConsideredIfEnabled() {
+    if (!showConsidered || gameMode !== 'easy' || !gameId || !board) return;
+    if (gameOver) {
+        board.setAnalysis(null);
+        return;
+    }
+
+    const requestedFor = gameId;
+    const token = ++consideredToken;
+    const res = await fetch('/api/game/considered', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ game_id: gameId }),
+    });
+    if (!res.ok || token !== consideredToken || requestedFor !== gameId) return;
+
+    const data = await res.json();
+    if (!showConsidered || !board) return;
+    board.showAnalysis = true;
+    board.setAnalysis(data.moves || []);
 }
 
 // ---- Live win rate (easy mode only, off by default) ----
@@ -518,6 +565,10 @@ document.getElementById('btn-new-game')?.addEventListener('click', () => {
 
 // ---- Helpers ----
 function updateBoard(state) {
+    // The overlay belongs to the position it was computed for — drop it the
+    // moment the board moves on, rather than leave the previous position's
+    // circles up until the next search comes back.
+    board.setAnalysis(null);
     board.updateState(state);
     document.getElementById('move-counter').textContent = `Move ${state.move_number}`;
     document.getElementById('black-captures').textContent = `Captured: ${state.prisoners['1'] || 0}`;

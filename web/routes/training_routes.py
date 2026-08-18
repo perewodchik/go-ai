@@ -585,6 +585,84 @@ def get_game(rel_path):
     return jsonify(game_data)
 
 
+@training_bp.route('/api/games/<path:rel_path>/considered', methods=['POST'])
+def game_considered_moves(rel_path):
+    """
+    What a model would consider at one position of a recorded game.
+
+    The reviewer asks per position rather than for the whole game: a search per
+    move would cost minutes on a 200-move record, and the overlay only ever
+    shows one position at a time. `?model=<id>` picks whose games/ the record
+    lives in AND whose network does the thinking, exactly as GET does — the
+    active model otherwise.
+    """
+    trainer = _require_trainer()
+    if not trainer:
+        return jsonify({'error': 'No model selected'}), 400
+
+    data = request.get_json() or {}
+    move_number = int(data.get('move_number') or 0)
+
+    games_dir = trainer.config.paths.games_dir
+    network = trainer.eval_network
+    config = trainer.config
+
+    requested_model = request.args.get('model') or data.get('model')
+    from web.app import model_manager
+    if requested_model and requested_model != model_manager.get_active_model_id():
+        info = model_manager.get_model(requested_model)
+        if info is None:
+            return jsonify({'error': 'Model not found'}), 404
+        games_dir = os.path.join(model_manager.get_model_dir(requested_model), 'games')
+        from ai.model_loader import load_model_network
+        from config import Config
+        try:
+            network, _, _ = load_model_network(requested_model, manager=model_manager)
+        except Exception as exc:
+            return jsonify({'error': f'Could not load {requested_model}: {exc}'}), 400
+        config = Config.from_model(info, model_manager.get_model_dir(requested_model))
+
+    if network is None:
+        return jsonify({'error': 'Model not loaded'}), 400
+
+    path = resolve_game_path(games_dir, rel_path)
+    if not path or not os.path.isfile(path):
+        return jsonify({'error': 'Game not found'}), 404
+
+    with open(path) as f:
+        game_data = json.load(f)
+
+    from game.game_state import GameState
+    board_size = game_data.get('board_size', 9)
+    state = GameState(board_size=board_size, komi=game_data.get('komi', 6.5))
+    for m in game_data.get('moves', [])[:max(0, move_number)]:
+        move = m['move']
+        if move[0] < 0:
+            state.play_pass()
+        else:
+            state.play_move(move[0], move[1])
+
+    if state.is_over:
+        return jsonify({'move_number': move_number, 'moves': []})
+
+    from ai.analysis import analyze_state
+    from ai.mcts import MCTS
+    mcts = MCTS(
+        network=network,
+        num_simulations=config.mcts.num_simulations,
+        c_puct=config.mcts.c_puct,
+        device="cpu",
+        restrict_eye_fill=bool(config.training.restrict_eye_fill),
+        restrict_self_atari=bool(config.training.restrict_self_atari),
+        self_atari_max_stones=int(config.training.self_atari_max_stones),
+    )
+    try:
+        return jsonify(analyze_state(mcts, state))
+    except Exception as exc:
+        # A record from a model of a different board size, most likely.
+        return jsonify({'error': f'Could not analyze this position: {exc}'}), 400
+
+
 @training_bp.route('/api/gate_history')
 def gate_history():
     """

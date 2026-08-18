@@ -16,8 +16,10 @@ import pytest
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from game.board import Board, EMPTY, BLACK, WHITE
-from game.rules import is_legal_move, apply_move, get_legal_moves, MoveResult
+from game.board import Board, EMPTY, BLACK, WHITE, opponent
+from game.rules import (is_legal_move, apply_move, get_legal_moves, MoveResult,
+                        simulate_move, situational_key)
+from game.game_state import GameState
 
 
 class TestBasicLegality:
@@ -356,6 +358,68 @@ class TestSuperko:
         legal, err = is_legal_move(b2, WHITE, 5, 5, board_history_hashes={b2.board_hash})
         # Playing (5,5) creates a NEW state, not in history — should be legal
         assert legal  # New state is fine
+
+
+class TestSituationalSuperko:
+    """
+    Superko is SITUATIONAL: the key is (position, player to move).
+
+    The regression is OGS game 89823532. Black captured two stones, White
+    recaptured one, and the resulting position happened to match one from two
+    moves earlier — but with the other player on move, so OGS (Chinese rules)
+    allowed it. Positional superko refused, our board diverged from OGS
+    mid-match, and the match was aborted at move 58.
+    """
+
+    # x, y as OGS records them; (row, col) is (y, x).
+    OGS_89823532 = [
+        (1, 7), (4, 4), (1, 8), (6, 6), (5, 6), (5, 5), (3, 2), (3, 3),
+        (8, 3), (4, 2), (4, 1), (3, 1), (4, 7), (2, 2), (8, 1), (5, 1),
+        (0, 2), (4, 0), (5, 2), (6, 2), (6, 1), (5, 3), (4, 5), (3, 5),
+        (7, 6), (4, 6), (1, 1), (5, 7), (6, 0), (3, 7), (2, 5), (4, 8),
+        (3, 6), (2, 6), (8, 2), (1, 5), (7, 7), (2, 4), (7, 8), (7, 5),
+        (0, 5), (0, 6), (7, 1), (0, 4), (6, 3), (6, 4), (7, 2), (7, 3),
+        (8, 8), (8, 4), (2, 3), (1, 3), (6, 7), (8, 6), (1, 6), (8, 7),
+        (8, 5), (8, 6),
+    ]
+
+    def test_the_ogs_game_replays_in_full(self):
+        state = GameState(board_size=9, komi=7.5)
+        for i, (x, y) in enumerate(self.OGS_89823532, 1):
+            assert state.play_move(y, x), f"move {i} ({x},{y}) refused"
+
+    def test_the_recapture_repeats_the_position_with_the_other_side_to_move(self):
+        state = GameState(board_size=9, komi=7.5)
+        positions = [state.board.board_hash]
+        for x, y in self.OGS_89823532[:-1]:
+            state.play_move(y, x)
+            positions.append(state.board.board_hash)
+
+        x, y = self.OGS_89823532[-1]
+        sim = simulate_move(state.board, state.current_player, y, x,
+                            state.ko_point, state.board_hash_history)
+
+        # The bare position HAS occurred before — which is exactly what
+        # positional superko refused — but the side to move differs, so
+        # situational superko allows it, as OGS does.
+        assert sim.new_hash in positions
+        assert sim.is_legal, sim.error
+
+    def test_a_true_repetition_is_still_refused(self):
+        state = GameState(board_size=9, komi=7.5)
+        for x, y in self.OGS_89823532[:-1]:
+            state.play_move(y, x)
+
+        x, y = self.OGS_89823532[-1]
+        colour = state.current_player
+        sim = simulate_move(state.board, colour, y, x, state.ko_point)
+        # Same move, but now the resulting SITUATION is on the ledger.
+        blocked = state.board_hash_history | {
+            situational_key(sim.new_hash, opponent(colour))
+        }
+        again = simulate_move(state.board, colour, y, x, state.ko_point, blocked)
+        assert not again.is_legal
+        assert "Superko" in again.error
 
 
 class TestGetLegalMoves:

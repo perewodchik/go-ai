@@ -9,6 +9,8 @@ let winrateChart = null;
 let winrateBlack = [];   // base series: Black's win % per move
 let winrateSide = 1;     // perspective shown: 1 = Black, 2 = White
 let showTerritoryOverlay = false;  // coloured overlay on the board (numbers show regardless); off by default
+let showConsidered = false;        // the model's shortlist for the position being viewed; off by default
+let consideredToken = 0;           // bumped per request, so a slow search can't paint a later position
 
 document.addEventListener('DOMContentLoaded', () => {
     loadGamesList();
@@ -43,6 +45,24 @@ document.addEventListener('DOMContentLoaded', () => {
                 reviewBoard.showEstimate = showTerritoryOverlay;
                 reviewBoard.draw();
             }
+        });
+    }
+
+    // The considered-moves overlay: one search per position, on demand.
+    const btnConsidered = document.getElementById('btn-considered');
+    if (btnConsidered) {
+        const syncConsideredBtn = () => {
+            btnConsidered.classList.toggle('active', showConsidered);
+            btnConsidered.textContent = showConsidered ? '👁 Considered' : '🚫 Considered';
+        };
+        syncConsideredBtn();
+        btnConsidered.addEventListener('click', () => {
+            showConsidered = !showConsidered;
+            syncConsideredBtn();
+            if (!reviewBoard) return;
+            reviewBoard.showAnalysis = showConsidered;
+            if (showConsidered) refreshConsidered();
+            else reviewBoard.setAnalysis(null);
         });
     }
 
@@ -899,6 +919,7 @@ async function loadGame(filename) {
         const size = data.board_size || 9;
 
         reviewBoard = new GoBoardRenderer(canvas, size, null, { enableHover: false });
+        reviewBoard.showAnalysis = showConsidered;
 
         // Informative Game Title & Meta
         let titleText = '';
@@ -1228,6 +1249,40 @@ function highlightWinrateMove(index) {
     }
 }
 
+/**
+ * Ask the model what it would consider at the position now on the board.
+ *
+ * One search per position, on demand: searching the whole game up front would
+ * cost minutes on a long record, and only one position is ever on screen.
+ */
+async function refreshConsidered() {
+    if (!showConsidered || !reviewBoard || !currentGameData) return;
+
+    const forIndex = currentMoveIndex;
+    const token = ++consideredToken;
+    const encodedPath = currentGameData.filename.split('/').map(encodeURIComponent).join('/');
+    const owner = new URLSearchParams(window.location.search).get('model');
+    const ownerParam = owner ? `?model=${encodeURIComponent(owner)}` : '';
+
+    try {
+        const res = await fetch(
+            `/training/api/games/${encodedPath}/considered${ownerParam}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ move_number: forIndex }),
+            });
+        if (!res.ok) return;
+        const data = await res.json();
+        // Stale: the reviewer has stepped on since this search was asked for.
+        if (token !== consideredToken || forIndex !== currentMoveIndex) return;
+        if (!showConsidered || !reviewBoard) return;
+        reviewBoard.showAnalysis = true;
+        reviewBoard.setAnalysis(data.moves || []);
+    } catch (err) {
+        /* transient — the next step re-asks */
+    }
+}
+
 /** Render the always-visible territory estimate for the current position. */
 function updateTerritoryPanel(est) {
     const panel = document.getElementById('territory-panel');
@@ -1280,7 +1335,14 @@ function jumpToMove(index) {
     reviewBoard.showEstimate = showTerritoryOverlay;
     updateTerritoryPanel(reviewBoard.computeTerritory(currentGameData.komi || 6.5));
 
+    // The overlay belongs to the position it was computed for — clear it now
+    // and re-ask for the position just stepped to.
+    reviewBoard.showAnalysis = showConsidered;
+    reviewBoard.setAnalysis(null);
+
     reviewBoard.draw();
+
+    if (showConsidered) refreshConsidered();
 
     highlightWinrateMove(currentMoveIndex);
 

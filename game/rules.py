@@ -11,17 +11,38 @@ KEY RULES:
    with 0 liberties AND you don't capture anything, the move is illegal.
 4. Ko rule: you cannot recreate the immediately previous board state.
    (Prevents infinite capture-recapture loops.)
-5. Superko: positional superko — you cannot recreate ANY previous board state.
-   (Stricter than simple ko; prevents longer loops.)
+5. Superko: SITUATIONAL superko — you cannot recreate any previous
+   (board state, player to move) pair. (Prevents longer loops.)
 
-IMPORTANT: The ko rule here follows the "positional superko" variant used in
-Chinese rules and most computer Go implementations. Simple ko (only checking
-the last position) is a subset of this.
+IMPORTANT: The ko rule here follows the "situational superko" variant, which is
+what the Chinese ruleset on online-go.com enforces. The difference from
+POSITIONAL superko is not academic: a position can legitimately repeat with the
+other player to move — e.g. Black captures two stones, White recaptures one and
+the board happens to match a position from two moves ago. Positional superko
+called that illegal, so a bot playing on OGS saw the opponent make a move our
+board refused, and the two games diverged mid-match (game 89823532, move 58).
+
+Superko keys are therefore (board hash, player to move), produced by
+`situational_key()`. Simple ko (only checking the last position) is a subset.
 """
 
 import numpy as np
 from typing import Optional, Tuple, List, Set, FrozenSet
 from game.board import Board, EMPTY, BLACK, WHITE, opponent
+
+
+# Side-to-move component of a superko key. Black is 0 so that a key for a
+# black-to-move position is just the board hash — which keeps stored hashes and
+# any caller that predates situational superko meaning the same thing.
+_SIDE_TO_MOVE_HASH = {BLACK: 0, WHITE: 0x9E3779B97F4A7C15}
+
+
+def situational_key(board_hash: int, player_to_move: int) -> int:
+    """
+    The superko key for a position: which stones are where AND whose turn it is.
+    Sets of these are what `board_history_hashes` holds everywhere below.
+    """
+    return board_hash ^ _SIDE_TO_MOVE_HASH[player_to_move]
 
 
 class MoveResult:
@@ -207,7 +228,10 @@ def simulate_move(board: Board, color: int, row: int, col: int,
         new_hash ^= zobrist[(cr * size + cc, opp)]
 
     # Rule 5: Superko — the resulting board must not repeat a previous state
-    if board_history_hashes is not None and new_hash in board_history_hashes:
+    # WITH THE SAME PLAYER TO MOVE. See the module docstring: the same stones
+    # with the other player on move is a different situation and is legal.
+    if board_history_hashes is not None and \
+            situational_key(new_hash, opp) in board_history_hashes:
         return MoveSimulation(
             False, "Superko violation: this board position has occurred before")
 
