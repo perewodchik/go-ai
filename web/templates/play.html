@@ -172,6 +172,13 @@
                     <input type="checkbox" id="toggle-estimate">
                     <span class="toggle-slider"></span>
                 </label>
+                <label class="toggle easy-only" id="considered-toggle-row" for="toggle-considered" title="Show the moves the bot is considering for this position — bigger circle = more likely. Hover one for its percentage." hidden>
+                    <span class="toggle-label-wrap">
+                        <span class="toggle-text">Considered Moves</span>
+                    </span>
+                    <input type="checkbox" id="toggle-considered">
+                    <span class="toggle-slider"></span>
+                </label>
                 <label class="toggle easy-only" id="winrate-toggle-row" for="toggle-winrate" title="Show real-time win rate curve" hidden>
                     <span class="toggle-label-wrap">
                         <span class="toggle-text">Live Win Rate</span>
@@ -345,6 +352,11 @@
                 <label class="toggle" for="match-toggle-estimate" title="Show real-time estimated board territory overlay">
                     <span class="toggle-label-wrap"><span class="toggle-text">Territory Estimation</span></span>
                     <input type="checkbox" id="match-toggle-estimate">
+                    <span class="toggle-slider"></span>
+                </label>
+                <label class="toggle" for="match-toggle-considered" title="Show what the side to move is considering — bigger circle = more likely. Hover one for its percentage. Needs a move delay to be visible.">
+                    <span class="toggle-label-wrap"><span class="toggle-text">Considered Moves</span></span>
+                    <input type="checkbox" id="match-toggle-considered">
                     <span class="toggle-slider"></span>
                 </label>
                 <label class="toggle" for="match-toggle-winrate" title="Show the live win-rate curve">

@@ -36,7 +36,10 @@ class GameState:
         ko_point: Current ko restriction, or None.
         passes: Number of consecutive passes (2 = game over).
         prisoners: Dict {BLACK: n, WHITE: n} — stones each player has captured.
-        board_hash_history: Set of all board hashes seen (for superko).
+        board_hash_history: Set of all superko keys seen — (board hash, player
+            to move) pairs folded into one int by rules.situational_key(). The
+            player matters: the same stones with the other side on move is a
+            legal, different situation (see game/rules.py).
         is_over: Whether the game has ended.
         winner: Winner color or None (if not yet determined).
         resign_color: Color that resigned, or None.
@@ -64,7 +67,9 @@ class GameState:
         self.ko_point: Optional[Tuple[int, int]] = None
         self.passes = 0
         self.prisoners = {BLACK: 0, WHITE: 0}  # Stones captured BY each player
-        self.board_hash_history: set = {self.board.board_hash}
+        self.board_hash_history: set = {
+            rules.situational_key(self.board.board_hash, self.current_player)
+        }
         self.is_over = False
         self.winner: Optional[int] = None
         self.resign_color: Optional[int] = None
@@ -150,11 +155,13 @@ class GameState:
         # Reset pass counter (a stone move breaks the pass chain)
         self.passes = 0
         
-        # Record board hash for superko
-        self.board_hash_history.add(self.board.board_hash)
-        
         # Switch player
         self.current_player = opponent(self.current_player)
+
+        # Record the superko key — the position AND whose turn it now is
+        self.board_hash_history.add(
+            rules.situational_key(self.board.board_hash, self.current_player)
+        )
         
         return True
     

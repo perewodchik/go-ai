@@ -921,6 +921,24 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 
 .toggle[hidden] { display: none; }
 
+/* Percentage readout for the considered-moves overlay (see board.js). Fixed
+   to the viewport so it is never clipped by the board's own container, and
+   click-through so it cannot swallow a move. */
+.board-analysis-tooltip {
+    position: fixed;
+    display: none;
+    z-index: 1000;
+    pointer-events: none;
+    padding: 0.3rem 0.5rem;
+    border-radius: var(--radius-sm);
+    background: rgba(12, 14, 18, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: #f2f4f8;
+    font-size: 0.78rem;
+    white-space: nowrap;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+
 .toggle {
     display: flex;
     align-items: center;

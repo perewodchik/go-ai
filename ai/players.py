@@ -37,6 +37,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, Any, Callable
 
 from game.game_state import GameState, MOVE_PASS, MOVE_RESIGN
+from ai.analysis import top_moves
 from ai.mercy_rule import MercyRule
 from ai.mcts import MCTS
 from ai.random_bot import RandomBot
@@ -112,6 +113,16 @@ class Player(ABC):
 
     def game_finished(self, state: GameState, winner: Optional[int]) -> None:
         """Called once the game is over (or was abandoned)."""
+
+    def considered_moves(self) -> Optional[list]:
+        """
+        The move preferences behind the last `select_move`, for the spectator
+        overlay, or None if this player has none to report.
+
+        Only a searching player can answer: a random bot has no preferences,
+        and a remote engine's are its own business.
+        """
+        return None
 
     def cancel(self) -> None:
         """
@@ -213,14 +224,25 @@ class ModelPlayer(Player):
             device=device,
             restrict_eye_fill=restrict_eye_fill,
         )
+        self._last_policy = None
 
     def game_started(self, state: GameState, color: int) -> None:
+        self._last_policy = None
         if self.mercy:
             self.mercy.reset()
 
+    def considered_moves(self) -> Optional[list]:
+        if self._last_policy is None:
+            return None
+        return top_moves(self._last_policy, self.board_size)
+
     def select_move(self, state: GameState) -> Tuple[int, int]:
         # add_noise=False: this is competitive play, not data generation.
-        action, _ = self.mcts.search(state, temperature=self.temperature, add_noise=False)
+        action, policy = self.mcts.search(state, temperature=self.temperature, add_noise=False)
+        # Keep the distribution the move came out of: the spectator overlay
+        # draws it, and taking it from the search that already ran means
+        # watching a match costs no extra thinking.
+        self._last_policy = policy
 
         # The search that produced this move also produced the evidence for
         # giving up on it, so the check goes here rather than in the caller.

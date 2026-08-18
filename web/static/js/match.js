@@ -24,6 +24,7 @@
     let matchChart = null;
     let showEstimate = false;
     let showWinRate = true;
+    let showConsidered = false;
     let lastStatus = null;
     // Last snapshot painted — a rematch is rebuilt from it, so a match picked
     // up from the launcher can be replayed without the original request.
@@ -353,6 +354,7 @@
 
         // Spectator board: no click handler, so no hover preview either.
         matchBoard = new GoBoardRenderer(el('match-board'), snapshot.board_size, null);
+        matchBoard.showAnalysis = showConsidered;
         if (matchChart) {
             matchChart.destroy();
             matchChart = null;
@@ -514,6 +516,7 @@
 
         if (snapshot.state && matchBoard) {
             matchBoard.updateState(snapshot.state);
+            renderConsidered(snapshot);
             el('match-move-counter').textContent = `Move ${snapshot.state.move_number}`;
             const prisoners = snapshot.state.prisoners || {};
             el('match-black-captures').textContent = `Captured: ${prisoners['1'] || 0}`;
@@ -781,6 +784,40 @@
         } catch (err) {
             /* transient */
         }
+    }
+
+    // ---- Considered moves ------------------------------------------------
+
+    el('match-toggle-considered')?.addEventListener('change', e => {
+        showConsidered = e.target.checked;
+        if (!matchBoard) return;
+        matchBoard.showAnalysis = showConsidered;
+        if (!showConsidered) matchBoard.setAnalysis(null);
+        else if (lastSnapshot) renderConsidered(lastSnapshot);
+    });
+
+    /**
+     * Draw the shortlist the server publishes between a player's search and
+     * its move — costs no extra thinking, since it comes from the search that
+     * chose the move.
+     *
+     * It belongs to ONE position, so it is drawn only while the board still
+     * shows that position: with no move delay the server has usually applied
+     * the move before the next poll, and nothing is drawn rather than the
+     * previous position's circles being painted over the new one.
+     */
+    function renderConsidered(snapshot) {
+        if (!matchBoard) return;
+        matchBoard.showAnalysis = showConsidered;
+        if (!showConsidered) return;
+
+        const considered = snapshot.considered;
+        const current = snapshot.state ? snapshot.state.move_number : null;
+        if (!considered || considered.move_number !== current) {
+            matchBoard.setAnalysis(null);
+            return;
+        }
+        matchBoard.setAnalysis(considered.moves || []);
     }
 
     // ---- Win-rate curve --------------------------------------------------

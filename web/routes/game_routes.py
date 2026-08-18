@@ -23,6 +23,7 @@ from game.game_state import GameState, MOVE_PASS, MOVE_RESIGN
 from game.board import BLACK, WHITE
 from game.scoring.base import get_scorer
 from game.scoring.estimator import ScoreEstimator
+from ai.analysis import analyze_state
 from ai.game_store import save_human_game
 from ai.mcts import MCTS
 from ai.mercy_rule import MercyRule
@@ -404,6 +405,35 @@ def suggest_move():
             top_moves.append({'move': [int(r), int(c)], 'probability': float(policy[idx])})
 
     return jsonify({'suggestion': suggestion, 'top_moves': top_moves})
+
+
+@game_bp.route('/api/game/considered', methods=['POST'])
+def considered_moves():
+    """
+    The bot's move preferences for the position on the board (easy mode only).
+
+    This is the same search the bot runs to move, reported instead of played:
+    the visit share of its best handful of moves, which the client draws as the
+    considered-moves heatmap. Restricted to easy mode for the same reason
+    suggestions and the win-rate curve are — hard mode gets no assistance.
+    """
+    data = request.get_json() or {}
+    game_id = data.get('game_id')
+
+    if game_id not in game_sessions:
+        return jsonify({'error': 'Game not found'}), 404
+
+    sess = game_sessions[game_id]
+    if sess['mode'] != 'easy':
+        return jsonify({'error': 'Analysis only available in easy mode'}), 403
+    if sess['network'] is None:
+        return jsonify({'error': 'Model not loaded'}), 400
+
+    state = sess['state']
+    if state.is_over:
+        return jsonify({'move_number': state.move_number, 'moves': []})
+
+    return jsonify(analyze_state(_session_mcts(sess), state))
 
 
 @game_bp.route('/api/game/estimate', methods=['POST'])

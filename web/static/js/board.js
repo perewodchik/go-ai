@@ -40,6 +40,15 @@ class GoBoardRenderer {
         this.showEstimate = false;
         this.suggestedMove = null;  // {row, col} for move suggestion
 
+        // Considered-moves overlay: the search's own shortlist for the
+        // position on the board, as [{move: [row, col] | 'pass', probability}].
+        this.analysisMoves = null;
+        this.showAnalysis = false;
+        this.analysisHover = null;  // entry under the cursor, for the tooltip
+        this.pointerPos = null;     // {row, col} under the cursor, hover preview or not
+        this._pointerXY = null;     // last cursor viewport coords, for the tooltip
+        this._tooltip = null;
+
         this._initGrid();
         this.resize();
         this._bindEvents();
@@ -98,21 +107,39 @@ class GoBoardRenderer {
     }
 
     _bindEvents() {
+        // Bound unconditionally: a board with no hover PREVIEW (review, the
+        // match spectator) still needs the pointer for the considered-moves
+        // tooltip.
         this.canvas.addEventListener('mousemove', (e) => {
-            if (!this.enableHover) return;
             const pos = this._canvasToBoard(e.clientX, e.clientY);
-            if (pos && (this.hoverPos?.row !== pos.row || this.hoverPos?.col !== pos.col)) {
+            this.pointerPos = pos;
+            this._pointerXY = { x: e.clientX, y: e.clientY };
+            let dirty = false;
+
+            if (this.enableHover &&
+                (this.hoverPos?.row !== pos?.row || this.hoverPos?.col !== pos?.col)) {
                 this.hoverPos = pos;
-                this.draw();
+                dirty = true;
             }
+
+            const entry = this._analysisAt(pos);
+            if (entry !== this.analysisHover) {
+                this.analysisHover = entry;
+                dirty = true;
+            }
+            this._syncTooltip(e.clientX, e.clientY);
+
+            if (dirty) this.draw();
         });
 
         this.canvas.addEventListener('mouseleave', () => {
-            if (!this.enableHover) return;
-            if (this.hoverPos !== null) {
-                this.hoverPos = null;
-                this.draw();
-            }
+            const dirty = this.hoverPos !== null || this.analysisHover !== null;
+            this.hoverPos = null;
+            this.pointerPos = null;
+            this._pointerXY = null;
+            this.analysisHover = null;
+            this._syncTooltip();
+            if (dirty) this.draw();
         });
 
         this.canvas.addEventListener('click', (e) => {
@@ -171,6 +198,31 @@ class GoBoardRenderer {
         }
 
         this.resize();
+    }
+
+    /**
+     * Set the considered-moves overlay.
+     *
+     * @param {Array|null} moves - [{move: [row, col] | 'pass', probability}],
+     *                             strongest first. Pass entries are dropped:
+     *                             a pass has no point to draw on.
+     */
+    setAnalysis(moves) {
+        this.analysisMoves = (moves || []).filter(
+            m => Array.isArray(m.move) && m.probability > 0);
+        if (!this.analysisMoves.length) this.analysisMoves = null;
+        // The entry under the cursor may no longer exist (or may now carry a
+        // different number) — drop it rather than leave a stale tooltip up.
+        this.analysisHover = this._analysisAt(this.pointerPos);
+        this._syncTooltip();
+        this.draw();
+    }
+
+    /** The overlay entry at a board position, or null. */
+    _analysisAt(pos) {
+        if (!pos || !this.showAnalysis || !this.analysisMoves) return null;
+        return this.analysisMoves.find(
+            m => m.move[0] === pos.row && m.move[1] === pos.col) || null;
     }
 
     /** Set territory estimation overlay data. */
@@ -334,10 +386,93 @@ class GoBoardRenderer {
             this._drawSuggestion(ctx, this.suggestedMove.row, this.suggestedMove.col);
         }
 
-        // Hover preview
+        // Hover preview. Drawn BEFORE the considered-moves overlay so the
+        // ghost stone never hides the circle (and its percentage) underneath
+        // it — hovering a considered point is exactly the case where both are
+        // on the same intersection.
         if (this.enableHover && this.hoverPos && this.grid[this.hoverPos.row]?.[this.hoverPos.col] === 0) {
             this._drawHoverPreview(ctx, this.hoverPos.row, this.hoverPos.col);
         }
+
+        // Considered-moves overlay
+        if (this.showAnalysis && this.analysisMoves) {
+            this._drawAnalysis(ctx);
+        }
+    }
+
+    /**
+     * The search's shortlist: one translucent circle per move, sized by how
+     * often the bot would play it.
+     *
+     * Area — not radius — tracks the probability, so a move played twice as
+     * often looks twice as big rather than four times. The floor keeps a 2%
+     * move visible; the top move is outlined so the best point reads at a
+     * glance without a legend.
+     */
+    _drawAnalysis(ctx) {
+        const best = this.analysisMoves[0]?.probability || 1;
+
+        for (let i = this.analysisMoves.length - 1; i >= 0; i--) {
+            const entry = this.analysisMoves[i];
+            const [row, col] = entry.move;
+            if (this.grid[row]?.[col] !== 0) continue;   // already occupied
+
+            const share = Math.min(1, entry.probability / best);
+            const r = this.stoneRadius * (0.3 + 0.7 * Math.sqrt(share));
+            const { x, y } = this._boardToCanvas(row, col);
+            const hovered = entry === this.analysisHover;
+
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            // Warm for the strongest, cool for the also-rans.
+            const hue = 190 - 150 * share;
+            ctx.fillStyle = `hsla(${hue}, 85%, 50%, ${hovered ? 0.75 : 0.28 + 0.32 * share})`;
+            ctx.fill();
+
+            if (i === 0 || hovered) {
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.strokeStyle = `hsla(${hue}, 90%, 30%, 0.9)`;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+    }
+
+    /** Position (and fill, or hide) the percentage tooltip. */
+    _syncTooltip(clientX = null, clientY = null) {
+        const entry = this.analysisHover;
+        if (!entry) {
+            if (this._tooltip) this._tooltip.style.display = 'none';
+            return;
+        }
+
+        if (!this._tooltip) {
+            const el = document.createElement('div');
+            el.className = 'board-analysis-tooltip';
+            document.body.appendChild(el);
+            this._tooltip = el;
+        }
+
+        const letters = 'ABCDEFGHJKLMNOPQRST';
+        const [row, col] = entry.move;
+        const point = `${letters[col]}${this.boardSize - row}`;
+        const pct = entry.probability * 100;
+        this._tooltip.textContent =
+            `${point} · ${pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)}% of the time`;
+
+        const x = clientX ?? this._pointerXY?.x;
+        const y = clientY ?? this._pointerXY?.y;
+        if (x == null) {
+            this._tooltip.style.display = 'none';
+            return;
+        }
+        this._tooltip.style.display = 'block';
+        // Flip to the left of the cursor rather than run off the viewport.
+        const width = this._tooltip.offsetWidth;
+        const left = (x + 14 + width > window.innerWidth) ? x - 14 - width : x + 14;
+        this._tooltip.style.left = `${Math.max(4, left)}px`;
+        this._tooltip.style.top = `${Math.max(4, y - 34)}px`;
     }
 
     _drawStone(ctx, row, col, color) {

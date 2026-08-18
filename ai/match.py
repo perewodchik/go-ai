@@ -165,6 +165,7 @@ class MatchRunner:
         self._last_move: Optional[dict] = None
         self._win_rates: List[float] = []
         self._scores = {'black': 0.0, 'white': 0.0}
+        self._considered: Optional[dict] = None
         self._version = 0
 
         # Whichever side has a network provides the win-rate evaluation. Using
@@ -240,6 +241,11 @@ class MatchRunner:
                 'elapsed': round(elapsed, 1),
                 'state': state_dict,
                 'last_move': self._last_move,
+                # What the side to move is thinking about, published between
+                # its search and its move. Carries the move number it belongs
+                # to so a client that polls late does not paint a stale
+                # opinion over a newer position.
+                'considered': self._considered,
                 'win_rates': list(self._win_rates),
                 'scores': dict(self._scores),
                 'colors': dict(self._current_colors),
@@ -362,6 +368,7 @@ class MatchRunner:
             self._state = state
             self._current_colors = {'a': color_a, 'b': color_b}
             self._last_move = None
+            self._considered = None
             self._win_rates = []
             self._scores = {'black': 0.0, 'white': 0.0}
 
@@ -385,6 +392,15 @@ class MatchRunner:
             mover = state.current_player
             player = black if mover == BLACK else white
             action = player.select_move(state)
+
+            # Show the search's own shortlist on the position it was thinking
+            # about, then wait out the move delay THERE rather than after the
+            # move. The pace of the match is unchanged — the pause simply lands
+            # where there is something to look at.
+            self._note_considered(player, state, move_num)
+            self._publish()
+            if self.config.move_delay > 0:
+                time.sleep(self.config.move_delay)
 
             if tuple(action) == MOVE_RESIGN:
                 state.play_resign()
@@ -418,11 +434,9 @@ class MatchRunner:
                     'player': 'a' if player is self.player_a else 'b',
                     'player_name': player.name,
                 }
+                self._considered = None
             self._record_position(state)
             self._publish()
-
-            if self.config.move_delay > 0:
-                time.sleep(self.config.move_delay)
 
         # Ran out of moves without either side ending it — close it out the way
         # the eval matches do, so the position still gets scored.
@@ -438,6 +452,28 @@ class MatchRunner:
 
         self._finish_game(game_idx, state, move_list, color_a, color_b,
                           black, white, time.time() - start)
+
+    def _note_considered(self, player: Player, state: GameState, move_num: int) -> None:
+        """
+        Publish the shortlist behind the move `player` has just chosen.
+
+        Taken from the search that already ran, so the spectator overlay costs
+        nothing to keep on. A player with no opinion to report (random bot,
+        remote engine) simply clears it.
+        """
+        try:
+            moves = player.considered_moves()
+        except Exception:
+            moves = None
+        with self._lock:
+            self._considered = None if not moves else {
+                'move_num': move_num,
+                'move_number': state.move_number,
+                'to_play': int(state.current_player),
+                'player_name': player.name,
+                'slot': 'a' if player is self.player_a else 'b',
+                'moves': moves,
+            }
 
     def _wait_while_paused(self) -> bool:
         """Block while paused. Returns True if the match should stop."""
